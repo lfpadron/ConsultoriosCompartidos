@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="integration-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#integration-content" hx-select="#integration-content" hx-swap="outerHTML" hx-push-url="true">
+    <p class="text-uppercase text-secondary small fw-semibold mb-2">Acceso simulado</p>
+    <h1 class="h4 mb-3">Expirar credenciales vencidas</h1>
+    <p class="text-secondary">Se marcarán como expiradas las credenciales activas cuya ventana de validez ya terminó.</p>
+    <form method="post">
+      {% csrf_token %}
+      <div class="d-flex flex-wrap gap-2">
+        <button class="btn btn-primary" type="submit">
+          <i class="bi bi-hourglass-bottom me-1"></i>
+          Expirar vencidas
+        </button>
+        <a class="btn btn-outline-secondary" href="{% url 'access_credentials' %}">
+          Cancelar
+        </a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

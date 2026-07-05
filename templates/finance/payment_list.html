@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="finance-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#finance-content" hx-select="#finance-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="mb-4">
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Finanzas</p>
+        <h1 class="h4 mb-0">Pagos</h1>
+      </div>
+
+      <form method="get" class="row g-3 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>
+          {{ filter_form.q }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.status.id_for_label }}">{{ filter_form.status.label }}</label>
+          {{ filter_form.status }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.clinic.id_for_label }}">{{ filter_form.clinic.label }}</label>
+          {{ filter_form.clinic }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.owner.id_for_label }}">{{ filter_form.owner.label }}</label>
+          {{ filter_form.owner }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.room.id_for_label }}">{{ filter_form.room.label }}</label>
+          {{ filter_form.room }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.tenant_doctor.id_for_label }}">{{ filter_form.tenant_doctor.label }}</label>
+          {{ filter_form.tenant_doctor }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.date_from.id_for_label }}">{{ filter_form.date_from.label }}</label>
+          {{ filter_form.date_from }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.date_to.id_for_label }}">{{ filter_form.date_to.label }}</label>
+          {{ filter_form.date_to }}
+        </div>
+        <div class="col-12 col-xl-6">
+          {% include "partials/weekday_filter.html" with field=filter_form.weekdays %}
+        </div>
+        <div class="col-md-2 d-grid">
+          <button class="btn btn-outline-secondary" type="submit">
+            <i class="bi bi-funnel me-1"></i>
+            Filtrar
+          </button>
+        </div>
+        <div class="col-md-2 d-grid">
+          <a class="btn btn-outline-secondary" href="{% url 'payments' %}">
+            <i class="bi bi-x-lg me-1"></i>
+            Limpiar
+          </a>
+        </div>
+      </form>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Reservación</th>
+              <th scope="col">Médico</th>
+              <th scope="col">Fecha pago</th>
+              <th scope="col">Importe</th>
+              <th scope="col">Método</th>
+              <th scope="col">Estado</th>
+              <th scope="col" class="text-end">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for payment in payments %}
+              <tr>
+                <td>{{ payment.reservation }}</td>
+                <td>{{ payment.tenant_doctor }}</td>
+                <td>{{ payment.payment_date|date:"d/m/Y" }}</td>
+                <td>{{ payment.amount }} {{ payment.currency }}</td>
+                <td>{{ payment.get_method_display }}</td>
+                <td><span class="badge text-bg-secondary">{{ payment.get_status_display }}</span></td>
+                <td class="text-end">
+                  <a class="btn btn-sm btn-outline-secondary" href="{% url 'payment_detail' payment.pk %}">
+                    <i class="bi bi-eye me-1"></i>
+                    Ver
+                  </a>
+                </td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="7" class="text-center text-secondary py-5">Sin pagos registrados.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/pagination.html" %}
+    </div>
+  </section>
+{% endblock %}

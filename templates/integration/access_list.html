@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <section id="integration-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#integration-content" hx-select="#integration-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Integraciones</p>
+          <h1 class="h4 mb-0">Accesos simulados</h1>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'access_credentials_expire' %}">
+          <i class="bi bi-hourglass-bottom me-1"></i>
+          Expirar vencidas
+        </a>
+      </div>
+
+      <form method="get" class="row g-2 align-items-end mt-3">
+        <div class="col-md-5 col-lg-4">
+          <label class="form-label" for="access-search">Buscar</label>
+          <input id="access-search" class="form-control" type="search" name="q" value="{{ search_query }}" placeholder="Código, reservación, médico o consultorio">
+        </div>
+        <div class="col-md-auto d-grid">
+          <button class="btn btn-outline-secondary" type="submit">
+            <i class="bi bi-search me-1"></i>
+            Buscar
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Reservación</th>
+              <th scope="col">Médico</th>
+              <th scope="col">Consultorio</th>
+              <th scope="col">Estado</th>
+              <th scope="col">Código</th>
+              <th scope="col">Válida desde</th>
+              <th scope="col">Válida hasta</th>
+              <th scope="col" class="text-end">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for credential in credentials %}
+              <tr>
+                <td>{{ credential.reservation }}</td>
+                <td>{{ credential.tenant_doctor }}</td>
+                <td>{{ credential.room }}</td>
+                <td><span class="badge text-bg-secondary">{{ credential.get_status_display }}</span></td>
+                <td><code>{{ credential.simulated_code }}</code></td>
+                <td>{{ credential.valid_from|clinic_datetime:credential.room }}</td>
+                <td>{{ credential.valid_until|clinic_datetime:credential.room }}</td>
+                <td class="text-end">
+                  <a class="btn btn-sm btn-outline-secondary" href="{% url 'access_credential_detail' credential.pk %}">
+                    <i class="bi bi-eye me-1"></i>
+                    Ver
+                  </a>
+                </td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="8" class="text-center text-secondary py-5">Sin accesos simulados.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/pagination.html" %}
+    </div>
+  </section>
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="scheduling-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#scheduling-content" hx-select="#scheduling-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">{{ resource.singular_label }}</p>
+        <h1 class="h4 mb-0">{{ object }}</h1>
+      </div>
+      <div class="d-flex gap-2">
+        <a class="btn btn-outline-secondary" href="{% url resource.list_url_name %}">
+          <i class="bi bi-arrow-left me-1"></i>
+          Volver
+        </a>
+        <a class="btn btn-primary" href="{% url resource.update_url_name object.pk %}">
+          <i class="bi bi-pencil me-1"></i>
+          Editar
+        </a>
+      </div>
+    </div>
+
+    <dl class="row mb-0">
+      {% for label, value in field_rows %}
+        <dt class="col-sm-4 col-lg-3 text-secondary">{{ label }}</dt>
+        <dd class="col-sm-8 col-lg-9">{{ value|linebreaksbr }}</dd>
+      {% endfor %}
+    </dl>
+  </section>
+{% endblock %}

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Ingresar · Consultorios Compartidos{% endblock %}
+
+{% block content %}
+  <div class="row justify-content-center">
+    <div class="col-sm-10 col-md-7 col-lg-5 col-xl-4">
+      <section class="status-panel p-4">
+        <div class="mb-4">
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Acceso</p>
+          <h1 class="h4 mb-0">Ingresar</h1>
+        </div>
+        <form method="post" novalidate>
+          {% csrf_token %}
+          {% if form.non_field_errors %}
+            <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
+          {% endif %}
+          <div class="mb-3">
+            <label class="form-label" for="{{ form.username.id_for_label }}">{{ form.username.label }}</label>
+            {{ form.username }}
+            {{ form.username.errors }}
+          </div>
+          <div class="mb-3">
+            <label class="form-label" for="{{ form.password.id_for_label }}">{{ form.password.label }}</label>
+            {{ form.password }}
+            {{ form.password.errors }}
+          </div>
+          <button class="btn btn-primary w-100" type="submit">
+            <i class="bi bi-box-arrow-in-right me-1"></i>
+            Ingresar
+          </button>
+        </form>
+      </section>
+    </div>
+  </div>
+{% endblock %}

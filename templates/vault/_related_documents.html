@@ -1,0 +1,45 @@
+<div class="status-panel p-3 p-lg-4">
+  <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+    <h2 class="h5 mb-0">Documentos</h2>
+    <a class="btn btn-primary" href="{% url 'document_upload' %}?{{ document_upload_field }}={{ document_parent.pk }}">
+      <i class="bi bi-plus-lg me-1"></i>
+      Subir documento
+    </a>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th scope="col">Tipo</th>
+          <th scope="col">Versión</th>
+          <th scope="col">Estado</th>
+          <th scope="col">Hash</th>
+          <th scope="col">Fecha</th>
+          <th scope="col" class="text-end">Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for document in related_documents %}
+          <tr>
+            <td>{{ document.get_document_type_display }}</td>
+            <td>{{ document.version }}</td>
+            <td>{{ document.get_status_display }}</td>
+            <td><code>{{ document.sha256_hash|slice:":12" }}</code></td>
+            <td>{{ document.created_at|date:"d/m/Y H:i" }}</td>
+            <td class="text-end">
+              <a class="btn btn-sm btn-outline-secondary" href="{% url 'document_detail' document.pk %}">
+                <i class="bi bi-eye me-1"></i>
+                Ver
+              </a>
+            </td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="6" class="text-center text-secondary py-4">Sin documentos relacionados.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

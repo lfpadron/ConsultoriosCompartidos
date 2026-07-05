@@ -1,0 +1,33 @@
+{% load static %}
+<footer class="footer-compact border-top bg-white px-3 px-lg-4 small text-secondary">
+  <div class="footer-banner">
+    <span class="footer-banner-kicker">UNA MISIÓN EN PROGRESO DE:</span>
+    <img class="footer-banner-logo" src="{% static 'img/astrogato-texto-derecha-centrado.png' %}" alt="Astrogato Labs">
+    <span class="footer-timezone">
+      Zona horaria: America/Mexico_City
+      <span aria-hidden="true">·</span>
+      <time id="footer-clock" class="footer-clock" data-time-zone="America/Mexico_City">--:--:--</time>
+    </span>
+  </div>
+</footer>
+<script>
+  (() => {
+    const clock = document.getElementById("footer-clock");
+    if (!clock) return;
+
+    const formatter = new Intl.DateTimeFormat("es-MX", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZone: clock.dataset.timeZone || "America/Mexico_City",
+    });
+
+    const updateClock = () => {
+      clock.textContent = formatter.format(new Date());
+    };
+
+    updateClock();
+    window.setInterval(updateClock, 1000);
+  })();
+</script>

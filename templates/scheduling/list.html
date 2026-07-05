@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="scheduling-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#scheduling-content" hx-select="#scheduling-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Disponibilidad</p>
+        <h1 class="h4 mb-0">{{ resource.plural_label }}</h1>
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        <a class="btn btn-outline-secondary" href="{% url 'availability_exceptions' %}">
+          <i class="bi bi-calendar-x me-1"></i>
+          Excepciones
+        </a>
+        <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
+          <i class="bi bi-calendar3 me-1"></i>
+          Calendario
+        </a>
+        <a class="btn btn-primary" href="{% url resource.create_url_name %}">
+          <i class="bi bi-plus-lg me-1"></i>
+          Nuevo
+        </a>
+      </div>
+    </div>
+
+    <form method="get" class="row g-3 align-items-end mb-3">
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>
+        {{ filter_form.q }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.clinic.id_for_label }}">{{ filter_form.clinic.label }}</label>
+        {{ filter_form.clinic }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.owner.id_for_label }}">{{ filter_form.owner.label }}</label>
+        {{ filter_form.owner }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.room.id_for_label }}">{{ filter_form.room.label }}</label>
+        {{ filter_form.room }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.date_from.id_for_label }}">{{ filter_form.date_from.label }}</label>
+        {{ filter_form.date_from }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.date_to.id_for_label }}">{{ filter_form.date_to.label }}</label>
+        {{ filter_form.date_to }}
+      </div>
+      <div class="col-12 col-xl-6">
+        {% include "partials/weekday_filter.html" with field=filter_form.weekdays %}
+      </div>
+      <div class="col-md-2 d-grid">
+        <button class="btn btn-outline-secondary" type="submit">
+          <i class="bi bi-funnel me-1"></i>
+          Filtrar
+        </button>
+      </div>
+      <div class="col-md-2 d-grid">
+        <a class="btn btn-outline-secondary" href="{% url resource.list_url_name %}">
+          <i class="bi bi-x-lg me-1"></i>
+          Limpiar
+        </a>
+      </div>
+    </form>
+
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead>
+          <tr>
+            {% for label, field_path in resource.list_columns %}
+              <th scope="col">{{ label }}</th>
+            {% endfor %}
+            <th scope="col" class="text-end">Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              {% for cell in row.cells %}
+                <td>{{ cell }}</td>
+              {% endfor %}
+              <td class="text-end">
+                <div class="btn-group btn-group-sm" role="group" aria-label="Acciones">
+                  <a class="btn btn-outline-secondary" href="{% url resource.detail_url_name row.object.pk %}" title="Ver detalle">
+                    <i class="bi bi-eye"></i>
+                  </a>
+                  <a class="btn btn-outline-secondary" href="{% url resource.update_url_name row.object.pk %}" title="Editar">
+                    <i class="bi bi-pencil"></i>
+                  </a>
+                  <a class="btn btn-outline-danger" href="{% url resource.deactivate_url_name row.object.pk %}" title="Desactivar">
+                    <i class="bi bi-slash-circle"></i>
+                  </a>
+                </div>
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="{{ resource.list_columns|length|add:1 }}" class="text-center text-secondary py-5">
+                Sin registros.
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% include "partials/pagination.html" %}
+  </section>
+{% endblock %}

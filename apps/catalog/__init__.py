@@ -1,0 +1,1 @@
+"""Business catalog app."""

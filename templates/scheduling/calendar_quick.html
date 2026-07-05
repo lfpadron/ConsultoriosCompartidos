@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <section id="quick-calendar-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#quick-calendar-content" hx-select="#quick-calendar-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-4">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Calendario</p>
+          <h1 class="h4 mb-0">Vista rápida</h1>
+          <div class="small text-secondary">{{ date_from|date:"d/m/Y" }} - {{ date_to|date:"d/m/Y" }}</div>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
+          <i class="bi bi-calendar3 me-1"></i>
+          Calendario
+        </a>
+      </div>
+
+      <form method="get" class="row g-3 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.clinic.id_for_label }}">{{ form.clinic.label }}</label>
+          {{ form.clinic }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.owner.id_for_label }}">{{ form.owner.label }}</label>
+          {{ form.owner }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.room.id_for_label }}">{{ form.room.label }}</label>
+          {{ form.room }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.tenant_doctor.id_for_label }}">{{ form.tenant_doctor.label }}</label>
+          {{ form.tenant_doctor }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.date_from.id_for_label }}">{{ form.date_from.label }}</label>
+          {{ form.date_from }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.date_to.id_for_label }}">{{ form.date_to.label }}</label>
+          {{ form.date_to }}
+        </div>
+        <div class="col-12 col-xl-6">
+          {% include "partials/weekday_filter.html" with field=form.weekdays %}
+        </div>
+        {{ form.week }}
+        <div class="col-md-2 d-grid">
+          <button class="btn btn-primary" type="submit">
+            <i class="bi bi-funnel me-1"></i>
+            Filtrar
+          </button>
+        </div>
+        <div class="col-md-2 d-grid">
+          <a class="btn btn-outline-secondary" href="{% url 'calendar_quick' %}">
+            <i class="bi bi-x-lg me-1"></i>
+            Limpiar
+          </a>
+        </div>
+      </form>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column gap-3">
+        {% for week in weeks %}
+          <div>
+            <div class="small text-secondary mb-2">
+              Semana {{ week.week_start|date:"d/m/Y" }} - {{ week.week_end|date:"d/m/Y" }}
+            </div>
+            <div class="row g-2">
+              {% for day in week.days %}
+                <div class="col-6 col-sm-4 col-md-3 col-lg">
+                  <a class="d-flex flex-column align-items-center justify-content-center text-center text-decoration-none rounded-2 border p-2 h-100 {{ day.css_class }} {% if day.is_selected %}border-3{% endif %}" style="min-height: 86px;" href="{{ day.url }}" title="{{ day.label }}">
+                    <span class="small fw-semibold">{{ day.date|date:"D" }}</span>
+                    <span class="fs-5 fw-bold">{{ day.date|date:"d" }}</span>
+                    <i class="bi {{ day.icon }}"></i>
+                  </a>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% empty %}
+          <div class="text-secondary">Sin fechas para mostrar.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+        <div>
+          <h2 class="h5 mb-1">Detalle del {{ selected_date|date:"d/m/Y" }}</h2>
+          <div class="small text-secondary">Reservas, ocupaciones y disponibilidad calculada.</div>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Clínica</th>
+              <th>Consultorio</th>
+              <th>Horario</th>
+              <th>Estado</th>
+              <th>Médico</th>
+              <th>Detalle</th>
+              <th class="text-end">Acción</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in detail_rows %}
+              <tr>
+                <td>{{ row.room.clinic }}</td>
+                <td>{{ row.room.name }}</td>
+                <td>
+                  {% if row.start_time and row.end_time %}
+                    {{ row.start_time|clinic_time:row.room }} - {{ row.end_time|clinic_time:row.room }}
+                  {% else %}
+                    Sin horario
+                  {% endif %}
+                </td>
+                <td>{{ row.status }}</td>
+                <td>{{ row.tenant_doctor|default:"Sin médico" }}</td>
+                <td>{{ row.label }}</td>
+                <td class="text-end">
+                  {% if row.reservation_url %}
+                    <a class="btn btn-sm btn-primary" href="{{ row.reservation_url }}">
+                      <i class="bi bi-calendar-plus me-1"></i>
+                      Reservar
+                    </a>
+                  {% else %}
+                    <span class="text-secondary small">Sin acción</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="7" class="text-center text-secondary py-5">Sin detalles para esta fecha.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/pagination.html" %}
+    </div>
+  </section>
+{% endblock %}

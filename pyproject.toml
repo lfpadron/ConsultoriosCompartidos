@@ -1,0 +1,62 @@
+[project]
+name = "consultorios-compartidos"
+version = "0.1.0"
+description = "Base arquitectonica de Consultorios Compartidos para Astrogato Labs."
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "celery[redis]>=5.5,<6.0",
+    "django>=5.2,<5.3",
+    "django-environ>=0.12,<1.0",
+    "django-htmx>=1.23,<2.0",
+    "django-storages[boto3]>=1.14,<2.0",
+    "gunicorn>=23.0,<24.0",
+    "psycopg[binary]>=3.2,<4.0",
+    "redis>=6.0,<7.0",
+]
+
+[dependency-groups]
+dev = [
+    "black>=26.0,<27.0",
+    "django-stubs[compatible-mypy]>=5.2,<6.0",
+    "mypy>=1.17,<2.0",
+    "pre-commit>=4.0,<5.0",
+    "pytest>=8.4,<9.0",
+    "pytest-django>=4.11,<5.0",
+    "ruff>=0.12,<1.0",
+    "textual>=8.2.8",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py314"]
+extend-exclude = "/migrations/"
+
+[tool.django-stubs]
+django_settings_module = "config.settings"
+
+[tool.mypy]
+python_version = "3.14"
+plugins = ["mypy_django_plugin.main"]
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+exclude = ["migrations"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py", "*_test.py"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+extend-exclude = ["migrations"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "DJ"]
+ignore = ["DJ007"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["apps", "config"]

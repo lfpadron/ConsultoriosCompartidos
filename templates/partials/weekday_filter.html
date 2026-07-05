@@ -1,0 +1,12 @@
+<label class="form-label d-block">{{ field.label }}</label>
+<div class="weekday-filter" role="group" aria-label="{{ field.label }}">
+  {% for choice in field %}
+    <label class="weekday-filter-option" for="{{ choice.id_for_label }}">
+      {{ choice.tag }}
+      <span>{{ choice.choice_label }}</span>
+    </label>
+  {% endfor %}
+</div>
+{% for error in field.errors %}
+  <div class="invalid-feedback d-block">{{ error }}</div>
+{% endfor %}

@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="timeline-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#timeline-content" hx-select="#timeline-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">AstroTrace</p>
+          <h1 class="h4 mb-1">{{ page_title }}</h1>
+          {% if object_label %}
+            <div class="text-secondary">{{ object_label }}</div>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if filter_form %}
+        <form method="get" class="row g-3 align-items-end mt-3">
+          <div class="col-md-3">
+            <label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>
+            {{ filter_form.q }}
+          </div>
+          <div class="col-md-2">
+            <label class="form-label" for="{{ filter_form.date_from.id_for_label }}">{{ filter_form.date_from.label }}</label>
+            {{ filter_form.date_from }}
+          </div>
+          <div class="col-md-2">
+            <label class="form-label" for="{{ filter_form.date_to.id_for_label }}">{{ filter_form.date_to.label }}</label>
+            {{ filter_form.date_to }}
+          </div>
+          <div class="col-md-2">
+            <label class="form-label" for="{{ filter_form.level.id_for_label }}">{{ filter_form.level.label }}</label>
+            {{ filter_form.level }}
+          </div>
+          <div class="col-md-2">
+            <label class="form-label" for="{{ filter_form.module.id_for_label }}">{{ filter_form.module.label }}</label>
+            {{ filter_form.module }}
+          </div>
+          <div class="col-md-2">
+            <label class="form-label" for="{{ filter_form.action.id_for_label }}">{{ filter_form.action.label }}</label>
+            {{ filter_form.action }}
+          </div>
+          <div class="col-md-2">
+            <label class="form-label" for="{{ filter_form.user.id_for_label }}">{{ filter_form.user.label }}</label>
+            {{ filter_form.user }}
+          </div>
+          <div class="col-md-2 d-grid">
+            <button class="btn btn-outline-secondary" type="submit">
+              <i class="bi bi-funnel me-1"></i>
+              Filtrar
+            </button>
+          </div>
+          <div class="col-md-2 d-grid">
+            <a class="btn btn-outline-secondary" href="{% url 'timeline' %}">
+              <i class="bi bi-x-lg me-1"></i>
+              Limpiar
+            </a>
+          </div>
+        </form>
+      {% endif %}
+    </div>
+
+    <div class="d-flex flex-column gap-3">
+      {% for item in timeline_items %}
+        <article class="status-panel p-3 p-lg-4">
+          <div class="d-flex gap-3">
+            <div>
+              <span class="badge rounded-pill {{ item.badge_class }} p-3">
+                <i class="bi {{ item.icon }}"></i>
+              </span>
+            </div>
+            <div class="flex-grow-1">
+              <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-2">
+                <div>
+                  <div class="text-secondary small">{{ item.event.occurred_at|date:"d/m/Y H:i" }}</div>
+                  <h2 class="h5 mb-1">{{ item.title }}</h2>
+                  <p class="mb-0 text-secondary">{{ item.description }}</p>
+                </div>
+                <div class="d-flex flex-wrap align-items-start gap-2">
+                  <span class="badge {{ item.badge_class }}">{{ item.level }}</span>
+                  <span class="badge text-bg-light">{{ item.module }}</span>
+                  <span class="badge text-bg-light">{{ item.action }}</span>
+                </div>
+              </div>
+
+              <dl class="row small mb-3">
+                <dt class="col-sm-3 col-lg-2 text-secondary">Usuario</dt>
+                <dd class="col-sm-9 col-lg-10">{{ item.actor_label }}{% if item.actor_role %} · {{ item.actor_role }}{% endif %}</dd>
+                <dt class="col-sm-3 col-lg-2 text-secondary">Objeto</dt>
+                <dd class="col-sm-9 col-lg-10">{{ item.related_object }}</dd>
+              </dl>
+
+              <div class="d-flex flex-wrap gap-2">
+                <a class="btn btn-sm btn-outline-secondary" href="{% url 'timeline_event_detail' item.event.pk %}">
+                  <i class="bi bi-eye me-1"></i>
+                  Ver detalle
+                </a>
+              </div>
+            </div>
+          </div>
+        </article>
+      {% empty %}
+        <div class="status-panel p-4 text-center text-secondary">Sin eventos para mostrar.</div>
+      {% endfor %}
+    </div>
+
+    {% include "partials/pagination.html" %}
+  </section>
+{% endblock %}

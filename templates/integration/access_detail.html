@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <section id="integration-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#integration-content" hx-select="#integration-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Acceso simulado</p>
+          <h1 class="h4 mb-1"><code>{{ credential.simulated_code }}</code></h1>
+          <div class="text-secondary">{{ credential.get_status_display }}</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+          <a class="btn btn-outline-secondary" href="{% url 'access_credentials' %}">
+            <i class="bi bi-arrow-left me-1"></i>
+            Volver
+          </a>
+          <a class="btn btn-outline-primary" href="{% url 'access_credential_use' credential.pk %}">
+            <i class="bi bi-door-open me-1"></i>
+            Simular uso
+          </a>
+          <a class="btn btn-outline-danger" href="{% url 'access_credential_revoke' credential.pk %}">
+            <i class="bi bi-slash-circle me-1"></i>
+            Revocar
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Datos</h2>
+      <dl class="row mb-0">
+        <dt class="col-sm-4 col-lg-3 text-secondary">Reservación</dt>
+        <dd class="col-sm-8 col-lg-9">
+          <a href="{% url 'reservation_detail' credential.reservation.pk %}">{{ credential.reservation }}</a>
+        </dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Médico arrendatario</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.tenant_doctor }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Consultorio</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Código simulado</dt>
+        <dd class="col-sm-8 col-lg-9"><code>{{ credential.simulated_code }}</code></dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Válida desde</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.valid_from|clinic_datetime:credential.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Válida hasta</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.valid_until|clinic_datetime:credential.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Habilitada en</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.enabled_at|clinic_datetime:credential.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Usada en</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.used_at|clinic_datetime:credential.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Revocada en</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.revoked_at|clinic_datetime:credential.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Expirada en</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.expired_at|clinic_datetime:credential.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Notas</dt>
+        <dd class="col-sm-8 col-lg-9">{{ credential.notes|default:"Sin notas"|linebreaksbr }}</dd>
+      </dl>
+    </div>
+  </section>
+{% endblock %}

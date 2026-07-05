@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="timeline-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#timeline-content" hx-select="#timeline-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">AstroTrace</p>
+          <h1 class="h4 mb-1">{{ timeline_item.title }}</h1>
+          <div class="text-secondary">{{ event.occurred_at|date:"d/m/Y H:i" }}</div>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'timeline' %}">
+          <i class="bi bi-arrow-left me-1"></i>
+          Timeline
+        </a>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Resumen</h2>
+      <dl class="row mb-0">
+        <dt class="col-sm-4 col-lg-3 text-secondary">Nivel</dt>
+        <dd class="col-sm-8 col-lg-9"><span class="badge {{ timeline_item.badge_class }}">{{ timeline_item.level }}</span></dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Módulo</dt>
+        <dd class="col-sm-8 col-lg-9">{{ timeline_item.module }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Acción</dt>
+        <dd class="col-sm-8 col-lg-9">{{ timeline_item.action }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Usuario</dt>
+        <dd class="col-sm-8 col-lg-9">{{ timeline_item.actor_label }}{% if timeline_item.actor_role %} · {{ timeline_item.actor_role }}{% endif %}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Objeto</dt>
+        <dd class="col-sm-8 col-lg-9">{{ timeline_item.related_object }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Descripción</dt>
+        <dd class="col-sm-8 col-lg-9">{{ timeline_item.description }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Hash</dt>
+        <dd class="col-sm-8 col-lg-9">{% if timeline_item.hash_value %}<code>{{ timeline_item.hash_value }}</code>{% else %}Sin hash{% endif %}</dd>
+      </dl>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Datos Técnicos</h2>
+      <dl class="row mb-3">
+        <dt class="col-sm-4 col-lg-3 text-secondary">ID</dt>
+        <dd class="col-sm-8 col-lg-9"><code>{{ event.pk }}</code></dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Event type</dt>
+        <dd class="col-sm-8 col-lg-9"><code>{{ event.event_type }}</code></dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Objeto original</dt>
+        <dd class="col-sm-8 col-lg-9">{{ event.object_label }}</dd>
+      </dl>
+      <pre class="bg-light border rounded-2 p-3 mb-0"><code>{{ event.payload }}</code></pre>
+    </div>
+  </section>
+{% endblock %}

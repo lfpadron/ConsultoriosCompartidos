@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <section id="reservation-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#reservation-content" hx-select="#reservation-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Operación</p>
+        <h1 class="h4 mb-0">Reservaciones</h1>
+      </div>
+      <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
+        <i class="bi bi-calendar3 me-1"></i>
+        Calendario
+      </a>
+    </div>
+
+    <form method="get" class="row g-3 align-items-end mb-3">
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>
+        {{ filter_form.q }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.clinic.id_for_label }}">{{ filter_form.clinic.label }}</label>
+        {{ filter_form.clinic }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.owner.id_for_label }}">{{ filter_form.owner.label }}</label>
+        {{ filter_form.owner }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.room.id_for_label }}">{{ filter_form.room.label }}</label>
+        {{ filter_form.room }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.tenant_doctor.id_for_label }}">{{ filter_form.tenant_doctor.label }}</label>
+        {{ filter_form.tenant_doctor }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.date_from.id_for_label }}">{{ filter_form.date_from.label }}</label>
+        {{ filter_form.date_from }}
+      </div>
+      <div class="col-md-3">
+        <label class="form-label" for="{{ filter_form.date_to.id_for_label }}">{{ filter_form.date_to.label }}</label>
+        {{ filter_form.date_to }}
+      </div>
+      <div class="col-12 col-xl-6">
+        {% include "partials/weekday_filter.html" with field=filter_form.weekdays %}
+      </div>
+      <div class="col-md-auto d-grid">
+        <button class="btn btn-outline-secondary" type="submit">
+          <i class="bi bi-funnel me-1"></i>
+          Filtrar
+        </button>
+      </div>
+      <div class="col-md-auto d-grid">
+        <a class="btn btn-outline-secondary" href="{% url 'reservations' %}">
+          <i class="bi bi-x-lg me-1"></i>
+          Limpiar
+        </a>
+      </div>
+    </form>
+
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead>
+          <tr>
+            <th>Consultorio</th>
+            <th>Médico</th>
+            <th>Fecha</th>
+            <th>Horario</th>
+            <th>Estado</th>
+            <th class="text-end">Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for reservation in reservations %}
+            <tr>
+              <td>{{ reservation.room }}</td>
+              <td>{{ reservation.tenant_doctor }}</td>
+              <td>{{ reservation.date|date:"d/m/Y" }}</td>
+              <td>{{ reservation.start_time|clinic_time:reservation.room }} - {{ reservation.end_time|clinic_time:reservation.room }}</td>
+              <td><span class="badge text-bg-secondary">{{ reservation.get_status_display }}</span></td>
+              <td class="text-end">
+                <a class="btn btn-sm btn-outline-secondary" href="{% url 'reservation_detail' reservation.pk %}">
+                  <i class="bi bi-eye"></i>
+                </a>
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="6" class="text-center text-secondary py-5">Sin reservaciones.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% include "partials/pagination.html" %}
+  </section>
+{% endblock %}

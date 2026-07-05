@@ -1,0 +1,150 @@
+:root {
+  --cc-sidebar-width: 17rem;
+}
+
+body {
+  min-height: 100vh;
+  background: #f6f7f9;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-sidebar {
+  width: var(--cc-sidebar-width);
+  background: #16213a;
+}
+
+.app-sidebar .nav-link {
+  color: rgba(255, 255, 255, 0.78);
+  border-radius: 0.5rem;
+}
+
+.app-sidebar .nav-link:hover,
+.app-sidebar .nav-link:focus {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.app-sidebar .brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.5rem;
+  background: #2f80ed;
+  color: #fff;
+  font-weight: 700;
+}
+
+.app-content {
+  min-width: 0;
+}
+
+.status-panel {
+  border: 1px solid #dde3ea;
+  border-radius: 0.5rem;
+  background: #fff;
+}
+
+.metric-card {
+  border: 1px solid #dde3ea;
+  border-radius: 0.5rem;
+  background: #fff;
+}
+
+.footer-compact {
+  padding-top: 0.35rem;
+  padding-bottom: 0.35rem;
+}
+
+.footer-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+.footer-banner-kicker {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.footer-banner-logo {
+  width: min(10rem, 28vw);
+  max-height: 12mm;
+  object-fit: contain;
+}
+
+.footer-timezone {
+  text-align: right;
+}
+
+.footer-clock {
+  display: inline-block;
+  min-width: 4.75rem;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+.weekday-filter {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(4.4rem, 1fr));
+  gap: 0.55rem;
+  align-items: start;
+  overflow-x: auto;
+  padding: 0.05rem 0 0.15rem;
+}
+
+.weekday-filter-option {
+  display: flex;
+  min-width: 4.4rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  color: #08111a;
+  line-height: 1.15;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.weekday-filter-option input[type="checkbox"] {
+  margin: 0;
+}
+
+@media (min-width: 992px) {
+  .app-sidebar {
+    min-height: 100vh;
+    position: sticky;
+    top: 0;
+  }
+}
+
+@media (max-width: 767.98px) {
+  .footer-banner {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    text-align: center;
+  }
+
+  .footer-timezone {
+    text-align: center;
+  }
+
+  .footer-banner-logo {
+    width: min(9rem, 70vw);
+    max-height: 11mm;
+  }
+
+  .weekday-filter {
+    grid-template-columns: repeat(7, minmax(4rem, 1fr));
+  }
+
+  .weekday-filter-option {
+    min-width: 4rem;
+  }
+}

@@ -1,0 +1,12 @@
+{% if request.user.is_authenticated and page_title %}
+  <nav class="small mb-3" aria-label="Ruta">
+    <ol class="breadcrumb mb-0">
+      <li class="breadcrumb-item">
+        <a href="{% url 'dashboard' %}">Dashboard</a>
+      </li>
+      {% if request.path != "/" and request.path != "/dashboard/" %}
+        <li class="breadcrumb-item active" aria-current="page">{{ page_title }}</li>
+      {% endif %}
+    </ol>
+  </nav>
+{% endif %}

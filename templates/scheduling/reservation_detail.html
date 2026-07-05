@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <section id="reservation-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#reservation-content" hx-select="#reservation-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Reservación</p>
+          <h1 class="h4 mb-1">{{ reservation }}</h1>
+          <div class="text-secondary">{{ reservation.get_status_display }}</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+          <a class="btn btn-outline-secondary" href="{% url 'reservations' %}">
+            <i class="bi bi-arrow-left me-1"></i>
+            Volver
+          </a>
+          <a class="btn btn-outline-secondary" href="{% url 'reservation_timeline' reservation.pk %}">
+            <i class="bi bi-diagram-3 me-1"></i>
+            Timeline
+          </a>
+          <a class="btn btn-outline-primary" href="{% url 'reservation_confirm' reservation.pk %}">
+            <i class="bi bi-check2-circle me-1"></i>
+            Confirmar
+          </a>
+          <a class="btn btn-outline-danger" href="{% url 'reservation_cancel' reservation.pk %}">
+            <i class="bi bi-x-circle me-1"></i>
+            Cancelar
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Datos</h2>
+      <dl class="row mb-0">
+        <dt class="col-sm-4 col-lg-3 text-secondary">Consultorio</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Médico arrendatario</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation.tenant_doctor }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Fecha</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation.date|date:"d/m/Y" }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Horario</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation.start_time|clinic_time:reservation.room }} - {{ reservation.end_time|clinic_time:reservation.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Notas</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation.notes|default:"Sin notas"|linebreaksbr }}</dd>
+      </dl>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+        <div>
+          <h2 class="h5 mb-1">Acceso simulado</h2>
+          <div class="text-secondary">{{ access_status.status_label }}</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+          {% if access_status.can_provision %}
+            <a class="btn btn-primary" href="{% url 'access_provision' reservation.pk %}">
+              <i class="bi bi-key me-1"></i>
+              Habilitar acceso simulado
+            </a>
+          {% elif access_status.credential %}
+            <a class="btn btn-outline-secondary" href="{% url 'access_credential_detail' access_status.credential.pk %}">
+              <i class="bi bi-eye me-1"></i>
+              Ver acceso
+            </a>
+            <a class="btn btn-outline-primary" href="{% url 'access_credential_use' access_status.credential.pk %}">
+              <i class="bi bi-door-open me-1"></i>
+              Simular uso
+            </a>
+            <a class="btn btn-outline-danger" href="{% url 'access_credential_revoke' access_status.credential.pk %}">
+              <i class="bi bi-slash-circle me-1"></i>
+              Revocar acceso
+            </a>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if access_status.credential %}
+        <dl class="row mb-0">
+          <dt class="col-sm-4 col-lg-3 text-secondary">Código simulado</dt>
+          <dd class="col-sm-8 col-lg-9"><code>{{ access_status.credential.simulated_code }}</code></dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Ventana de validez</dt>
+          <dd class="col-sm-8 col-lg-9">
+            {{ access_status.credential.valid_from|clinic_datetime:reservation.room }}
+            -
+            {{ access_status.credential.valid_until|clinic_datetime:reservation.room }}
+          </dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Estado</dt>
+          <dd class="col-sm-8 col-lg-9">{{ access_status.credential.get_status_display }}</dd>
+        </dl>
+      {% else %}
+        <div class="text-secondary">Sin credencial de acceso simulada.</div>
+      {% endif %}
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Estado de Cuenta</h2>
+      {% if statement %}
+        <dl class="row mb-0">
+          <dt class="col-sm-4 col-lg-3 text-secondary">Versión</dt>
+          <dd class="col-sm-8 col-lg-9">{{ statement.version }}</dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Duración</dt>
+          <dd class="col-sm-8 col-lg-9">{{ statement.duration_hours }} horas</dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Regla tarifaria</dt>
+          <dd class="col-sm-8 col-lg-9">{{ statement.applied_rate_rule }}</dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Subtotal</dt>
+          <dd class="col-sm-8 col-lg-9">{{ statement.subtotal }} {{ statement.currency }}</dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Total médico</dt>
+          <dd class="col-sm-8 col-lg-9">{{ statement.total_doctor }} {{ statement.currency }}</dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Comisión plataforma</dt>
+          <dd class="col-sm-8 col-lg-9">{{ statement.platform_commission }} {{ statement.currency }}</dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Neto propietario</dt>
+          <dd class="col-sm-8 col-lg-9">{{ statement.owner_net }} {{ statement.currency }}</dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Explicación</dt>
+          <dd class="col-sm-8 col-lg-9">{{ statement.calculation_explanation }}</dd>
+          <dt class="col-sm-4 col-lg-3 text-secondary">Hash</dt>
+          <dd class="col-sm-8 col-lg-9"><code>{{ statement.calculation_hash|slice:":12" }}</code></dd>
+        </dl>
+      {% else %}
+        <div class="text-secondary">Sin estado de cuenta vigente.</div>
+      {% endif %}
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+        <h2 class="h5 mb-0">Pagos</h2>
+        <a class="btn btn-primary" href="{% url 'payment_register' reservation.pk %}">
+          <i class="bi bi-plus-lg me-1"></i>
+          Registrar pago
+        </a>
+      </div>
+
+      <div class="row g-3 mb-3">
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Total a pagar</div>
+            <div class="fs-5 fw-semibold">{{ payment_summary.total_to_pay }} {{ payment_summary.currency }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Total validado</div>
+            <div class="fs-5 fw-semibold">{{ payment_summary.total_validated }} {{ payment_summary.currency }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Saldo pendiente</div>
+            <div class="fs-5 fw-semibold">{{ payment_summary.pending_balance }} {{ payment_summary.currency }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Fecha</th>
+              <th scope="col">Importe</th>
+              <th scope="col">Método</th>
+              <th scope="col">Referencia</th>
+              <th scope="col">Estado</th>
+              <th scope="col" class="text-end">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for payment in payment_summary.payments %}
+              <tr>
+                <td>{{ payment.payment_date|date:"d/m/Y" }}</td>
+                <td>{{ payment.amount }} {{ payment.currency }}</td>
+                <td>{{ payment.get_method_display }}</td>
+                <td>{{ payment.reference|default:"Sin referencia" }}</td>
+                <td>{{ payment.get_status_display }}</td>
+                <td class="text-end">
+                  <a class="btn btn-sm btn-outline-secondary" href="{% url 'payment_detail' payment.pk %}">
+                    <i class="bi bi-eye me-1"></i>
+                    Ver
+                  </a>
+                </td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="6" class="text-center text-secondary py-4">Sin pagos registrados.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+        <h2 class="h5 mb-0">Liquidación</h2>
+        <div class="d-flex flex-wrap gap-2">
+          {% if settlement_summary.settlement %}
+            <a class="btn btn-outline-secondary" href="{% url 'settlement_detail' settlement_summary.settlement.pk %}">
+              <i class="bi bi-eye me-1"></i>
+              Ver liquidación
+            </a>
+            {% if settlement_summary.settlement.status != "pagada" and settlement_summary.settlement.status != "cancelada" %}
+              <a class="btn btn-outline-primary" href="{% url 'settlement_paid' settlement_summary.settlement.pk %}">
+                <i class="bi bi-bank me-1"></i>
+                Marcar como pagada
+              </a>
+              <a class="btn btn-outline-danger" href="{% url 'settlement_cancel' settlement_summary.settlement.pk %}">
+                <i class="bi bi-slash-circle me-1"></i>
+                Cancelar liquidación
+              </a>
+            {% endif %}
+          {% else %}
+            <a class="btn btn-primary" href="{% url 'settlement_generate' reservation.pk %}">
+              <i class="bi bi-plus-lg me-1"></i>
+              Generar liquidación
+            </a>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="row g-3 mb-3">
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Subtotal reservación</div>
+            <div class="fs-5 fw-semibold">{{ settlement_summary.reservation_subtotal }} {{ settlement_summary.currency }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Comisión plataforma</div>
+            <div class="fs-5 fw-semibold">{{ settlement_summary.platform_commission }} {{ settlement_summary.currency }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Neto propietario</div>
+            <div class="fs-5 fw-semibold">{{ settlement_summary.owner_net }} {{ settlement_summary.currency }}</div>
+          </div>
+        </div>
+      </div>
+
+      <dl class="row mb-0">
+        <dt class="col-sm-4 col-lg-3 text-secondary">Estado</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement_summary.status }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Referencia de pago</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement_summary.payment_reference|default:"Sin referencia" }}</dd>
+      </dl>
+    </div>
+
+    {% include "vault/_related_documents.html" with document_parent=reservation %}
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Evidencias básicas</h2>
+      <div class="text-secondary">
+        Reservación solicitada: {{ reservation.requested_at|clinic_datetime:reservation.room }}.
+        {% if reservation.confirmed_at %}Confirmada: {{ reservation.confirmed_at|clinic_datetime:reservation.room }}.{% endif %}
+        {% if reservation.cancelled_at %}Cancelada: {{ reservation.cancelled_at|clinic_datetime:reservation.room }}.{% endif %}
+      </div>
+    </div>
+  </section>
+{% endblock %}

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="integration-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#integration-content" hx-select="#integration-content" hx-swap="outerHTML" hx-push-url="true">
+    <p class="text-uppercase text-secondary small fw-semibold mb-2">Acceso simulado</p>
+    <h1 class="h4 mb-3">Revocar acceso simulado</h1>
+    <p class="text-secondary">La credencial quedará revocada y conservará el motivo en notas.</p>
+    <p class="fw-semibold"><code>{{ credential.simulated_code }}</code></p>
+    <form method="post">
+      {% csrf_token %}
+      {{ form.non_field_errors }}
+      <div class="mb-3">
+        <label class="form-label" for="{{ form.reason.id_for_label }}">{{ form.reason.label }}</label>
+        {{ form.reason }}
+        {% if form.reason.errors %}
+          <div class="invalid-feedback d-block">{{ form.reason.errors|join:", " }}</div>
+        {% endif %}
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        <button class="btn btn-danger" type="submit">
+          <i class="bi bi-slash-circle me-1"></i>
+          Revocar
+        </button>
+        <a class="btn btn-outline-secondary" href="{% url 'access_credential_detail' credential.pk %}">
+          Cancelar
+        </a>
+      </div>
+    </form>
+  </section>
+{% endblock %}

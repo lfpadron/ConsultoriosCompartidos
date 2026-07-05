@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div id="dashboard-content" class="d-flex flex-column gap-4">
+    <section class="d-flex flex-column flex-xl-row align-items-xl-center justify-content-between gap-3">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Consultorios Compartidos</p>
+        <h1 class="h3 mb-1">Dashboard Ejecutivo</h1>
+        <p class="text-secondary mb-0">Operación, finanzas, documentos y trazabilidad.</p>
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        {% for link in quick_links %}
+          <a class="btn btn-outline-secondary" href="{{ link.url }}">
+            <i class="bi {{ link.icon }} me-1"></i>
+            {{ link.label }}
+          </a>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% for section in metrics.sections %}
+      <section class="d-flex flex-column gap-3">
+        <div class="d-flex align-items-center gap-2">
+          <i class="bi {{ section.icon }} text-secondary"></i>
+          <h2 class="h5 mb-0">{{ section.title }}</h2>
+        </div>
+        <div class="row g-3">
+          {% for metric in section.metrics %}
+            <div class="col-sm-6 col-xl-3">
+              <a class="metric-card d-block p-3 h-100 text-decoration-none text-body" href="{{ metric.url }}">
+                <div class="d-flex align-items-start justify-content-between gap-3">
+                  <div>
+                    <div class="text-secondary small">{{ metric.label }}</div>
+                    <div class="h4 mb-0">{{ metric.display_value }}</div>
+                  </div>
+                  <span class="badge rounded-pill text-bg-{{ metric.variant }} p-2">
+                    <i class="bi {{ metric.icon }}"></i>
+                  </span>
+                </div>
+              </a>
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+    {% endfor %}
+
+    <section class="d-flex flex-column gap-3">
+      <div class="d-flex align-items-center gap-2">
+        <i class="bi bi-bell text-secondary"></i>
+        <h2 class="h5 mb-0">Alertas</h2>
+      </div>
+      <div class="row g-3">
+        {% for alert in alerts %}
+          <div class="col-md-6 col-xl-3">
+            <a class="status-panel d-block p-3 h-100 text-decoration-none text-body" href="{{ alert.url }}">
+              <div class="d-flex align-items-start justify-content-between gap-3 mb-2">
+                <span class="badge text-bg-{{ alert.variant }}">
+                  <i class="bi {{ alert.icon }} me-1"></i>
+                  {{ alert.alert_type }}
+                </span>
+                <span class="h5 mb-0">{{ alert.count }}</span>
+              </div>
+              <div class="text-secondary small">{{ alert.description }}</div>
+            </a>
+          </div>
+        {% empty %}
+          <div class="col-12">
+            <div class="status-panel p-4 text-center text-secondary">Sin alertas.</div>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="row g-3">
+      <div class="col-xl-8">
+        <div class="status-panel p-3 p-lg-4 h-100">
+          <div class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-clock-history text-secondary"></i>
+            <h2 class="h5 mb-0">Actividad reciente</h2>
+          </div>
+          <div class="list-group list-group-flush">
+            {% for item in recent_trace_events %}
+              <a class="list-group-item list-group-item-action px-0" href="{% url 'timeline_event_detail' item.event.pk %}">
+                <div class="d-flex flex-column flex-md-row justify-content-between gap-2">
+                  <div>
+                    <div class="small text-secondary">{{ item.event.occurred_at|date:"d/m/Y H:i" }}</div>
+                    <div class="fw-semibold">{{ item.title }}</div>
+                    <div class="small text-secondary">{{ item.actor_label }}</div>
+                  </div>
+                  <div class="d-flex flex-wrap align-items-start gap-2">
+                    <span class="badge {{ item.badge_class }}">{{ item.level }}</span>
+                    <span class="badge text-bg-light">{{ item.module }}</span>
+                  </div>
+                </div>
+              </a>
+            {% empty %}
+              <div class="text-secondary">Sin actividad reciente.</div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+
+      <div class="col-xl-4">
+        <div class="status-panel p-3 p-lg-4 h-100">
+          <div class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-lightning-charge text-secondary"></i>
+            <h2 class="h5 mb-0">Enlaces rápidos</h2>
+          </div>
+          <div class="d-grid gap-2">
+            {% for link in quick_links %}
+              <a class="btn btn-outline-secondary text-start" href="{{ link.url }}">
+                <i class="bi {{ link.icon }} me-1"></i>
+                {{ link.label }}
+              </a>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+{% endblock %}

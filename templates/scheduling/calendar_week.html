@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <section id="calendar-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#calendar-content" hx-select="#calendar-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-4">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Calendario</p>
+          <h1 class="h4 mb-0">{{ week_start|date:"d/m/Y" }} - {{ week_end|date:"d/m/Y" }}</h1>
+        </div>
+        <div class="d-flex gap-2">
+          <a class="btn btn-outline-secondary" href="{{ previous_week_url }}">
+            <i class="bi bi-chevron-left me-1"></i>
+            Anterior
+          </a>
+          <a class="btn btn-outline-secondary" href="{{ next_week_url }}">
+            Siguiente
+            <i class="bi bi-chevron-right ms-1"></i>
+          </a>
+        </div>
+      </div>
+
+      <form method="get" class="row g-3 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.clinic.id_for_label }}">{{ form.clinic.label }}</label>
+          {{ form.clinic }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.owner.id_for_label }}">{{ form.owner.label }}</label>
+          {{ form.owner }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.room.id_for_label }}">{{ form.room.label }}</label>
+          {{ form.room }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.tenant_doctor.id_for_label }}">{{ form.tenant_doctor.label }}</label>
+          {{ form.tenant_doctor }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.date_from.id_for_label }}">{{ form.date_from.label }}</label>
+          {{ form.date_from }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.date_to.id_for_label }}">{{ form.date_to.label }}</label>
+          {{ form.date_to }}
+        </div>
+        <div class="col-12 col-xl-6">
+          {% include "partials/weekday_filter.html" with field=form.weekdays %}
+        </div>
+        {{ form.week }}
+        <div class="col-md-2 d-grid">
+          <button class="btn btn-primary" type="submit">
+            <i class="bi bi-funnel me-1"></i>
+            Filtrar
+          </button>
+        </div>
+        <div class="col-md-2 d-grid">
+          <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
+            <i class="bi bi-x-lg me-1"></i>
+            Limpiar
+          </a>
+        </div>
+      </form>
+    </div>
+
+    {% for row in calendar_rows %}
+      <div class="status-panel p-3 p-lg-4">
+        <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
+          <div>
+            <h2 class="h5 mb-1">{{ row.room.name }}</h2>
+            <div class="small text-secondary">{{ row.room.clinic }}</div>
+          </div>
+        </div>
+        <div class="d-flex flex-column gap-3">
+          {% for week in row.weeks %}
+            <div>
+              <div class="small text-secondary mb-2">
+                Semana {{ week.week_start|date:"d/m/Y" }} - {{ week.week_end|date:"d/m/Y" }}
+              </div>
+              <div class="row g-3">
+                {% for day in week.days %}
+                  <div class="col-md-6 col-xl">
+                    <div class="border rounded-2 h-100 p-3 {% if day.is_past or day.is_filtered %}bg-body-secondary text-secondary{% else %}bg-white{% endif %}">
+                      <div class="d-flex align-items-center justify-content-between gap-2">
+                        <div class="fw-semibold">{{ day.date|date:"D d/m" }}</div>
+                        <div class="d-flex flex-wrap gap-1">
+                          {% if day.is_filtered %}
+                            <span class="badge text-bg-light">Filtrado</span>
+                          {% endif %}
+                          {% if day.is_past %}
+                            <span class="badge text-bg-secondary">Pasado</span>
+                          {% endif %}
+                        </div>
+                      </div>
+                      <div class="d-flex flex-column gap-2 mt-3">
+                        {% for entry in day.blocks %}
+                          {% with block=entry.block pricing=entry.pricing %}
+                          <div class="p-2 rounded-2 border {% if day.is_past %}border-secondary-subtle bg-light{% elif block.status == 'libre' %}border-success-subtle bg-success-subtle{% else %}border-warning-subtle bg-warning-subtle{% endif %}">
+                            <div class="fw-semibold small">
+                              {{ block.start_time|clinic_time:row.room }} - {{ block.end_time|clinic_time:row.room }}
+                            </div>
+                            <div class="small">{{ block.status }}</div>
+                            {% if block.label %}
+                              <div class="small text-secondary">{{ block.label }}</div>
+                            {% endif %}
+                            {% if block.status == 'libre' %}
+                              {% if pricing and pricing.applied_rule %}
+                                <div class="small mt-2">
+                                  {{ pricing.base_rate }} {{ pricing.currency }}{% if pricing.price_type == 'por_hora' %}/h{% else %} por bloque{% endif %}
+                                </div>
+                                <div class="small fw-semibold">
+                                  Subtotal estimado: {{ pricing.subtotal }} {{ pricing.currency }}
+                                </div>
+                              {% elif entry.pricing_error %}
+                                <div class="small text-danger mt-2">{{ entry.pricing_error }}</div>
+                              {% else %}
+                                <div class="small text-secondary mt-2">Sin tarifa configurada</div>
+                              {% endif %}
+                              {% if entry.can_request %}
+                                <a class="btn btn-sm btn-outline-primary mt-2" href="{% url 'reservation_request' %}?room={{ row.room.pk }}&date={{ day.date|date:'Y-m-d' }}&start_time={{ block.start_time|time:'H:i' }}&end_time={{ block.end_time|time:'H:i' }}">
+                                  <i class="bi bi-calendar-plus me-1"></i>
+                                  Solicitar reservación
+                                </a>
+                              {% elif day.is_past %}
+                                <div class="small text-secondary mt-2">Sólo consulta.</div>
+                              {% endif %}
+                            {% endif %}
+                          </div>
+                          {% endwith %}
+                        {% empty %}
+                          {% if day.is_filtered %}
+                            <div class="text-secondary small">Día oculto por filtro.</div>
+                          {% else %}
+                            <div class="text-secondary small">Sin bloques.</div>
+                          {% endif %}
+                        {% endfor %}
+                      </div>
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          {% empty %}
+            <div class="text-secondary small">Sin semanas para mostrar.</div>
+          {% endfor %}
+        </div>
+      </div>
+    {% empty %}
+      <div class="status-panel p-4 text-center text-secondary">
+        No hay consultorios activos para mostrar.
+      </div>
+    {% endfor %}
+  </section>
+{% endblock %}

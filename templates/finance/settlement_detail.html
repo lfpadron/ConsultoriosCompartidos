@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="finance-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#finance-content" hx-select="#finance-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Liquidación</p>
+          <h1 class="h4 mb-1">{{ settlement.owner_net }} {{ settlement.currency }}</h1>
+          <div class="text-secondary">{{ settlement.get_status_display }}</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+          <a class="btn btn-outline-secondary" href="{% url 'settlements' %}">
+            <i class="bi bi-arrow-left me-1"></i>
+            Volver
+          </a>
+          <a class="btn btn-outline-secondary" href="{% url 'reservation_detail' settlement.reservation.pk %}">
+            <i class="bi bi-calendar-check me-1"></i>
+            Reservación
+          </a>
+          <a class="btn btn-outline-secondary" href="{% url 'settlement_timeline' settlement.pk %}">
+            <i class="bi bi-diagram-3 me-1"></i>
+            Timeline
+          </a>
+          {% if settlement.status != "pagada" and settlement.status != "cancelada" %}
+            <a class="btn btn-outline-primary" href="{% url 'settlement_paid' settlement.pk %}">
+              <i class="bi bi-bank me-1"></i>
+              Marcar como pagada
+            </a>
+            <a class="btn btn-outline-danger" href="{% url 'settlement_cancel' settlement.pk %}">
+              <i class="bi bi-slash-circle me-1"></i>
+              Cancelar
+            </a>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Datos</h2>
+      <dl class="row mb-0">
+        <dt class="col-sm-4 col-lg-3 text-secondary">Reservación</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.reservation }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Estado de cuenta</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.statement }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Propietario</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.owner }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Consultorio</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Subtotal reservación</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.reservation_subtotal }} {{ settlement.currency }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Comisión plataforma</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.platform_commission }} {{ settlement.currency }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Impuestos comisión</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.commission_taxes }} {{ settlement.currency }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Neto propietario</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.owner_net }} {{ settlement.currency }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Referencia pago</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.payment_reference|default:"Sin referencia" }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Fecha pago</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.payment_date|date:"d/m/Y"|default:"Sin pago" }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Pagada por</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.paid_by|default:"Sin pago" }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Notas</dt>
+        <dd class="col-sm-8 col-lg-9">{{ settlement.notes|default:"Sin notas"|linebreaksbr }}</dd>
+      </dl>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Resumen propietario</h2>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Total calculado</div>
+            <div class="fs-5 fw-semibold">{{ owner_summary.total_calculated }} {{ owner_summary.currency }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Total pagado</div>
+            <div class="fs-5 fw-semibold">{{ owner_summary.total_paid }} {{ owner_summary.currency }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="border rounded-2 p-3 h-100">
+            <div class="text-secondary small">Pendiente</div>
+            <div class="fs-5 fw-semibold">{{ owner_summary.total_pending }} {{ owner_summary.currency }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {% include "vault/_related_documents.html" with document_parent=settlement %}
+  </section>
+{% endblock %}

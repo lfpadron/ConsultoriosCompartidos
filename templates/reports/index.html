@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="reports-content" class="d-flex flex-column gap-4" hx-boost="true" hx-target="#reports-content" hx-select="#reports-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <p class="text-uppercase text-secondary small fw-semibold mb-2">Auditoría MVP</p>
+      <h1 class="h4 mb-1">Reportes</h1>
+      <p class="text-secondary mb-0">Operación, finanzas, documentos y trazabilidad exportables a CSV.</p>
+    </div>
+
+    <div class="row g-3">
+      {% for report in reports %}
+        <div class="col-md-6 col-xl-4">
+          <a class="metric-card d-block h-100 p-3 text-decoration-none text-body" href="{% url report.html_url_name %}">
+            <div class="d-flex align-items-start justify-content-between gap-3 mb-3">
+              <div>
+                <h2 class="h5 mb-1">{{ report.title }}</h2>
+                <p class="text-secondary small mb-0">{{ report.description }}</p>
+              </div>
+              <span class="badge rounded-pill text-bg-primary p-2">
+                <i class="bi {{ report.icon }}"></i>
+              </span>
+            </div>
+            <span class="btn btn-sm btn-outline-secondary">
+              Abrir reporte
+            </span>
+          </a>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}
