@@ -1,0 +1,39 @@
+diff --git a/static/css/app.css b/static/css/app.css
+index 411f289..bc99d56 100644
+--- a/static/css/app.css
++++ b/static/css/app.css
+@@ -74,6 +74,13 @@ body {
+   text-transform: uppercase;
+ }
+ 
++.footer-banner-logo-link {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  line-height: 0;
++}
++
+ .footer-banner-logo {
+   width: min(10rem, 28vw);
+   max-height: 12mm;
+diff --git a/templates/partials/footer.html b/templates/partials/footer.html
+index b900d9c..a1666b3 100644
+--- a/templates/partials/footer.html
++++ b/templates/partials/footer.html
+@@ -2,7 +2,15 @@
+ <footer class="footer-compact border-top bg-white px-3 px-lg-4 small text-secondary">
+   <div class="footer-banner">
+     <span class="footer-banner-kicker">UNA MISIÓN EN PROGRESO DE:</span>
+-    <img class="footer-banner-logo" src="{% static 'img/astrogato-texto-derecha-centrado.png' %}" alt="Astrogato Labs">
++    <a
++      class="footer-banner-logo-link"
++      href="https://astrogatolabs.com.mx/"
++      target="_blank"
++      rel="noopener noreferrer"
++      aria-label="Abrir Astrogato Labs"
++    >
++      <img class="footer-banner-logo" src="{% static 'img/astrogato-texto-derecha-centrado.png' %}" alt="Astrogato Labs">
++    </a>
+     <span class="footer-timezone">
+       Zona horaria: America/Mexico_City
+       <span aria-hidden="true">·</span>

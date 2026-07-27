@@ -74,6 +74,13 @@ body {
   text-transform: uppercase;
 }
 
+.footer-banner-logo-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
 .footer-banner-logo {
   width: min(10rem, 28vw);
   max-height: 12mm;
