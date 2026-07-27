@@ -55,9 +55,9 @@ class TenantDoctorProfileAdmin(admin.ModelAdmin):
         "status",
         "is_active",
     )
-    list_filter = ("status", "is_active", "specialties")
+    list_filter = ("status", "is_active", "specialties", "assigned_rooms")
     search_fields = ("display_name", "professional_license", "user__email", "tax_id")
-    filter_horizontal = ("specialties",)
+    filter_horizontal = ("specialties", "assigned_rooms")
 
 
 @admin.register(Equipment)

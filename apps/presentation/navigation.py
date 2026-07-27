@@ -28,6 +28,7 @@ NAVIGATION_ITEMS = [
     {"label": "Accesos", "url_name": "access_credentials", "icon": "bi-key"},
     {"label": "Timeline", "url_name": "timeline", "icon": "bi-diagram-3"},
     {"label": "Reportes", "url_name": "reports", "icon": "bi-bar-chart"},
+    {"label": "Usuarios", "url_name": "users", "icon": "bi-people"},
     {"label": "Administración", "url_name": "administration", "icon": "bi-gear"},
 ]
 
@@ -50,5 +51,6 @@ PAGE_TITLES = {
     "access_credentials": "Accesos",
     "timeline": "Timeline",
     "reports": "Reportes",
+    "users": "Usuarios",
     "administration": "Administración",
 }

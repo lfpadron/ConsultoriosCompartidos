@@ -1,0 +1,847 @@
+diff --git a/.env.example b/.env.example
+index 42d7efc..391967c 100644
+--- a/.env.example
++++ b/.env.example
+@@ -13,6 +13,16 @@ CELERY_BROKER_URL=redis://localhost:6379/0
+ CELERY_RESULT_BACKEND=redis://localhost:6379/1
+ PLATFORM_COMMISSION_RATE=0.10
+ 
++DEFAULT_FROM_EMAIL=Consultorios Compartidos <no-reply@tu-consultorio.com.mx>
++EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
++EMAIL_HOST=localhost
++EMAIL_PORT=25
++EMAIL_HOST_USER=
++EMAIL_HOST_PASSWORD=
++EMAIL_USE_TLS=false
++EMAIL_USE_SSL=false
++INVITATION_BASE_URL=http://localhost:8000
++
+ MINIO_STORAGE_ENABLED=false
+ MINIO_ROOT_USER=consultorios_minio
+ MINIO_ROOT_PASSWORD=change-me-minio-password
+diff --git a/apps/catalog/admin.py b/apps/catalog/admin.py
+index e743c2c..f6497ac 100644
+--- a/apps/catalog/admin.py
++++ b/apps/catalog/admin.py
+@@ -55,9 +55,9 @@ class TenantDoctorProfileAdmin(admin.ModelAdmin):
+         "status",
+         "is_active",
+     )
+-    list_filter = ("status", "is_active", "specialties")
++    list_filter = ("status", "is_active", "specialties", "assigned_rooms")
+     search_fields = ("display_name", "professional_license", "user__email", "tax_id")
+-    filter_horizontal = ("specialties",)
++    filter_horizontal = ("specialties", "assigned_rooms")
+ 
+ 
+ @admin.register(Equipment)
+diff --git a/apps/catalog/forms.py b/apps/catalog/forms.py
+index 8d68174..9e9a384 100644
+--- a/apps/catalog/forms.py
++++ b/apps/catalog/forms.py
+@@ -16,6 +16,7 @@ from apps.catalog.models import (
+     TenantDoctorProfile,
+ )
+ from apps.core.form_utils import selected_model_pk, style_form_fields
++from apps.identity.models import UserRole
+ 
+ 
+ def set_model_queryset(field: forms.Field, queryset: QuerySet[Any]) -> None:
+@@ -139,7 +140,7 @@ class OwnerProfileForm(BootstrapModelForm):
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         super().__init__(*args, **kwargs)
+         user_model = get_user_model()
+-        queryset = user_model.objects.filter(is_active=True)
++        queryset = user_model.objects.filter(is_active=True, role=UserRole.OWNER)
+ 
+         if self.instance.pk:
+             queryset = queryset.filter(
+@@ -149,6 +150,10 @@ class OwnerProfileForm(BootstrapModelForm):
+             queryset = queryset.filter(owner_profile__isnull=True)
+ 
+         set_model_queryset(self.fields["user"], queryset.order_by("email"))
++        self.fields["user"].help_text = _(
++            "Si el correo no aparece, crea primero el usuario con grupo "
++            "Médico propietario."
++        )
+ 
+ 
+ class TenantDoctorProfileForm(BootstrapModelForm):
+@@ -158,6 +163,7 @@ class TenantDoctorProfileForm(BootstrapModelForm):
+             "user",
+             "display_name",
+             "specialties",
++            "assigned_rooms",
+             "professional_license",
+             "tax_id",
+             "phone",
+@@ -170,7 +176,10 @@ class TenantDoctorProfileForm(BootstrapModelForm):
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         super().__init__(*args, **kwargs)
+         user_model = get_user_model()
+-        queryset = user_model.objects.filter(is_active=True)
++        queryset = user_model.objects.filter(
++            is_active=True,
++            role=UserRole.TENANT_DOCTOR,
++        )
+ 
+         if self.instance.pk:
+             queryset = queryset.filter(
+@@ -180,10 +189,20 @@ class TenantDoctorProfileForm(BootstrapModelForm):
+             queryset = queryset.filter(tenant_doctor_profile__isnull=True)
+ 
+         set_model_queryset(self.fields["user"], queryset.order_by("email"))
++        self.fields["user"].help_text = _(
++            "Si el correo no aparece, crea primero el usuario con grupo "
++            "Médico arrendatario."
++        )
+         set_model_queryset(
+             self.fields["specialties"],
+             Specialty.objects.filter(is_deleted=False).order_by("name"),
+         )
++        set_model_queryset(
++            self.fields["assigned_rooms"],
++            ConsultingRoom.objects.filter(is_deleted=False)
++            .select_related("clinic", "owner")
++            .order_by("clinic__name", "name"),
++        )
+ 
+ 
+ class ConsultingRoomForm(BootstrapModelForm):
+diff --git a/apps/catalog/models.py b/apps/catalog/models.py
+index 400505d..eeacec1 100644
+--- a/apps/catalog/models.py
++++ b/apps/catalog/models.py
+@@ -122,6 +122,12 @@ class TenantDoctorProfile(BaseModel):
+         _("cédula profesional"), max_length=80, blank=True
+     )
+     specialties = models.ManyToManyField(Specialty, blank=True, related_name="doctors")
++    assigned_rooms: models.ManyToManyField[Any, Any] = models.ManyToManyField(
++        "ConsultingRoom",
++        blank=True,
++        related_name="assigned_tenant_doctors",
++        verbose_name=_("consultorios asignados"),
++    )
+     tax_id = models.CharField(_("RFC"), max_length=20, blank=True)
+     phone = models.CharField(_("teléfono"), max_length=40, blank=True)
+     status = models.CharField(
+diff --git a/apps/catalog/views.py b/apps/catalog/views.py
+index aa01419..9e47dc9 100644
+--- a/apps/catalog/views.py
++++ b/apps/catalog/views.py
+@@ -175,6 +175,7 @@ TENANT_DOCTOR = CatalogResource(
+         ("Usuario", "user.email"),
+         ("Nombre público", "display_name"),
+         ("Especialidades", "specialties"),
++        ("Consultorios asignados", "assigned_rooms"),
+         ("Cédula profesional", "professional_license"),
+         ("RFC", "tax_id"),
+         ("Teléfono", "phone"),
+@@ -183,7 +184,7 @@ TENANT_DOCTOR = CatalogResource(
+         ("Activo", "is_active"),
+     ),
+     select_related=("user",),
+-    prefetch_related=("specialties",),
++    prefetch_related=("specialties", "assigned_rooms"),
+     create_event_type="tenant_doctor.created",
+ )
+ 
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index ef960ce..4d52418 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -11,7 +11,7 @@ from django.conf import settings
+ from django.contrib.auth.views import redirect_to_login
+ from django.db.models import Q, QuerySet
+ from django.http import HttpRequest, HttpResponse, HttpResponseForbidden
+-from django.shortcuts import resolve_url
++from django.shortcuts import redirect, resolve_url
+ 
+ from apps.identity.models import UserRole
+ 
+@@ -31,6 +31,12 @@ RECEPTIONIST_BLOCKED_PREFIXES = (
+     "/reportes/pagos",
+     "/reportes/liquidaciones",
+ )
++FORCED_PASSWORD_ALLOWED_PREFIXES = (
++    "/cambiar-contrasena/",
++    "/logout/",
++    "/static/",
++    "/media/",
++)
+ 
+ 
+ class MvpAccessMiddleware:
+@@ -50,6 +56,11 @@ class MvpAccessMiddleware:
+             )
+ 
+         role = getattr(user, "role", "")
++        if getattr(user, "must_change_password", False) and not any(
++            request.path.startswith(prefix)
++            for prefix in FORCED_PASSWORD_ALLOWED_PREFIXES
++        ):
++            return redirect("password_change_required")
+         if role == UserRole.AUDITOR and request.method not in SAFE_METHODS:
+             return HttpResponseForbidden("El rol Auditor es de solo lectura.")
+         if role == UserRole.RECEPTIONIST and _is_blocked_for_receptionist(request.path):
+@@ -72,6 +83,8 @@ def scope_queryset_for_user(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]
+     """Apply coarse owner/tenant scoping when the user has a linked profile."""
+ 
+     role = getattr(user, "role", "")
++    if role == UserRole.ADMIN:
++        return _scope_business_admin_queryset(queryset, user)
+     if role == UserRole.OWNER:
+         owner = getattr(user, "owner_profile", None)
+         if owner is None:
+@@ -82,6 +95,54 @@ def scope_queryset_for_user(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]
+         if tenant_doctor is None:
+             return queryset
+         return _scope_tenant_doctor_queryset(queryset, tenant_doctor)
++    if role == UserRole.ASSISTANT:
++        return _scope_assistant_queryset(queryset, user)
++    return queryset
++
++
++def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]:
++    clinics = user.assigned_clinics.filter(is_deleted=False)
++    if not clinics.exists():
++        return queryset
++
++    model_label = queryset.model._meta.label
++    if model_label == "catalog.Clinic":
++        return queryset.filter(pk__in=clinics.values("pk"))
++    if model_label == "catalog.OwnerProfile":
++        return queryset.filter(consulting_rooms__clinic__in=clinics).distinct()
++    if model_label == "catalog.TenantDoctorProfile":
++        return queryset.filter(
++            Q(assigned_rooms__clinic__in=clinics)
++            | Q(reservations__room__clinic__in=clinics)
++        ).distinct()
++    if model_label == "catalog.ConsultingRoom":
++        return queryset.filter(clinic__in=clinics)
++    if model_label in {
++        "scheduling.AvailabilityRule",
++        "scheduling.AvailabilityException",
++        "finance.RateRule",
++    }:
++        return queryset.filter(room__clinic__in=clinics)
++    if model_label == "scheduling.Reservation":
++        return queryset.filter(room__clinic__in=clinics)
++    if model_label == "finance.Statement":
++        return queryset.filter(reservation__room__clinic__in=clinics)
++    if model_label == "finance.Payment":
++        return queryset.filter(reservation__room__clinic__in=clinics)
++    if model_label == "finance.Settlement":
++        return queryset.filter(room__clinic__in=clinics)
++    if model_label == "vault.DocumentAsset":
++        return queryset.filter(
++            Q(clinic__in=clinics)
++            | Q(room__clinic__in=clinics)
++            | Q(owner__consulting_rooms__clinic__in=clinics)
++            | Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
++            | Q(reservation__room__clinic__in=clinics)
++            | Q(payment__reservation__room__clinic__in=clinics)
++            | Q(settlement__room__clinic__in=clinics)
++        ).distinct()
++    if model_label == "integration.AccessCredential":
++        return queryset.filter(reservation__room__clinic__in=clinics)
+     return queryset
+ 
+ 
+@@ -113,8 +174,11 @@ def _scope_tenant_doctor_queryset(
+     tenant_doctor: Any,
+ ) -> QuerySet[Any]:
+     model_label = queryset.model._meta.label
++    assigned_rooms = tenant_doctor.assigned_rooms.filter(is_deleted=False)
+     if model_label == "catalog.TenantDoctorProfile":
+         return queryset.filter(pk=tenant_doctor.pk)
++    if model_label == "catalog.ConsultingRoom" and assigned_rooms.exists():
++        return queryset.filter(pk__in=assigned_rooms.values("pk"))
+     if model_label == "scheduling.Reservation":
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "finance.Statement":
+@@ -130,3 +194,34 @@ def _scope_tenant_doctor_queryset(
+     if model_label == "integration.AccessCredential":
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     return queryset
++
++
++def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]:
++    owners = user.assigned_owners.filter(is_deleted=False)
++    if not owners.exists():
++        return queryset.none()
++
++    model_label = queryset.model._meta.label
++    if model_label == "catalog.OwnerProfile":
++        return queryset.filter(pk__in=owners.values("pk"))
++    if model_label == "catalog.ConsultingRoom":
++        return queryset.filter(owner__in=owners)
++    if model_label == "scheduling.Reservation":
++        return queryset.filter(room__owner__in=owners)
++    if model_label == "finance.Statement":
++        return queryset.filter(reservation__room__owner__in=owners)
++    if model_label == "finance.Payment":
++        return queryset.filter(reservation__room__owner__in=owners)
++    if model_label == "finance.Settlement":
++        return queryset.filter(owner__in=owners)
++    if model_label == "vault.DocumentAsset":
++        return queryset.filter(
++            Q(owner__in=owners)
++            | Q(room__owner__in=owners)
++            | Q(reservation__room__owner__in=owners)
++            | Q(payment__reservation__room__owner__in=owners)
++            | Q(settlement__owner__in=owners)
++        ).distinct()
++    if model_label == "integration.AccessCredential":
++        return queryset.filter(reservation__room__owner__in=owners)
++    return queryset
+diff --git a/apps/identity/admin.py b/apps/identity/admin.py
+index 02e9180..6346b33 100644
+--- a/apps/identity/admin.py
++++ b/apps/identity/admin.py
+@@ -11,12 +11,52 @@ from apps.identity.models import CustomUser
+ class CustomUserAdmin(UserAdmin):
+     model = CustomUser
+     ordering = ("email",)
+-    list_display = ("email", "first_name", "last_name", "role", "is_staff", "is_active")
+-    list_filter = ("role", "is_staff", "is_superuser", "is_active")
+-    search_fields = ("email", "first_name", "last_name")
++    list_display = (
++        "email",
++        "first_name",
++        "last_name",
++        "role",
++        "phone",
++        "must_change_password",
++        "is_active",
++    )
++    list_filter = (
++        "role",
++        "is_staff",
++        "is_superuser",
++        "must_change_password",
++        "is_active",
++    )
++    search_fields = ("email", "first_name", "last_name", "phone", "secondary_email")
++    filter_horizontal = (
++        "groups",
++        "user_permissions",
++        "assigned_clinics",
++        "assigned_owners",
++    )
+     fieldsets = (
+         (None, {"fields": ("email", "password")}),
+-        (_("Datos personales"), {"fields": ("first_name", "last_name", "role")}),
++        (
++            _("Datos personales"),
++            {
++                "fields": (
++                    "first_name",
++                    "last_name",
++                    "phone",
++                    "secondary_email",
++                    "secondary_phone",
++                    "role",
++                )
++            },
++        ),
++        (
++            _("Asignaciones"),
++            {"fields": ("assigned_clinics", "assigned_owners")},
++        ),
++        (
++            _("Invitación"),
++            {"fields": ("must_change_password", "invitation_sent_at")},
++        ),
+         (
+             _("Permisos"),
+             {
+@@ -40,9 +80,11 @@ class CustomUserAdmin(UserAdmin):
+                     "email",
+                     "first_name",
+                     "last_name",
++                    "phone",
+                     "role",
+                     "password1",
+                     "password2",
++                    "must_change_password",
+                     "is_staff",
+                     "is_active",
+                 ),
+diff --git a/apps/identity/forms.py b/apps/identity/forms.py
+index 019a91e..0b71690 100644
+--- a/apps/identity/forms.py
++++ b/apps/identity/forms.py
+@@ -1,9 +1,17 @@
+-"""Authentication forms."""
++"""Authentication and user management forms."""
++
++from typing import Any, cast
+ 
+ from django import forms
++from django.contrib.auth import get_user_model, password_validation
+ from django.contrib.auth.forms import AuthenticationForm
++from django.db.models import QuerySet
+ from django.utils.translation import gettext_lazy as _
+ 
++from apps.catalog.models import Clinic, OwnerProfile
++from apps.core.form_utils import style_form_fields
++from apps.identity.models import UserRole
++
+ 
+ class EmailAuthenticationForm(AuthenticationForm):
+     username = forms.EmailField(
+@@ -26,3 +34,229 @@ class EmailAuthenticationForm(AuthenticationForm):
+             }
+         ),
+     )
++
++
++class ManagedUserFilterForm(forms.Form):
++    q = forms.CharField(label="Buscar", required=False)
++    role = forms.ChoiceField(
++        label="Grupo",
++        choices=(("", "Todos"), *UserRole.choices),
++        required=False,
++    )
++    is_active = forms.ChoiceField(
++        label="Estado",
++        choices=(("", "Todos"), ("1", "Activos"), ("0", "Inactivos")),
++        required=False,
++    )
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        super().__init__(*args, **kwargs)
++        style_form_fields(self.fields)
++
++
++class ManagedUserForm(forms.ModelForm):
++    temporary_password = forms.CharField(
++        label=_("Contraseña temporal"),
++        required=False,
++        strip=False,
++        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
++        help_text=_(
++            "Se guardará como contraseña inicial y el usuario deberá cambiarla "
++            "al entrar."
++        ),
++    )
++    send_invitation = forms.BooleanField(
++        label=_("Enviar invitación por correo"),
++        required=False,
++        initial=True,
++    )
++
++    class Meta:
++        model = get_user_model()
++        fields = (
++            "email",
++            "first_name",
++            "last_name",
++            "phone",
++            "secondary_email",
++            "secondary_phone",
++            "role",
++            "assigned_clinics",
++            "assigned_owners",
++            "temporary_password",
++            "must_change_password",
++            "send_invitation",
++            "is_active",
++        )
++        labels = {
++            "role": _("Grupo"),
++            "assigned_clinics": _("Clínicas asignadas"),
++            "assigned_owners": _("Médicos propietarios asignados"),
++        }
++
++    def __init__(
++        self,
++        *args: Any,
++        current_user: Any,
++        **kwargs: Any,
++    ) -> None:
++        self.current_user = current_user
++        super().__init__(*args, **kwargs)
++        self.is_create = self.instance.pk is None
++        if self.is_create:
++            self.fields["temporary_password"].required = True
++            self.fields["must_change_password"].initial = True
++        role_field = cast(forms.ChoiceField, self.fields["role"])
++        clinics_field = cast(
++            forms.ModelMultipleChoiceField,
++            self.fields["assigned_clinics"],
++        )
++        owners_field = cast(
++            forms.ModelMultipleChoiceField,
++            self.fields["assigned_owners"],
++        )
++        role_field.choices = self._role_choices_for_current_user()
++        clinics_field.queryset = self._clinic_queryset()
++        owners_field.queryset = self._owner_queryset()
++        clinics_field.required = False
++        owners_field.required = False
++        style_form_fields(self.fields)
++
++    def clean_email(self) -> str:
++        email = get_user_model().objects.normalize_email(self.cleaned_data["email"])
++        return email.lower()
++
++    def clean_secondary_email(self) -> str:
++        email = self.cleaned_data.get("secondary_email", "")
++        if not email:
++            return ""
++        return get_user_model().objects.normalize_email(email).lower()
++
++    def clean_role(self) -> str:
++        role = self.cleaned_data["role"]
++        allowed_roles = {
++            value for value, _label in self._role_choices_for_current_user()
++        }
++        if role not in allowed_roles:
++            raise forms.ValidationError(_("No puedes asignar ese grupo de usuario."))
++        return role
++
++    def clean(self) -> dict[str, Any]:
++        cleaned_data = super().clean() or {}
++        role = cleaned_data.get("role")
++        clinics = cleaned_data.get("assigned_clinics")
++        owners = cleaned_data.get("assigned_owners")
++
++        if role == UserRole.ADMIN and not clinics:
++            self.add_error(
++                "assigned_clinics",
++                _("Un administrador de negocio debe estar asignado a una clínica."),
++            )
++        if role == UserRole.ASSISTANT and not owners:
++            self.add_error(
++                "assigned_owners",
++                _("Un asistente administrativo debe estar asignado a un propietario."),
++            )
++        return cleaned_data
++
++    def save(self, commit: bool = True) -> Any:
++        user = super().save(commit=False)
++        role = self.cleaned_data["role"]
++        temporary_password = self.cleaned_data.get("temporary_password")
++        user.is_staff = role == UserRole.SUPERADMIN
++        user.is_superuser = role == UserRole.SUPERADMIN
++        if temporary_password:
++            user.set_password(temporary_password)
++            user.must_change_password = True
++        if commit:
++            user.save()
++            self.save_m2m()
++        return user
++
++    def _role_choices_for_current_user(self) -> tuple[tuple[str, Any], ...]:
++        current_role = getattr(self.current_user, "role", "")
++        if current_role == UserRole.SUPERADMIN:
++            allowed_roles = {
++                UserRole.SUPERADMIN,
++                UserRole.ADMIN,
++                UserRole.OWNER,
++                UserRole.TENANT_DOCTOR,
++                UserRole.ASSISTANT,
++                UserRole.OPERATOR,
++                UserRole.RECEPTIONIST,
++                UserRole.AUDITOR,
++            }
++        elif current_role == UserRole.ADMIN:
++            allowed_roles = {
++                UserRole.ADMIN,
++                UserRole.OWNER,
++                UserRole.TENANT_DOCTOR,
++                UserRole.ASSISTANT,
++                UserRole.OPERATOR,
++                UserRole.RECEPTIONIST,
++                UserRole.AUDITOR,
++            }
++        elif current_role == UserRole.OWNER:
++            allowed_roles = {UserRole.ASSISTANT}
++        else:
++            allowed_roles = set()
++        return tuple(
++            choice for choice in UserRole.choices if choice[0] in allowed_roles
++        )
++
++    def _clinic_queryset(self) -> QuerySet[Clinic]:
++        queryset = Clinic.objects.filter(is_deleted=False).order_by("name")
++        if getattr(self.current_user, "role", "") == UserRole.ADMIN:
++            assigned = self.current_user.assigned_clinics.filter(is_deleted=False)
++            if assigned.exists():
++                queryset = queryset.filter(pk__in=assigned.values("pk"))
++        return queryset
++
++    def _owner_queryset(self) -> QuerySet[OwnerProfile]:
++        queryset = OwnerProfile.objects.filter(is_deleted=False).select_related("user")
++        current_role = getattr(self.current_user, "role", "")
++        if current_role == UserRole.OWNER:
++            owner = getattr(self.current_user, "owner_profile", None)
++            if owner is not None:
++                queryset = queryset.filter(pk=owner.pk)
++            else:
++                queryset = queryset.none()
++        elif current_role == UserRole.ADMIN:
++            assigned = self.current_user.assigned_clinics.filter(is_deleted=False)
++            if assigned.exists():
++                queryset = queryset.filter(consulting_rooms__clinic__in=assigned)
++        return queryset.order_by("display_name", "user__email").distinct()
++
++
++class ForcedPasswordChangeForm(forms.Form):
++    new_password1 = forms.CharField(
++        label=_("Nueva contraseña"),
++        strip=False,
++        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
++        help_text=password_validation.password_validators_help_text_html(),
++    )
++    new_password2 = forms.CharField(
++        label=_("Confirmar nueva contraseña"),
++        strip=False,
++        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
++    )
++
++    def __init__(self, user: Any, *args: Any, **kwargs: Any) -> None:
++        self.user = user
++        super().__init__(*args, **kwargs)
++        style_form_fields(self.fields)
++
++    def clean(self) -> dict[str, Any]:
++        cleaned_data = super().clean() or {}
++        password1 = cleaned_data.get("new_password1")
++        password2 = cleaned_data.get("new_password2")
++        if password1 and password2 and password1 != password2:
++            self.add_error("new_password2", _("Las contraseñas no coinciden."))
++        if password2:
++            password_validation.validate_password(password2, self.user)
++        return cleaned_data
++
++    def save(self) -> Any:
++        self.user.set_password(self.cleaned_data["new_password1"])
++        self.user.save()
++        return self.user
+diff --git a/apps/identity/models.py b/apps/identity/models.py
+index 3a0a7ac..892588d 100644
+--- a/apps/identity/models.py
++++ b/apps/identity/models.py
+@@ -3,6 +3,7 @@
+ import uuid
+ 
+ from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
++from django.core.exceptions import ValidationError
+ from django.db import models
+ from django.utils import timezone
+ from django.utils.translation import gettext_lazy as _
+@@ -11,12 +12,13 @@ from apps.identity.managers import CustomUserManager
+ 
+ 
+ class UserRole(models.TextChoices):
+-    SUPERADMIN = "superadmin", _("Superadministrador")
+-    ADMIN = "admin", _("Administrador")
++    SUPERADMIN = "superadmin", _("Administrador de sistemas")
++    ADMIN = "admin", _("Administrador de negocio")
+     OPERATOR = "operator", _("Operador")
+     RECEPTIONIST = "receptionist", _("Recepcionista")
+-    OWNER = "owner", _("Dueño")
+-    TENANT_DOCTOR = "tenant_doctor", _("Médico Arrendatario")
++    OWNER = "owner", _("Médico propietario")
++    TENANT_DOCTOR = "tenant_doctor", _("Médico arrendatario")
++    ASSISTANT = "assistant", _("Asistente administrativo")
+     AUDITOR = "auditor", _("Auditor")
+ 
+ 
+@@ -25,12 +27,36 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
+     email = models.EmailField(_("correo electrónico"), unique=True)
+     first_name = models.CharField(_("nombre"), max_length=150)
+     last_name = models.CharField(_("apellidos"), max_length=150)
++    phone = models.CharField(_("teléfono"), max_length=40, blank=True)
++    secondary_email = models.EmailField(_("correo alterno"), blank=True)
++    secondary_phone = models.CharField(_("teléfono alterno"), max_length=40, blank=True)
+     role = models.CharField(
+         _("rol"),
+         max_length=32,
+         choices=UserRole.choices,
+         default=UserRole.TENANT_DOCTOR,
+     )
++    assigned_clinics = models.ManyToManyField(
++        "catalog.Clinic",
++        blank=True,
++        related_name="assigned_users",
++        verbose_name=_("clínicas asignadas"),
++    )
++    assigned_owners = models.ManyToManyField(
++        "catalog.OwnerProfile",
++        blank=True,
++        related_name="assistant_users",
++        verbose_name=_("propietarios asignados"),
++    )
++    must_change_password = models.BooleanField(
++        _("forzar cambio de contraseña"),
++        default=False,
++    )
++    invitation_sent_at = models.DateTimeField(
++        _("invitación enviada en"),
++        blank=True,
++        null=True,
++    )
+     is_active = models.BooleanField(_("activo"), default=True)
+     is_staff = models.BooleanField(_("staff"), default=False)
+     date_joined = models.DateTimeField(_("fecha de registro"), default=timezone.now)
+@@ -52,6 +78,26 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
+     def clean(self) -> None:
+         super().clean()
+         self.email = type(self).objects.normalize_email(self.email).lower()
++        if self.secondary_email:
++            self.secondary_email = (
++                type(self).objects.normalize_email(self.secondary_email).lower()
++            )
++        if self.role == UserRole.SUPERADMIN and self.is_active:
++            active_superadmins = type(self).objects.filter(
++                role=UserRole.SUPERADMIN,
++                is_active=True,
++            )
++            if self.pk:
++                active_superadmins = active_superadmins.exclude(pk=self.pk)
++            if active_superadmins.count() >= 3:
++                raise ValidationError(
++                    {
++                        "role": _(
++                            "Solo puede haber tres administradores de sistema "
++                            "activos a la vez."
++                        )
++                    }
++                )
+ 
+     def __str__(self) -> str:
+         return self.email
+diff --git a/apps/presentation/navigation.py b/apps/presentation/navigation.py
+index aa556d2..943f215 100644
+--- a/apps/presentation/navigation.py
++++ b/apps/presentation/navigation.py
+@@ -28,6 +28,7 @@ NAVIGATION_ITEMS = [
+     {"label": "Accesos", "url_name": "access_credentials", "icon": "bi-key"},
+     {"label": "Timeline", "url_name": "timeline", "icon": "bi-diagram-3"},
+     {"label": "Reportes", "url_name": "reports", "icon": "bi-bar-chart"},
++    {"label": "Usuarios", "url_name": "users", "icon": "bi-people"},
+     {"label": "Administración", "url_name": "administration", "icon": "bi-gear"},
+ ]
+ 
+@@ -50,5 +51,6 @@ PAGE_TITLES = {
+     "access_credentials": "Accesos",
+     "timeline": "Timeline",
+     "reports": "Reportes",
++    "users": "Usuarios",
+     "administration": "Administración",
+ }
+diff --git a/apps/presentation/urls.py b/apps/presentation/urls.py
+index bb49b03..0c3446d 100644
+--- a/apps/presentation/urls.py
++++ b/apps/presentation/urls.py
+@@ -14,6 +14,7 @@ urlpatterns = [
+     path("", include("apps.astrotrace.urls")),
+     path("", include("apps.integration.urls")),
+     path("", include("apps.reports.urls")),
++    path("", include("apps.identity.urls")),
+     path(
+         "estados-de-cuenta/",
+         views.construction_page,
+diff --git a/apps/scheduling/services/reservation_service.py b/apps/scheduling/services/reservation_service.py
+index 757d727..2232f92 100644
+--- a/apps/scheduling/services/reservation_service.py
++++ b/apps/scheduling/services/reservation_service.py
+@@ -28,6 +28,7 @@ def create_reservation(
+     actor: Model | None = None,
+ ) -> Reservation:
+     _validate_tenant_doctor_is_authorized(tenant_doctor)
++    _validate_tenant_doctor_room_assignment(tenant_doctor, room)
+     _validate_available_block(room, reservation_date, start_time, end_time)
+ 
+     reservation = Reservation(
+@@ -125,6 +126,17 @@ def _validate_tenant_doctor_is_authorized(
+         )
+ 
+ 
++def _validate_tenant_doctor_room_assignment(
++    tenant_doctor: TenantDoctorProfile,
++    room: ConsultingRoom,
++) -> None:
++    assigned_rooms = tenant_doctor.assigned_rooms.filter(is_deleted=False)
++    if assigned_rooms.exists() and not assigned_rooms.filter(pk=room.pk).exists():
++        raise ValidationError(
++            {"room": "El médico arrendatario no está asignado a este consultorio."}
++        )
++
++
+ def _validate_available_block(
+     room: ConsultingRoom,
+     reservation_date: date,
+diff --git a/config/settings.py b/config/settings.py
+index ac08ea5..40806c0 100644
+--- a/config/settings.py
++++ b/config/settings.py
+@@ -145,6 +145,21 @@ CELERY_TASK_TRACK_STARTED = True
+ 
+ MINIO_STORAGE_ENABLED = env.bool("MINIO_STORAGE_ENABLED", default=False)
+ PLATFORM_COMMISSION_RATE = env.float("PLATFORM_COMMISSION_RATE", default=0.10)
++DEFAULT_FROM_EMAIL = env(
++    "DEFAULT_FROM_EMAIL",
++    default="Consultorios Compartidos <no-reply@tu-consultorio.com.mx>",
++)
++EMAIL_BACKEND = env(
++    "EMAIL_BACKEND",
++    default="django.core.mail.backends.console.EmailBackend",
++)
++EMAIL_HOST = env("EMAIL_HOST", default="localhost")
++EMAIL_PORT = env.int("EMAIL_PORT", default=25)
++EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
++EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
++EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=False)
++EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=False)
++INVITATION_BASE_URL = env("INVITATION_BASE_URL", default="")
+ 
+ if MINIO_STORAGE_ENABLED:
+     AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID")
+diff --git a/tests/test_reservations.py b/tests/test_reservations.py
+index 3b46fa5..d828a28 100644
+--- a/tests/test_reservations.py
++++ b/tests/test_reservations.py
+@@ -287,7 +287,7 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
+     create_rate(room)
+     client.force_login(user)
+ 
+-    response = client.get(f"/calendario/?week=2026-07-06&room={room.pk}")
++    response = client.get(f"/calendario/?week=2026-08-03&room={room.pk}")
+ 
+     assert response.status_code == 200
+     assert "Solicitar reservación" in response.content.decode()
+@@ -331,8 +331,8 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
+     client.force_login(user)
+ 
+     response = client.get(
+-        f"/calendario/vista-rapida/?week=2026-07-06"
+-        f"&room={room.pk}&selected_date=2026-07-06"
++        f"/calendario/vista-rapida/?week=2026-08-03"
++        f"&room={room.pk}&selected_date=2026-08-03"
+     )
+ 
+     content = response.content.decode()
+@@ -354,15 +354,15 @@ def test_quick_calendar_shows_reserved_day_when_no_free_blocks(client: Any) -> N
+     create_reservation(
+         room=room,
+         tenant_doctor=doctor,
+-        reservation_date=date(2026, 7, 6),
++        reservation_date=date(2026, 8, 3),
+         start_time=time(8, 0),
+         end_time=time(13, 0),
+     )
+     client.force_login(user)
+ 
+     response = client.get(
+-        f"/calendario/vista-rapida/?week=2026-07-06"
+-        f"&room={room.pk}&selected_date=2026-07-06"
++        f"/calendario/vista-rapida/?week=2026-08-03"
++        f"&room={room.pk}&selected_date=2026-08-03"
+     )
+ 
+     content = response.content.decode()

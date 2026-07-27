@@ -11,7 +11,7 @@ from django.conf import settings
 from django.contrib.auth.views import redirect_to_login
 from django.db.models import Q, QuerySet
 from django.http import HttpRequest, HttpResponse, HttpResponseForbidden
-from django.shortcuts import resolve_url
+from django.shortcuts import redirect, resolve_url
 
 from apps.identity.models import UserRole
 
@@ -30,6 +30,12 @@ RECEPTIONIST_BLOCKED_PREFIXES = (
     "/reportes/ingresos",
     "/reportes/pagos",
     "/reportes/liquidaciones",
+)
+FORCED_PASSWORD_ALLOWED_PREFIXES = (
+    "/cambiar-contrasena/",
+    "/logout/",
+    "/static/",
+    "/media/",
 )
 
 
@@ -50,6 +56,11 @@ class MvpAccessMiddleware:
             )
 
         role = getattr(user, "role", "")
+        if getattr(user, "must_change_password", False) and not any(
+            request.path.startswith(prefix)
+            for prefix in FORCED_PASSWORD_ALLOWED_PREFIXES
+        ):
+            return redirect("password_change_required")
         if role == UserRole.AUDITOR and request.method not in SAFE_METHODS:
             return HttpResponseForbidden("El rol Auditor es de solo lectura.")
         if role == UserRole.RECEPTIONIST and _is_blocked_for_receptionist(request.path):
@@ -72,6 +83,8 @@ def scope_queryset_for_user(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]
     """Apply coarse owner/tenant scoping when the user has a linked profile."""
 
     role = getattr(user, "role", "")
+    if role == UserRole.ADMIN:
+        return _scope_business_admin_queryset(queryset, user)
     if role == UserRole.OWNER:
         owner = getattr(user, "owner_profile", None)
         if owner is None:
@@ -82,6 +95,54 @@ def scope_queryset_for_user(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]
         if tenant_doctor is None:
             return queryset
         return _scope_tenant_doctor_queryset(queryset, tenant_doctor)
+    if role == UserRole.ASSISTANT:
+        return _scope_assistant_queryset(queryset, user)
+    return queryset
+
+
+def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]:
+    clinics = user.assigned_clinics.filter(is_deleted=False)
+    if not clinics.exists():
+        return queryset
+
+    model_label = queryset.model._meta.label
+    if model_label == "catalog.Clinic":
+        return queryset.filter(pk__in=clinics.values("pk"))
+    if model_label == "catalog.OwnerProfile":
+        return queryset.filter(consulting_rooms__clinic__in=clinics).distinct()
+    if model_label == "catalog.TenantDoctorProfile":
+        return queryset.filter(
+            Q(assigned_rooms__clinic__in=clinics)
+            | Q(reservations__room__clinic__in=clinics)
+        ).distinct()
+    if model_label == "catalog.ConsultingRoom":
+        return queryset.filter(clinic__in=clinics)
+    if model_label in {
+        "scheduling.AvailabilityRule",
+        "scheduling.AvailabilityException",
+        "finance.RateRule",
+    }:
+        return queryset.filter(room__clinic__in=clinics)
+    if model_label == "scheduling.Reservation":
+        return queryset.filter(room__clinic__in=clinics)
+    if model_label == "finance.Statement":
+        return queryset.filter(reservation__room__clinic__in=clinics)
+    if model_label == "finance.Payment":
+        return queryset.filter(reservation__room__clinic__in=clinics)
+    if model_label == "finance.Settlement":
+        return queryset.filter(room__clinic__in=clinics)
+    if model_label == "vault.DocumentAsset":
+        return queryset.filter(
+            Q(clinic__in=clinics)
+            | Q(room__clinic__in=clinics)
+            | Q(owner__consulting_rooms__clinic__in=clinics)
+            | Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
+            | Q(reservation__room__clinic__in=clinics)
+            | Q(payment__reservation__room__clinic__in=clinics)
+            | Q(settlement__room__clinic__in=clinics)
+        ).distinct()
+    if model_label == "integration.AccessCredential":
+        return queryset.filter(reservation__room__clinic__in=clinics)
     return queryset
 
 
@@ -113,8 +174,11 @@ def _scope_tenant_doctor_queryset(
     tenant_doctor: Any,
 ) -> QuerySet[Any]:
     model_label = queryset.model._meta.label
+    assigned_rooms = tenant_doctor.assigned_rooms.filter(is_deleted=False)
     if model_label == "catalog.TenantDoctorProfile":
         return queryset.filter(pk=tenant_doctor.pk)
+    if model_label == "catalog.ConsultingRoom" and assigned_rooms.exists():
+        return queryset.filter(pk__in=assigned_rooms.values("pk"))
     if model_label == "scheduling.Reservation":
         return queryset.filter(tenant_doctor=tenant_doctor)
     if model_label == "finance.Statement":
@@ -129,4 +193,35 @@ def _scope_tenant_doctor_queryset(
         )
     if model_label == "integration.AccessCredential":
         return queryset.filter(tenant_doctor=tenant_doctor)
+    return queryset
+
+
+def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]:
+    owners = user.assigned_owners.filter(is_deleted=False)
+    if not owners.exists():
+        return queryset.none()
+
+    model_label = queryset.model._meta.label
+    if model_label == "catalog.OwnerProfile":
+        return queryset.filter(pk__in=owners.values("pk"))
+    if model_label == "catalog.ConsultingRoom":
+        return queryset.filter(owner__in=owners)
+    if model_label == "scheduling.Reservation":
+        return queryset.filter(room__owner__in=owners)
+    if model_label == "finance.Statement":
+        return queryset.filter(reservation__room__owner__in=owners)
+    if model_label == "finance.Payment":
+        return queryset.filter(reservation__room__owner__in=owners)
+    if model_label == "finance.Settlement":
+        return queryset.filter(owner__in=owners)
+    if model_label == "vault.DocumentAsset":
+        return queryset.filter(
+            Q(owner__in=owners)
+            | Q(room__owner__in=owners)
+            | Q(reservation__room__owner__in=owners)
+            | Q(payment__reservation__room__owner__in=owners)
+            | Q(settlement__owner__in=owners)
+        ).distinct()
+    if model_label == "integration.AccessCredential":
+        return queryset.filter(reservation__room__owner__in=owners)
     return queryset

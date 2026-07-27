@@ -175,6 +175,7 @@ TENANT_DOCTOR = CatalogResource(
         ("Usuario", "user.email"),
         ("Nombre público", "display_name"),
         ("Especialidades", "specialties"),
+        ("Consultorios asignados", "assigned_rooms"),
         ("Cédula profesional", "professional_license"),
         ("RFC", "tax_id"),
         ("Teléfono", "phone"),
@@ -183,7 +184,7 @@ TENANT_DOCTOR = CatalogResource(
         ("Activo", "is_active"),
     ),
     select_related=("user",),
-    prefetch_related=("specialties",),
+    prefetch_related=("specialties", "assigned_rooms"),
     create_event_type="tenant_doctor.created",
 )
 

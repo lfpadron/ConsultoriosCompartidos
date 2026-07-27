@@ -16,6 +16,7 @@ from apps.catalog.models import (
     TenantDoctorProfile,
 )
 from apps.core.form_utils import selected_model_pk, style_form_fields
+from apps.identity.models import UserRole
 
 
 def set_model_queryset(field: forms.Field, queryset: QuerySet[Any]) -> None:
@@ -139,7 +140,7 @@ class OwnerProfileForm(BootstrapModelForm):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         user_model = get_user_model()
-        queryset = user_model.objects.filter(is_active=True)
+        queryset = user_model.objects.filter(is_active=True, role=UserRole.OWNER)
 
         if self.instance.pk:
             queryset = queryset.filter(
@@ -149,6 +150,10 @@ class OwnerProfileForm(BootstrapModelForm):
             queryset = queryset.filter(owner_profile__isnull=True)
 
         set_model_queryset(self.fields["user"], queryset.order_by("email"))
+        self.fields["user"].help_text = _(
+            "Si el correo no aparece, crea primero el usuario con grupo "
+            "Médico propietario."
+        )
 
 
 class TenantDoctorProfileForm(BootstrapModelForm):
@@ -158,6 +163,7 @@ class TenantDoctorProfileForm(BootstrapModelForm):
             "user",
             "display_name",
             "specialties",
+            "assigned_rooms",
             "professional_license",
             "tax_id",
             "phone",
@@ -170,7 +176,10 @@ class TenantDoctorProfileForm(BootstrapModelForm):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         user_model = get_user_model()
-        queryset = user_model.objects.filter(is_active=True)
+        queryset = user_model.objects.filter(
+            is_active=True,
+            role=UserRole.TENANT_DOCTOR,
+        )
 
         if self.instance.pk:
             queryset = queryset.filter(
@@ -180,9 +189,19 @@ class TenantDoctorProfileForm(BootstrapModelForm):
             queryset = queryset.filter(tenant_doctor_profile__isnull=True)
 
         set_model_queryset(self.fields["user"], queryset.order_by("email"))
+        self.fields["user"].help_text = _(
+            "Si el correo no aparece, crea primero el usuario con grupo "
+            "Médico arrendatario."
+        )
         set_model_queryset(
             self.fields["specialties"],
             Specialty.objects.filter(is_deleted=False).order_by("name"),
+        )
+        set_model_queryset(
+            self.fields["assigned_rooms"],
+            ConsultingRoom.objects.filter(is_deleted=False)
+            .select_related("clinic", "owner")
+            .order_by("clinic__name", "name"),
         )
 
 

@@ -28,6 +28,7 @@ def create_reservation(
     actor: Model | None = None,
 ) -> Reservation:
     _validate_tenant_doctor_is_authorized(tenant_doctor)
+    _validate_tenant_doctor_room_assignment(tenant_doctor, room)
     _validate_available_block(room, reservation_date, start_time, end_time)
 
     reservation = Reservation(
@@ -122,6 +123,17 @@ def _validate_tenant_doctor_is_authorized(
     if tenant_doctor.status != TenantDoctorStatus.AUTHORIZED:
         raise ValidationError(
             {"tenant_doctor": "El médico arrendatario debe estar autorizado."}
+        )
+
+
+def _validate_tenant_doctor_room_assignment(
+    tenant_doctor: TenantDoctorProfile,
+    room: ConsultingRoom,
+) -> None:
+    assigned_rooms = tenant_doctor.assigned_rooms.filter(is_deleted=False)
+    if assigned_rooms.exists() and not assigned_rooms.filter(pk=room.pk).exists():
+        raise ValidationError(
+            {"room": "El médico arrendatario no está asignado a este consultorio."}
         )
 
 

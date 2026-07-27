@@ -122,6 +122,12 @@ class TenantDoctorProfile(BaseModel):
         _("cédula profesional"), max_length=80, blank=True
     )
     specialties = models.ManyToManyField(Specialty, blank=True, related_name="doctors")
+    assigned_rooms: models.ManyToManyField[Any, Any] = models.ManyToManyField(
+        "ConsultingRoom",
+        blank=True,
+        related_name="assigned_tenant_doctors",
+        verbose_name=_("consultorios asignados"),
+    )
     tax_id = models.CharField(_("RFC"), max_length=20, blank=True)
     phone = models.CharField(_("teléfono"), max_length=40, blank=True)
     status = models.CharField(

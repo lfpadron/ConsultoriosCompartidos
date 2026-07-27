@@ -14,6 +14,7 @@ urlpatterns = [
     path("", include("apps.astrotrace.urls")),
     path("", include("apps.integration.urls")),
     path("", include("apps.reports.urls")),
+    path("", include("apps.identity.urls")),
     path(
         "estados-de-cuenta/",
         views.construction_page,
