@@ -1,0 +1,160 @@
+diff --git a/static/css/app.css b/static/css/app.css
+index 95eddcc..bedc0bf 100644
+--- a/static/css/app.css
++++ b/static/css/app.css
+@@ -27,25 +27,38 @@ body {
+   background: rgba(255, 255, 255, 0.1);
+ }
+ 
+-.app-sidebar .brand-mark {
+-  display: inline-grid;
+-  place-items: center;
+-  width: 2.25rem;
+-  height: 2.25rem;
+-  border-radius: 0.5rem;
+-  background: #2f80ed;
+-  color: #fff;
+-  font-weight: 700;
++.app-content {
++  min-width: 0;
++}
++
++.sidebar-brand {
++  min-width: 0;
++}
++
++.sidebar-brand-logo {
++  width: 5.25rem;
++  height: 4rem;
++  flex: 0 0 5.25rem;
++  overflow: hidden;
++  border-radius: 0.25rem;
++  background: #0d3345;
+ }
+ 
+ .brand-logo-menu {
+-  width: 2.25rem;
+-  height: 2.25rem;
++  display: block;
++  width: 100%;
++  height: 100%;
+   object-fit: contain;
+ }
+ 
+-.app-content {
++.sidebar-brand-copy {
+   min-width: 0;
++  line-height: 1.25;
++}
++
++.sidebar-brand-title,
++.sidebar-brand-subtitle {
++  overflow-wrap: anywhere;
+ }
+ 
+ .header-brand {
+@@ -53,12 +66,22 @@ body {
+   align-items: center;
+   gap: 0.85rem;
+   min-width: 0;
++  overflow: hidden;
+ }
+ 
+ .header-logo {
+-  width: min(13rem, 30vw);
+-  max-height: 2.25rem;
++  display: block;
++  width: clamp(9rem, 13vw, 10.5rem);
++  max-width: 100%;
++  max-height: 3.75rem;
++  flex: 0 0 auto;
+   object-fit: contain;
++  object-position: left center;
++}
++
++.header-brand-copy {
++  min-width: 0;
++  line-height: 1.2;
+ }
+ 
+ .status-panel {
+@@ -166,6 +189,17 @@ body {
+     max-height: 8.25mm;
+   }
+ 
++  .sidebar-brand-logo {
++    width: 4.75rem;
++    height: 3.6rem;
++    flex-basis: 4.75rem;
++  }
++
++  .header-logo {
++    width: clamp(8rem, 42vw, 9.5rem);
++    max-height: 3.15rem;
++  }
++
+   .weekday-filter {
+     grid-template-columns: repeat(7, minmax(4rem, 1fr));
+   }
+diff --git a/templates/base.html b/templates/base.html
+index 2a8f4f2..e2dfd45 100644
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -8,7 +8,7 @@
+     <link rel="icon" type="image/png" href="{% static 'img/astrogato-solo-v02.png' %}">
+     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+-    <link href="{% static 'css/app.css' %}" rel="stylesheet">
++    <link href="{% static 'css/app.css' %}?v=20260803-logo-fit" rel="stylesheet">
+     <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+   </head>
+   <body>
+diff --git a/templates/partials/navbar.html b/templates/partials/navbar.html
+index 4fcac89..2862524 100644
+--- a/templates/partials/navbar.html
++++ b/templates/partials/navbar.html
+@@ -6,7 +6,7 @@
+     </button>
+     <div class="header-brand ms-2 ms-lg-0">
+       <img class="header-logo" src="{% static 'img/capital-logo-encabezado.png' %}" alt="Capital Medical Center">
+-      <div>
++      <div class="header-brand-copy">
+         <div class="fw-semibold">{{ page_title|default:"Dashboard" }}</div>
+         <div class="small text-secondary">Base operativa inicial</div>
+       </div>
+diff --git a/templates/partials/sidebar.html b/templates/partials/sidebar.html
+index 79532fd..42492db 100644
+--- a/templates/partials/sidebar.html
++++ b/templates/partials/sidebar.html
+@@ -1,9 +1,12 @@
+ {% load static %}
+ <aside class="app-sidebar d-none d-lg-flex flex-column p-3 text-white">
+-  <a class="d-flex align-items-center gap-2 text-white text-decoration-none mb-4" href="{% url 'dashboard' %}">
+-    <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
+-    <span>
+-      <span class="d-block fw-semibold">Capital Medical Center</span>
++  <a class="sidebar-brand d-flex align-items-center gap-2 text-white text-decoration-none mb-4" href="{% url 'dashboard' %}">
++    <span class="sidebar-brand-logo">
++      <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
++    </span>
++    <span class="sidebar-brand-copy">
++      <span class="sidebar-brand-title d-block fw-semibold">Control de acceso</span>
++      <span class="sidebar-brand-subtitle d-block small">Capital Medical Center</span>
+     </span>
+   </a>
+   <nav class="nav nav-pills flex-column gap-1">
+@@ -18,9 +21,11 @@
+ 
+ <div class="offcanvas offcanvas-start app-sidebar text-white" tabindex="-1" id="mobileSidebar" aria-labelledby="mobileSidebarLabel">
+   <div class="offcanvas-header">
+-    <div class="d-flex align-items-center gap-2">
+-      <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
+-      <h5 class="offcanvas-title" id="mobileSidebarLabel">Capital Medical Center</h5>
++    <div class="sidebar-brand d-flex align-items-center gap-2">
++      <span class="sidebar-brand-logo">
++        <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
++      </span>
++      <h5 class="offcanvas-title mb-0" id="mobileSidebarLabel">Capital Medical Center</h5>
+     </div>
+     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Cerrar"></button>
+   </div>

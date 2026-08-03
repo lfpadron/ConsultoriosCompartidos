@@ -1,9 +1,12 @@
 {% load static %}
 <aside class="app-sidebar d-none d-lg-flex flex-column p-3 text-white">
-  <a class="d-flex align-items-center gap-2 text-white text-decoration-none mb-4" href="{% url 'dashboard' %}">
-    <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
-    <span>
-      <span class="d-block fw-semibold">Capital Medical Center</span>
+  <a class="sidebar-brand d-flex align-items-center gap-2 text-white text-decoration-none mb-4" href="{% url 'dashboard' %}">
+    <span class="sidebar-brand-logo">
+      <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
+    </span>
+    <span class="sidebar-brand-copy">
+      <span class="sidebar-brand-title d-block fw-semibold">Control de acceso</span>
+      <span class="sidebar-brand-subtitle d-block small">Capital Medical Center</span>
     </span>
   </a>
   <nav class="nav nav-pills flex-column gap-1">
@@ -18,9 +21,11 @@
 
 <div class="offcanvas offcanvas-start app-sidebar text-white" tabindex="-1" id="mobileSidebar" aria-labelledby="mobileSidebarLabel">
   <div class="offcanvas-header">
-    <div class="d-flex align-items-center gap-2">
-      <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
-      <h5 class="offcanvas-title" id="mobileSidebarLabel">Capital Medical Center</h5>
+    <div class="sidebar-brand d-flex align-items-center gap-2">
+      <span class="sidebar-brand-logo">
+        <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
+      </span>
+      <h5 class="offcanvas-title mb-0" id="mobileSidebarLabel">Capital Medical Center</h5>
     </div>
     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Cerrar"></button>
   </div>
