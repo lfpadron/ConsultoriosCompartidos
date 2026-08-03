@@ -1,0 +1,253 @@
+diff --git a/static/css/app.css b/static/css/app.css
+index bedc0bf..6a9eebe 100644
+--- a/static/css/app.css
++++ b/static/css/app.css
+@@ -1,5 +1,5 @@
+ :root {
+-  --cc-sidebar-width: 17rem;
++  --cc-sidebar-width: 20rem;
+ }
+ 
+ body {
+@@ -9,11 +9,13 @@ body {
+ 
+ .app-shell {
+   min-height: 100vh;
++  background: #f6f7f9;
+ }
+ 
+ .app-sidebar {
+   width: var(--cc-sidebar-width);
+-  background: #16213a;
++  flex: 0 0 var(--cc-sidebar-width);
++  background: #101b28;
+ }
+ 
+ .app-sidebar .nav-link {
+@@ -29,6 +31,7 @@ body {
+ 
+ .app-content {
+   min-width: 0;
++  background: #f6f7f9;
+ }
+ 
+ .sidebar-brand {
+@@ -61,9 +64,39 @@ body {
+   overflow-wrap: anywhere;
+ }
+ 
++.sidebar-nav {
++  min-height: 0;
++  overflow-y: auto;
++}
++
++.sidebar-logout-button {
++  border: 0;
++  background: #e6edf6;
++  color: #132132;
++  font-weight: 700;
++}
++
++.sidebar-logout-button:hover,
++.sidebar-logout-button:focus {
++  background: #d4dfec;
++  color: #0e1824;
++}
++
++.app-header {
++  width: 100%;
++  min-height: 9rem;
++  align-items: flex-start;
++  background: #f6f7f9;
++}
++
++.app-header-inner {
++  width: 100%;
++  align-items: flex-start;
++}
++
+ .header-brand {
+   display: flex;
+-  align-items: center;
++  align-items: flex-start;
+   gap: 0.85rem;
+   min-width: 0;
+   overflow: hidden;
+@@ -71,19 +104,49 @@ body {
+ 
+ .header-logo {
+   display: block;
+-  width: clamp(9rem, 13vw, 10.5rem);
++  width: clamp(10.5rem, 14vw, 12.5rem);
+   max-width: 100%;
+-  max-height: 3.75rem;
++  max-height: 4.25rem;
+   flex: 0 0 auto;
+   object-fit: contain;
+   object-position: left center;
+ }
+ 
+-.header-brand-copy {
++.header-actions {
+   min-width: 0;
++}
++
++.logged-user-box {
++  display: inline-flex;
++  max-width: min(23rem, 42vw);
++  align-items: center;
++  gap: 0.55rem;
++  overflow: hidden;
++  border: 1px solid #cbd7e6;
++  border-radius: 0.5rem;
++  background: #fff;
++  padding: 0.45rem 0.75rem;
++  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+   line-height: 1.2;
+ }
+ 
++.logged-user-label {
++  color: #5d6a7c;
++  font-size: 0.75rem;
++  font-weight: 800;
++  letter-spacing: 0.04em;
++  text-transform: uppercase;
++}
++
++.logged-user-name {
++  min-width: 0;
++  overflow: hidden;
++  color: #07111f;
++  font-weight: 800;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++
+ .status-panel {
+   border: 1px solid #dde3ea;
+   border-radius: 0.5rem;
+@@ -174,6 +237,14 @@ body {
+ }
+ 
+ @media (max-width: 767.98px) {
++  .app-header {
++    min-height: 6.75rem;
++  }
++
++  .app-header-inner {
++    gap: 0.75rem;
++  }
++
+   .footer-banner {
+     grid-template-columns: 1fr;
+     justify-items: center;
+@@ -200,6 +271,15 @@ body {
+     max-height: 3.15rem;
+   }
+ 
++  .logged-user-box {
++    max-width: 48vw;
++    padding: 0.4rem 0.55rem;
++  }
++
++  .logged-user-label {
++    display: none;
++  }
++
+   .weekday-filter {
+     grid-template-columns: repeat(7, minmax(4rem, 1fr));
+   }
+diff --git a/templates/base.html b/templates/base.html
+index e2dfd45..5911888 100644
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -8,7 +8,7 @@
+     <link rel="icon" type="image/png" href="{% static 'img/astrogato-solo-v02.png' %}">
+     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+-    <link href="{% static 'css/app.css' %}?v=20260803-logo-fit" rel="stylesheet">
++    <link href="{% static 'css/app.css' %}?v=20260803-shell-user" rel="stylesheet">
+     <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+   </head>
+   <body>
+diff --git a/templates/partials/navbar.html b/templates/partials/navbar.html
+index 2862524..547552f 100644
+--- a/templates/partials/navbar.html
++++ b/templates/partials/navbar.html
+@@ -1,25 +1,18 @@
+ {% load static %}
+-<nav class="navbar navbar-expand-lg bg-white border-bottom px-3 px-lg-4">
+-  <div class="container-fluid px-0">
++<nav class="app-header navbar navbar-expand-lg px-3 px-lg-4">
++  <div class="app-header-inner container-fluid px-0">
+     <button class="btn btn-outline-secondary d-lg-none" type="button" data-bs-toggle="offcanvas" data-bs-target="#mobileSidebar" aria-controls="mobileSidebar" aria-label="Abrir navegación">
+       <i class="bi bi-list"></i>
+     </button>
+     <div class="header-brand ms-2 ms-lg-0">
+       <img class="header-logo" src="{% static 'img/capital-logo-encabezado.png' %}" alt="Capital Medical Center">
+-      <div class="header-brand-copy">
+-        <div class="fw-semibold">{{ page_title|default:"Dashboard" }}</div>
+-        <div class="small text-secondary">Base operativa inicial</div>
+-      </div>
+     </div>
+-    <div class="ms-auto d-flex align-items-center gap-2">
++    <div class="header-actions ms-auto d-flex align-items-start justify-content-end">
+       {% if request.user.is_authenticated %}
+-        <span class="small text-secondary d-none d-md-inline">{{ request.user.email }}</span>
+-        <form method="post" action="{% url 'logout' %}">
+-          {% csrf_token %}
+-          <button class="btn btn-sm btn-outline-secondary" type="submit" title="Cerrar sesión">
+-            <i class="bi bi-box-arrow-right"></i>
+-          </button>
+-        </form>
++        <div class="logged-user-box">
++          <span class="logged-user-label">Usuario</span>
++          <span class="logged-user-name">{{ request.user.get_full_name|default:request.user.email }}</span>
++        </div>
+       {% else %}
+         <a class="btn btn-sm btn-primary" href="{% url 'login' %}">
+           <i class="bi bi-box-arrow-in-right me-1"></i>
+diff --git a/templates/partials/sidebar.html b/templates/partials/sidebar.html
+index 42492db..42004ef 100644
+--- a/templates/partials/sidebar.html
++++ b/templates/partials/sidebar.html
+@@ -17,6 +17,14 @@
+       </a>
+     {% endfor %}
+   </nav>
++  {% if request.user.is_authenticated %}
++    <form class="sidebar-logout mt-auto pt-3" method="post" action="{% url 'logout' %}">
++      {% csrf_token %}
++      <button class="btn sidebar-logout-button w-100" type="submit">
++        Cerrar sesión
++      </button>
++    </form>
++  {% endif %}
+ </aside>
+ 
+ <div class="offcanvas offcanvas-start app-sidebar text-white" tabindex="-1" id="mobileSidebar" aria-labelledby="mobileSidebarLabel">
+@@ -29,8 +37,8 @@
+     </div>
+     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Cerrar"></button>
+   </div>
+-  <div class="offcanvas-body">
+-    <nav class="nav nav-pills flex-column gap-1">
++  <div class="offcanvas-body d-flex flex-column">
++    <nav class="sidebar-nav nav nav-pills flex-column gap-1 flex-grow-1">
+       {% for item in navigation_items %}
+         <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
+           <i class="bi {{ item.icon }}"></i>
+@@ -38,5 +46,13 @@
+         </a>
+       {% endfor %}
+     </nav>
++    {% if request.user.is_authenticated %}
++      <form class="sidebar-logout mt-auto pt-3" method="post" action="{% url 'logout' %}">
++        {% csrf_token %}
++        <button class="btn sidebar-logout-button w-100" type="submit">
++          Cerrar sesión
++        </button>
++      </form>
++    {% endif %}
+   </div>
+ </div>

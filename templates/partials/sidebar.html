@@ -17,6 +17,14 @@
       </a>
     {% endfor %}
   </nav>
+  {% if request.user.is_authenticated %}
+    <form class="sidebar-logout mt-auto pt-3" method="post" action="{% url 'logout' %}">
+      {% csrf_token %}
+      <button class="btn sidebar-logout-button w-100" type="submit">
+        Cerrar sesión
+      </button>
+    </form>
+  {% endif %}
 </aside>
 
 <div class="offcanvas offcanvas-start app-sidebar text-white" tabindex="-1" id="mobileSidebar" aria-labelledby="mobileSidebarLabel">
@@ -29,8 +37,8 @@
     </div>
     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Cerrar"></button>
   </div>
-  <div class="offcanvas-body">
-    <nav class="nav nav-pills flex-column gap-1">
+  <div class="offcanvas-body d-flex flex-column">
+    <nav class="sidebar-nav nav nav-pills flex-column gap-1 flex-grow-1">
       {% for item in navigation_items %}
         <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
           <i class="bi {{ item.icon }}"></i>
@@ -38,5 +46,13 @@
         </a>
       {% endfor %}
     </nav>
+    {% if request.user.is_authenticated %}
+      <form class="sidebar-logout mt-auto pt-3" method="post" action="{% url 'logout' %}">
+        {% csrf_token %}
+        <button class="btn sidebar-logout-button w-100" type="submit">
+          Cerrar sesión
+        </button>
+      </form>
+    {% endif %}
   </div>
 </div>
