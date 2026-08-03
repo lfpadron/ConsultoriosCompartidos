@@ -1,11 +1,15 @@
+{% load static %}
 <nav class="navbar navbar-expand-lg bg-white border-bottom px-3 px-lg-4">
   <div class="container-fluid px-0">
     <button class="btn btn-outline-secondary d-lg-none" type="button" data-bs-toggle="offcanvas" data-bs-target="#mobileSidebar" aria-controls="mobileSidebar" aria-label="Abrir navegación">
       <i class="bi bi-list"></i>
     </button>
-    <div class="ms-2 ms-lg-0">
-      <div class="fw-semibold">{{ page_title|default:"Dashboard" }}</div>
-      <div class="small text-secondary">Base operativa inicial</div>
+    <div class="header-brand ms-2 ms-lg-0">
+      <img class="header-logo" src="{% static 'img/capital-logo-encabezado.png' %}" alt="Capital Medical Center">
+      <div>
+        <div class="fw-semibold">{{ page_title|default:"Dashboard" }}</div>
+        <div class="small text-secondary">Base operativa inicial</div>
+      </div>
     </div>
     <div class="ms-auto d-flex align-items-center gap-2">
       {% if request.user.is_authenticated %}

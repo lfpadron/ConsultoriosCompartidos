@@ -38,8 +38,27 @@ body {
   font-weight: 700;
 }
 
+.brand-logo-menu {
+  width: 2.25rem;
+  height: 2.25rem;
+  object-fit: contain;
+}
+
 .app-content {
   min-width: 0;
+}
+
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.header-logo {
+  width: min(13rem, 30vw);
+  max-height: 2.25rem;
+  object-fit: contain;
 }
 
 .status-panel {
@@ -55,8 +74,8 @@ body {
 }
 
 .footer-compact {
-  padding-top: 0.35rem;
-  padding-bottom: 0.35rem;
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
 }
 
 .footer-banner {
@@ -82,8 +101,8 @@ body {
 }
 
 .footer-banner-logo {
-  width: min(10rem, 28vw);
-  max-height: 12mm;
+  width: min(8.5rem, 24vw);
+  max-height: 9mm;
   object-fit: contain;
 }
 
@@ -143,8 +162,8 @@ body {
   }
 
   .footer-banner-logo {
-    width: min(9rem, 70vw);
-    max-height: 11mm;
+    width: min(7.75rem, 65vw);
+    max-height: 8.25mm;
   }
 
   .weekday-filter {
