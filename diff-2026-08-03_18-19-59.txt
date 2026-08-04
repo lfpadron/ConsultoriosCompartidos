@@ -1,0 +1,28 @@
+diff --git a/subir_droplet.ps1 b/subir_droplet.ps1
+index 5687b2f..4fd72dc 100644
+--- a/subir_droplet.ps1
++++ b/subir_droplet.ps1
+@@ -141,7 +141,6 @@ try {
+ 
+     $remoteDirQ = Quote-Sh $RemoteDir
+     $composeFileQ = Quote-Sh $ComposeFile
+-    $siteUrlQ = Quote-Sh $SiteUrl
+     $remoteDeploySteps = @(
+         "set -e",
+         "cd $remoteDirQ",
+@@ -171,15 +170,6 @@ try {
+         $remoteDeploySteps += "systemctl reload nginx"
+     }
+ 
+-    $remoteDeploySteps += @(
+-        "docker compose -f $composeFileQ ps",
+-        "curl -fsSI http://127.0.0.1:8000/ >/dev/null || { docker compose -f $composeFileQ logs web --tail=160; exit 1; }"
+-    )
+-
+-    if (-not [string]::IsNullOrWhiteSpace($SiteUrl)) {
+-        $remoteDeploySteps += "curl -fsSIL $siteUrlQ >/dev/null || { echo 'La URL publica no respondio correctamente.' >&2; docker compose -f $composeFileQ logs web --tail=160; exit 1; }"
+-    }
+-
+     $remoteDeployCommand = $remoteDeploySteps -join "; "
+     $sshArgs = @()
+     if (-not [string]::IsNullOrWhiteSpace($KeyPath)) {

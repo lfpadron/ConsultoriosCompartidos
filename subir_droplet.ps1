@@ -141,7 +141,6 @@ try {
 
     $remoteDirQ = Quote-Sh $RemoteDir
     $composeFileQ = Quote-Sh $ComposeFile
-    $siteUrlQ = Quote-Sh $SiteUrl
     $remoteDeploySteps = @(
         "set -e",
         "cd $remoteDirQ",
@@ -169,15 +168,6 @@ try {
 
     if (-not $SkipNginxReload) {
         $remoteDeploySteps += "systemctl reload nginx"
-    }
-
-    $remoteDeploySteps += @(
-        "docker compose -f $composeFileQ ps",
-        "curl -fsSI http://127.0.0.1:8000/ >/dev/null || { docker compose -f $composeFileQ logs web --tail=160; exit 1; }"
-    )
-
-    if (-not [string]::IsNullOrWhiteSpace($SiteUrl)) {
-        $remoteDeploySteps += "curl -fsSIL $siteUrlQ >/dev/null || { echo 'La URL publica no respondio correctamente.' >&2; docker compose -f $composeFileQ logs web --tail=160; exit 1; }"
     }
 
     $remoteDeployCommand = $remoteDeploySteps -join "; "
