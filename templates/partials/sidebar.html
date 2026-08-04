@@ -5,11 +5,11 @@
       <img class="brand-logo-menu" src="{% static 'img/capital-logo-menu.png' %}" alt="Capital Medical Center">
     </span>
     <span class="sidebar-brand-copy">
-      <span class="sidebar-brand-title d-block fw-semibold">Control de acceso</span>
+      <span class="sidebar-brand-title d-block fw-semibold">Consultorios Compartidos</span>
       <span class="sidebar-brand-subtitle d-block small">Capital Medical Center</span>
     </span>
   </a>
-  <nav class="nav nav-pills flex-column gap-1">
+  <nav class="sidebar-nav nav nav-pills flex-column gap-1">
     {% for item in navigation_items %}
       <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
         <i class="bi {{ item.icon }}"></i>
