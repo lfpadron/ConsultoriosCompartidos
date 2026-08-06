@@ -115,6 +115,18 @@ if (-not [string]::IsNullOrWhiteSpace($KeyPath)) {
 }
 
 $Remote = "$User@$Server"
+$SiteHost = "localhost"
+if (-not [string]::IsNullOrWhiteSpace($SiteUrl)) {
+    try {
+        $parsedSiteUrl = [System.Uri]$SiteUrl
+        if (-not [string]::IsNullOrWhiteSpace($parsedSiteUrl.Host)) {
+            $SiteHost = $parsedSiteUrl.Host
+        }
+    }
+    catch {
+        Write-Host "Aviso: no pude leer el host de SiteUrl; usare localhost para el smoke test."
+    }
+}
 
 try {
     Test-Command "ssh"
@@ -141,11 +153,15 @@ try {
 
     $remoteDirQ = Quote-Sh $RemoteDir
     $composeFileQ = Quote-Sh $ComposeFile
+    $hostHeaderQ = Quote-Sh "Host: $SiteHost"
+    $waitAttempts = (1..45) -join " "
     $remoteDeploySteps = @(
         "set -e",
         "cd $remoteDirQ",
         "if [ ! -s $composeFileQ ]; then echo '$ComposeFile no existe o esta vacio en $RemoteDir' >&2; exit 1; fi",
-        "if [ ! -s .env ]; then echo '.env no existe o esta vacio en $RemoteDir' >&2; exit 1; fi"
+        "if [ ! -s .env ]; then echo '.env no existe o esta vacio en $RemoteDir' >&2; exit 1; fi",
+        "systemctl enable docker >/dev/null 2>&1 || true",
+        "systemctl start docker >/dev/null 2>&1 || true"
     )
 
     if (-not $SkipPull) {
@@ -165,6 +181,9 @@ try {
     if (-not $SkipRestartWeb) {
         $remoteDeploySteps += "docker compose -f $composeFileQ restart web"
     }
+
+    $remoteDeploySteps += "echo 'Esperando a que Django responda en 127.0.0.1:8000...'"
+    $remoteDeploySteps += "for i in $waitAttempts; do if curl -fsS -o /dev/null --max-time 3 -H $hostHeaderQ http://127.0.0.1:8000/; then echo 'Web lista'; break; fi; if [ `$i -eq 45 ]; then echo 'web no respondio a tiempo' >&2; docker compose -f $composeFileQ ps; docker compose -f $composeFileQ logs web --tail=180; exit 1; fi; sleep 2; done"
 
     if (-not $SkipNginxReload) {
         $remoteDeploySteps += "systemctl reload nginx"
