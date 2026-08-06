@@ -17,6 +17,15 @@ DATE_INPUT_ATTRS = {
     "data-week-start": "1",
 }
 
+COMMON_FIELD_LABELS = {
+    "created_at": "Creado en",
+    "updated_at": "Actualizado en",
+    "created_by": "Creado por",
+    "updated_by": "Actualizado por",
+    "is_active": "Activo",
+    "is_deleted": "Eliminado",
+}
+
 
 def monday_date_input() -> forms.DateInput:
     """Return a localized native date input hinting Monday as week start."""
@@ -59,7 +68,10 @@ def selected_model_pk(data: Any, field_name: str) -> UUID | None:
 
 
 def style_form_fields(fields: dict[str, forms.Field]) -> None:
-    for field in fields.values():
+    for field_name, field in fields.items():
+        if field_name in COMMON_FIELD_LABELS:
+            field.label = COMMON_FIELD_LABELS[field_name]
+
         widget = field.widget
         if isinstance(widget, forms.CheckboxSelectMultiple):
             widget.attrs["class"] = "weekday-checkbox-input"

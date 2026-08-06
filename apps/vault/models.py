@@ -48,8 +48,8 @@ class DocumentAsset(BaseModel):
     )
     file = models.FileField(_("archivo"), upload_to=document_upload_path)
     original_name = models.CharField(_("nombre original"), max_length=255, blank=True)
-    mime_type = models.CharField(_("MIME type"), max_length=120, blank=True)
-    size_bytes = models.PositiveBigIntegerField(_("tamaño bytes"), default=0)
+    mime_type = models.CharField(_("tipo MIME"), max_length=120, blank=True)
+    size_bytes = models.PositiveBigIntegerField(_("tamaño en bytes"), default=0)
     sha256_hash = models.CharField(
         _("SHA-256"),
         max_length=64,

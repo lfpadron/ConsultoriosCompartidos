@@ -21,7 +21,11 @@ class Clinic(BaseModel):
     phone = models.CharField(_("teléfono"), max_length=40, blank=True)
     email = models.EmailField(_("correo electrónico"), blank=True)
     schedule_text = models.TextField(_("horario"), blank=True)
-    timezone = models.CharField(max_length=64, default="America/Mexico_City")
+    timezone = models.CharField(
+        _("zona horaria"),
+        max_length=64,
+        default="America/Mexico_City",
+    )
     hour_format = models.CharField(
         _("formato de hora"),
         max_length=8,
@@ -172,6 +176,9 @@ class ConsultingRoom(BaseModel):
         related_name="consulting_rooms",
     )
     name = models.CharField(_("nombre"), max_length=160)
+    campus = models.CharField(_("campus"), max_length=120, blank=True)
+    tower = models.CharField(_("torre"), max_length=120, blank=True)
+    number = models.CharField(_("número"), max_length=40, blank=True)
     description = models.TextField(_("descripción"), blank=True)
     floor = models.CharField(_("piso"), max_length=40, blank=True)
     capacity = models.PositiveSmallIntegerField(_("capacidad"), default=1)
@@ -208,6 +215,8 @@ class ConsultingRoom(BaseModel):
         errors = {}
         if not self.name.strip():
             errors["name"] = _("El nombre es obligatorio.")
+        if not self.number.strip():
+            errors["number"] = _("El número es obligatorio.")
 
         if not self.clinic_id:
             errors["clinic"] = _("El consultorio debe tener una clínica.")

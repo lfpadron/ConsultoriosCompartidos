@@ -16,7 +16,7 @@ def test_dashboard_responds(client: Any) -> None:
     assert response.status_code == 200
     assert "Dashboard Ejecutivo" in content
     assert "UNA MISIÓN EN PROGRESO DE:" in content
-    assert "astrogato-texto-derecha-centrado.png" in content
+    assert "astrogato-texto-derecha-centrado-v03.png" in content
     assert 'id="footer-clock"' in content
     assert "--:--:--" in content
 

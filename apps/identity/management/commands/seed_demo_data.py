@@ -303,18 +303,57 @@ class Command(BaseCommand):
         admin: Any,
     ) -> tuple[ConsultingRoom, ...]:
         room_specs = (
-            (clinics[0], owners[0], "Consultorio Norte 101", "1", specialties[:2]),
-            (clinics[0], owners[0], "Consultorio Norte 102", "1", specialties[1:]),
-            (clinics[1], owners[1], "Consultorio Sur 201", "2", specialties[:1]),
-            (clinics[1], owners[1], "Consultorio Sur 202", "2", specialties),
+            (
+                clinics[0],
+                owners[0],
+                "Campus Norte",
+                "Torre A",
+                "101",
+                "Consultorio Norte 101",
+                "1",
+                specialties[:2],
+            ),
+            (
+                clinics[0],
+                owners[0],
+                "Campus Norte",
+                "Torre A",
+                "102",
+                "Consultorio Norte 102",
+                "1",
+                specialties[1:],
+            ),
+            (
+                clinics[1],
+                owners[1],
+                "Campus Sur",
+                "Torre B",
+                "201",
+                "Consultorio Sur 201",
+                "2",
+                specialties[:1],
+            ),
+            (
+                clinics[1],
+                owners[1],
+                "Campus Sur",
+                "Torre B",
+                "202",
+                "Consultorio Sur 202",
+                "2",
+                specialties,
+            ),
         )
         rooms = []
-        for clinic, owner, name, floor, allowed in room_specs:
+        for clinic, owner, campus, tower, number, name, floor, allowed in room_specs:
             room, _ = ConsultingRoom.objects.get_or_create(
                 clinic=clinic,
                 name=name,
                 defaults={
                     "owner": owner,
+                    "campus": campus,
+                    "tower": tower,
+                    "number": number,
                     "floor": floor,
                     "capacity": 2,
                     "description": f"{name} preparado para pruebas de agenda.",
@@ -324,8 +363,20 @@ class Command(BaseCommand):
                 },
             )
             room.owner = owner
+            room.campus = campus
+            room.tower = tower
+            room.number = number
             room.is_active = True
-            room.save(update_fields=["owner", "is_active", "updated_at"])
+            room.save(
+                update_fields=[
+                    "owner",
+                    "campus",
+                    "tower",
+                    "number",
+                    "is_active",
+                    "updated_at",
+                ]
+            )
             room.allowed_specialties.set(allowed)
             room.excluded_specialties.clear()
             room.equipment.set(equipment[:2])

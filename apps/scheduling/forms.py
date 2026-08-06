@@ -294,6 +294,8 @@ class ReservationRequestForm(BootstrapModelForm):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.fields["room"].label = "Consultorio"
+        self.fields["tenant_doctor"].label = "Médico arrendatario"
         set_model_queryset(
             self.fields["room"],
             _room_queryset(active_only=True),

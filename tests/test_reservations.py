@@ -46,6 +46,7 @@ def create_room(name: str = "Consultorio Reserva") -> ConsultingRoom:
     return ConsultingRoom.objects.create(
         clinic=clinic,
         owner=owner,
+        number="101",
         name=name,
         capacity=1,
     )
@@ -287,7 +288,7 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
     create_rate(room)
     client.force_login(user)
 
-    response = client.get(f"/calendario/?week=2026-08-03&room={room.pk}")
+    response = client.get(f"/calendario/?week=2026-08-10&room={room.pk}")
 
     assert response.status_code == 200
     assert "Solicitar reservación" in response.content.decode()
@@ -331,8 +332,8 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
     client.force_login(user)
 
     response = client.get(
-        f"/calendario/vista-rapida/?week=2026-08-03"
-        f"&room={room.pk}&selected_date=2026-08-03"
+        f"/calendario/vista-rapida/?week=2026-08-10"
+        f"&room={room.pk}&selected_date=2026-08-10"
     )
 
     content = response.content.decode()
@@ -354,15 +355,15 @@ def test_quick_calendar_shows_reserved_day_when_no_free_blocks(client: Any) -> N
     create_reservation(
         room=room,
         tenant_doctor=doctor,
-        reservation_date=date(2026, 8, 3),
+        reservation_date=date(2026, 8, 10),
         start_time=time(8, 0),
         end_time=time(13, 0),
     )
     client.force_login(user)
 
     response = client.get(
-        f"/calendario/vista-rapida/?week=2026-08-03"
-        f"&room={room.pk}&selected_date=2026-08-03"
+        f"/calendario/vista-rapida/?week=2026-08-10"
+        f"&room={room.pk}&selected_date=2026-08-10"
     )
 
     content = response.content.decode()

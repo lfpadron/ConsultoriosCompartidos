@@ -103,6 +103,9 @@ def test_create_consulting_room() -> None:
     room = ConsultingRoom.objects.create(
         clinic=clinic,
         owner=owner,
+        campus="Campus Centro",
+        tower="Torre A",
+        number="101",
         name="Consultorio 1",
         floor="PB",
         capacity=2,
@@ -112,6 +115,9 @@ def test_create_consulting_room() -> None:
 
     assert room.clinic == clinic
     assert room.owner == owner
+    assert room.campus == "Campus Centro"
+    assert room.tower == "Torre A"
+    assert room.number == "101"
     assert room.capacity == 2
 
 
@@ -125,6 +131,7 @@ def test_consulting_room_specialties_must_not_overlap() -> None:
         data={
             "clinic": str(clinic.pk),
             "owner": str(owner.pk),
+            "number": "202",
             "name": "Consultorio 2",
             "capacity": "1",
             "allowed_specialties": [str(specialty.pk)],
@@ -137,6 +144,29 @@ def test_consulting_room_specialties_must_not_overlap() -> None:
 
     assert form.is_valid() is False
     assert "excluded_specialties" in form.errors
+
+
+@pytest.mark.django_db
+def test_consulting_room_form_requires_number() -> None:
+    clinic = Clinic.objects.create(name="Clínica Número")
+    owner = OwnerProfile.objects.create(user=create_user("owner-number@example.com"))
+
+    form = ConsultingRoomForm(
+        data={
+            "clinic": str(clinic.pk),
+            "owner": str(owner.pk),
+            "name": "Consultorio sin número",
+            "capacity": "1",
+            "allowed_specialties": [],
+            "excluded_specialties": [],
+            "equipment": [],
+            "status": "available",
+            "is_active": "on",
+        }
+    )
+
+    assert form.is_valid() is False
+    assert "number" in form.errors
 
 
 @pytest.mark.django_db

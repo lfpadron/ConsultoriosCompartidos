@@ -71,7 +71,7 @@ CLINIC = CatalogResource(
     list_columns=(
         ("Nombre", "name"),
         ("Teléfono", "phone"),
-        ("Email", "email"),
+        ("Correo electrónico", "email"),
         ("Zona horaria", "timezone"),
         ("Formato hora", "get_hour_format_display"),
         ("Estado", "is_active"),
@@ -80,7 +80,7 @@ CLINIC = CatalogResource(
         ("Nombre", "name"),
         ("Dirección", "address"),
         ("Teléfono", "phone"),
-        ("Email", "email"),
+        ("Correo electrónico", "email"),
         ("Horario", "schedule_text"),
         ("Zona horaria", "timezone"),
         ("Formato hora", "get_hour_format_display"),
@@ -199,7 +199,10 @@ ROOM = CatalogResource(
     update_url_name="room_update",
     deactivate_url_name="room_deactivate",
     list_columns=(
+        ("Número", "number"),
         ("Nombre", "name"),
+        ("Campus", "campus"),
+        ("Torre", "tower"),
         ("Clínica", "clinic"),
         ("Propietario", "owner"),
         ("Estado", "get_status_display"),
@@ -208,7 +211,10 @@ ROOM = CatalogResource(
     detail_fields=(
         ("Clínica", "clinic"),
         ("Propietario", "owner"),
-        ("Número / nombre", "name"),
+        ("Campus", "campus"),
+        ("Torre", "tower"),
+        ("Número", "number"),
+        ("Nombre", "name"),
         ("Descripción", "description"),
         ("Piso", "floor"),
         ("Capacidad", "capacity"),
@@ -343,6 +349,9 @@ def filter_catalog_queryset(
     if model is ConsultingRoom:
         return queryset.filter(
             Q(name__icontains=query)
+            | Q(number__icontains=query)
+            | Q(campus__icontains=query)
+            | Q(tower__icontains=query)
             | Q(clinic__name__icontains=query)
             | Q(owner__display_name__icontains=query)
             | Q(owner__user__email__icontains=query)

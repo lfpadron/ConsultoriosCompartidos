@@ -21,10 +21,23 @@ class ClinicAdmin(admin.ModelAdmin):
 
 @admin.register(ConsultingRoom)
 class ConsultingRoomAdmin(admin.ModelAdmin):
-    list_display = ("name", "clinic", "owner", "status", "capacity", "is_active")
-    list_filter = ("clinic", "status", "is_active")
+    list_display = (
+        "name",
+        "number",
+        "campus",
+        "tower",
+        "clinic",
+        "owner",
+        "status",
+        "capacity",
+        "is_active",
+    )
+    list_filter = ("clinic", "campus", "tower", "status", "is_active")
     search_fields = (
         "name",
+        "number",
+        "campus",
+        "tower",
         "clinic__name",
         "owner__display_name",
         "owner__user__email",

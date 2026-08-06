@@ -150,6 +150,7 @@ class OwnerProfileForm(BootstrapModelForm):
             queryset = queryset.filter(owner_profile__isnull=True)
 
         set_model_queryset(self.fields["user"], queryset.order_by("email"))
+        self.fields["user"].label = _("Usuario")
         self.fields["user"].help_text = _(
             "Si el correo no aparece, crea primero el usuario con grupo "
             "Médico propietario."
@@ -189,10 +190,13 @@ class TenantDoctorProfileForm(BootstrapModelForm):
             queryset = queryset.filter(tenant_doctor_profile__isnull=True)
 
         set_model_queryset(self.fields["user"], queryset.order_by("email"))
+        self.fields["user"].label = _("Usuario")
         self.fields["user"].help_text = _(
             "Si el correo no aparece, crea primero el usuario con grupo "
             "Médico arrendatario."
         )
+        self.fields["specialties"].label = _("Especialidades")
+        self.fields["assigned_rooms"].label = _("Consultorios asignados")
         set_model_queryset(
             self.fields["specialties"],
             Specialty.objects.filter(is_deleted=False).order_by("name"),
@@ -211,6 +215,9 @@ class ConsultingRoomForm(BootstrapModelForm):
         fields = (
             "clinic",
             "owner",
+            "campus",
+            "tower",
+            "number",
             "name",
             "description",
             "floor",
@@ -229,6 +236,11 @@ class ConsultingRoomForm(BootstrapModelForm):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.fields["clinic"].label = _("Clínica")
+        self.fields["owner"].label = _("Médico propietario")
+        self.fields["allowed_specialties"].label = _("Especialidades permitidas")
+        self.fields["excluded_specialties"].label = _("Especialidades excluidas")
+        self.fields["equipment"].label = _("Equipamiento")
         set_model_queryset(
             self.fields["clinic"],
             Clinic.objects.filter(is_deleted=False).order_by("name"),
@@ -249,6 +261,7 @@ class ConsultingRoomForm(BootstrapModelForm):
             self.fields["equipment"],
             Equipment.objects.filter(is_deleted=False).order_by("name"),
         )
+        self.fields["number"].required = True
 
     def clean(self) -> dict[str, Any]:
         cleaned_data = super().clean() or {}

@@ -1,0 +1,468 @@
+diff --git a/apps/catalog/admin.py b/apps/catalog/admin.py
+index f6497ac..d066f9a 100644
+--- a/apps/catalog/admin.py
++++ b/apps/catalog/admin.py
+@@ -21,10 +21,23 @@ class ClinicAdmin(admin.ModelAdmin):
+ 
+ @admin.register(ConsultingRoom)
+ class ConsultingRoomAdmin(admin.ModelAdmin):
+-    list_display = ("name", "clinic", "owner", "status", "capacity", "is_active")
+-    list_filter = ("clinic", "status", "is_active")
++    list_display = (
++        "name",
++        "number",
++        "campus",
++        "tower",
++        "clinic",
++        "owner",
++        "status",
++        "capacity",
++        "is_active",
++    )
++    list_filter = ("clinic", "campus", "tower", "status", "is_active")
+     search_fields = (
+         "name",
++        "number",
++        "campus",
++        "tower",
+         "clinic__name",
+         "owner__display_name",
+         "owner__user__email",
+diff --git a/apps/catalog/forms.py b/apps/catalog/forms.py
+index 9e9a384..e11a74f 100644
+--- a/apps/catalog/forms.py
++++ b/apps/catalog/forms.py
+@@ -150,6 +150,7 @@ class OwnerProfileForm(BootstrapModelForm):
+             queryset = queryset.filter(owner_profile__isnull=True)
+ 
+         set_model_queryset(self.fields["user"], queryset.order_by("email"))
++        self.fields["user"].label = _("Usuario")
+         self.fields["user"].help_text = _(
+             "Si el correo no aparece, crea primero el usuario con grupo "
+             "Médico propietario."
+@@ -189,10 +190,13 @@ class TenantDoctorProfileForm(BootstrapModelForm):
+             queryset = queryset.filter(tenant_doctor_profile__isnull=True)
+ 
+         set_model_queryset(self.fields["user"], queryset.order_by("email"))
++        self.fields["user"].label = _("Usuario")
+         self.fields["user"].help_text = _(
+             "Si el correo no aparece, crea primero el usuario con grupo "
+             "Médico arrendatario."
+         )
++        self.fields["specialties"].label = _("Especialidades")
++        self.fields["assigned_rooms"].label = _("Consultorios asignados")
+         set_model_queryset(
+             self.fields["specialties"],
+             Specialty.objects.filter(is_deleted=False).order_by("name"),
+@@ -211,6 +215,9 @@ class ConsultingRoomForm(BootstrapModelForm):
+         fields = (
+             "clinic",
+             "owner",
++            "campus",
++            "tower",
++            "number",
+             "name",
+             "description",
+             "floor",
+@@ -229,6 +236,11 @@ class ConsultingRoomForm(BootstrapModelForm):
+ 
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         super().__init__(*args, **kwargs)
++        self.fields["clinic"].label = _("Clínica")
++        self.fields["owner"].label = _("Médico propietario")
++        self.fields["allowed_specialties"].label = _("Especialidades permitidas")
++        self.fields["excluded_specialties"].label = _("Especialidades excluidas")
++        self.fields["equipment"].label = _("Equipamiento")
+         set_model_queryset(
+             self.fields["clinic"],
+             Clinic.objects.filter(is_deleted=False).order_by("name"),
+@@ -249,6 +261,7 @@ class ConsultingRoomForm(BootstrapModelForm):
+             self.fields["equipment"],
+             Equipment.objects.filter(is_deleted=False).order_by("name"),
+         )
++        self.fields["number"].required = True
+ 
+     def clean(self) -> dict[str, Any]:
+         cleaned_data = super().clean() or {}
+diff --git a/apps/catalog/models.py b/apps/catalog/models.py
+index eeacec1..dd1568f 100644
+--- a/apps/catalog/models.py
++++ b/apps/catalog/models.py
+@@ -21,7 +21,11 @@ class Clinic(BaseModel):
+     phone = models.CharField(_("teléfono"), max_length=40, blank=True)
+     email = models.EmailField(_("correo electrónico"), blank=True)
+     schedule_text = models.TextField(_("horario"), blank=True)
+-    timezone = models.CharField(max_length=64, default="America/Mexico_City")
++    timezone = models.CharField(
++        _("zona horaria"),
++        max_length=64,
++        default="America/Mexico_City",
++    )
+     hour_format = models.CharField(
+         _("formato de hora"),
+         max_length=8,
+@@ -172,6 +176,9 @@ class ConsultingRoom(BaseModel):
+         related_name="consulting_rooms",
+     )
+     name = models.CharField(_("nombre"), max_length=160)
++    campus = models.CharField(_("campus"), max_length=120, blank=True)
++    tower = models.CharField(_("torre"), max_length=120, blank=True)
++    number = models.CharField(_("número"), max_length=40, blank=True)
+     description = models.TextField(_("descripción"), blank=True)
+     floor = models.CharField(_("piso"), max_length=40, blank=True)
+     capacity = models.PositiveSmallIntegerField(_("capacidad"), default=1)
+@@ -208,6 +215,8 @@ class ConsultingRoom(BaseModel):
+         errors = {}
+         if not self.name.strip():
+             errors["name"] = _("El nombre es obligatorio.")
++        if not self.number.strip():
++            errors["number"] = _("El número es obligatorio.")
+ 
+         if not self.clinic_id:
+             errors["clinic"] = _("El consultorio debe tener una clínica.")
+diff --git a/apps/catalog/views.py b/apps/catalog/views.py
+index 9e47dc9..2f8b45f 100644
+--- a/apps/catalog/views.py
++++ b/apps/catalog/views.py
+@@ -71,7 +71,7 @@ CLINIC = CatalogResource(
+     list_columns=(
+         ("Nombre", "name"),
+         ("Teléfono", "phone"),
+-        ("Email", "email"),
++        ("Correo electrónico", "email"),
+         ("Zona horaria", "timezone"),
+         ("Formato hora", "get_hour_format_display"),
+         ("Estado", "is_active"),
+@@ -80,7 +80,7 @@ CLINIC = CatalogResource(
+         ("Nombre", "name"),
+         ("Dirección", "address"),
+         ("Teléfono", "phone"),
+-        ("Email", "email"),
++        ("Correo electrónico", "email"),
+         ("Horario", "schedule_text"),
+         ("Zona horaria", "timezone"),
+         ("Formato hora", "get_hour_format_display"),
+@@ -199,7 +199,10 @@ ROOM = CatalogResource(
+     update_url_name="room_update",
+     deactivate_url_name="room_deactivate",
+     list_columns=(
++        ("Número", "number"),
+         ("Nombre", "name"),
++        ("Campus", "campus"),
++        ("Torre", "tower"),
+         ("Clínica", "clinic"),
+         ("Propietario", "owner"),
+         ("Estado", "get_status_display"),
+@@ -208,7 +211,10 @@ ROOM = CatalogResource(
+     detail_fields=(
+         ("Clínica", "clinic"),
+         ("Propietario", "owner"),
+-        ("Número / nombre", "name"),
++        ("Campus", "campus"),
++        ("Torre", "tower"),
++        ("Número", "number"),
++        ("Nombre", "name"),
+         ("Descripción", "description"),
+         ("Piso", "floor"),
+         ("Capacidad", "capacity"),
+@@ -343,6 +349,9 @@ def filter_catalog_queryset(
+     if model is ConsultingRoom:
+         return queryset.filter(
+             Q(name__icontains=query)
++            | Q(number__icontains=query)
++            | Q(campus__icontains=query)
++            | Q(tower__icontains=query)
+             | Q(clinic__name__icontains=query)
+             | Q(owner__display_name__icontains=query)
+             | Q(owner__user__email__icontains=query)
+diff --git a/apps/core/form_utils.py b/apps/core/form_utils.py
+index a6796b8..4b2a00c 100644
+--- a/apps/core/form_utils.py
++++ b/apps/core/form_utils.py
+@@ -17,6 +17,15 @@ DATE_INPUT_ATTRS = {
+     "data-week-start": "1",
+ }
+ 
++COMMON_FIELD_LABELS = {
++    "created_at": "Creado en",
++    "updated_at": "Actualizado en",
++    "created_by": "Creado por",
++    "updated_by": "Actualizado por",
++    "is_active": "Activo",
++    "is_deleted": "Eliminado",
++}
++
+ 
+ def monday_date_input() -> forms.DateInput:
+     """Return a localized native date input hinting Monday as week start."""
+@@ -59,7 +68,10 @@ def selected_model_pk(data: Any, field_name: str) -> UUID | None:
+ 
+ 
+ def style_form_fields(fields: dict[str, forms.Field]) -> None:
+-    for field in fields.values():
++    for field_name, field in fields.items():
++        if field_name in COMMON_FIELD_LABELS:
++            field.label = COMMON_FIELD_LABELS[field_name]
++
+         widget = field.widget
+         if isinstance(widget, forms.CheckboxSelectMultiple):
+             widget.attrs["class"] = "weekday-checkbox-input"
+diff --git a/apps/identity/management/commands/seed_demo_data.py b/apps/identity/management/commands/seed_demo_data.py
+index 6af399b..031a54d 100644
+--- a/apps/identity/management/commands/seed_demo_data.py
++++ b/apps/identity/management/commands/seed_demo_data.py
+@@ -303,18 +303,57 @@ class Command(BaseCommand):
+         admin: Any,
+     ) -> tuple[ConsultingRoom, ...]:
+         room_specs = (
+-            (clinics[0], owners[0], "Consultorio Norte 101", "1", specialties[:2]),
+-            (clinics[0], owners[0], "Consultorio Norte 102", "1", specialties[1:]),
+-            (clinics[1], owners[1], "Consultorio Sur 201", "2", specialties[:1]),
+-            (clinics[1], owners[1], "Consultorio Sur 202", "2", specialties),
++            (
++                clinics[0],
++                owners[0],
++                "Campus Norte",
++                "Torre A",
++                "101",
++                "Consultorio Norte 101",
++                "1",
++                specialties[:2],
++            ),
++            (
++                clinics[0],
++                owners[0],
++                "Campus Norte",
++                "Torre A",
++                "102",
++                "Consultorio Norte 102",
++                "1",
++                specialties[1:],
++            ),
++            (
++                clinics[1],
++                owners[1],
++                "Campus Sur",
++                "Torre B",
++                "201",
++                "Consultorio Sur 201",
++                "2",
++                specialties[:1],
++            ),
++            (
++                clinics[1],
++                owners[1],
++                "Campus Sur",
++                "Torre B",
++                "202",
++                "Consultorio Sur 202",
++                "2",
++                specialties,
++            ),
+         )
+         rooms = []
+-        for clinic, owner, name, floor, allowed in room_specs:
++        for clinic, owner, campus, tower, number, name, floor, allowed in room_specs:
+             room, _ = ConsultingRoom.objects.get_or_create(
+                 clinic=clinic,
+                 name=name,
+                 defaults={
+                     "owner": owner,
++                    "campus": campus,
++                    "tower": tower,
++                    "number": number,
+                     "floor": floor,
+                     "capacity": 2,
+                     "description": f"{name} preparado para pruebas de agenda.",
+@@ -324,8 +363,20 @@ class Command(BaseCommand):
+                 },
+             )
+             room.owner = owner
++            room.campus = campus
++            room.tower = tower
++            room.number = number
+             room.is_active = True
+-            room.save(update_fields=["owner", "is_active", "updated_at"])
++            room.save(
++                update_fields=[
++                    "owner",
++                    "campus",
++                    "tower",
++                    "number",
++                    "is_active",
++                    "updated_at",
++                ]
++            )
+             room.allowed_specialties.set(allowed)
+             room.excluded_specialties.clear()
+             room.equipment.set(equipment[:2])
+diff --git a/apps/scheduling/forms.py b/apps/scheduling/forms.py
+index c172c9b..4e26a39 100644
+--- a/apps/scheduling/forms.py
++++ b/apps/scheduling/forms.py
+@@ -294,6 +294,8 @@ class ReservationRequestForm(BootstrapModelForm):
+ 
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         super().__init__(*args, **kwargs)
++        self.fields["room"].label = "Consultorio"
++        self.fields["tenant_doctor"].label = "Médico arrendatario"
+         set_model_queryset(
+             self.fields["room"],
+             _room_queryset(active_only=True),
+diff --git a/apps/vault/models.py b/apps/vault/models.py
+index 0a64ea8..38b3174 100644
+--- a/apps/vault/models.py
++++ b/apps/vault/models.py
+@@ -48,8 +48,8 @@ class DocumentAsset(BaseModel):
+     )
+     file = models.FileField(_("archivo"), upload_to=document_upload_path)
+     original_name = models.CharField(_("nombre original"), max_length=255, blank=True)
+-    mime_type = models.CharField(_("MIME type"), max_length=120, blank=True)
+-    size_bytes = models.PositiveBigIntegerField(_("tamaño bytes"), default=0)
++    mime_type = models.CharField(_("tipo MIME"), max_length=120, blank=True)
++    size_bytes = models.PositiveBigIntegerField(_("tamaño en bytes"), default=0)
+     sha256_hash = models.CharField(
+         _("SHA-256"),
+         max_length=64,
+diff --git a/templates/vault/document_detail.html b/templates/vault/document_detail.html
+index a54faca..98673ce 100644
+--- a/templates/vault/document_detail.html
++++ b/templates/vault/document_detail.html
+@@ -57,9 +57,9 @@
+         </dd>
+         <dt class="col-sm-4 col-lg-3 text-secondary">Nombre original</dt>
+         <dd class="col-sm-8 col-lg-9">{{ document.original_name }}</dd>
+-        <dt class="col-sm-4 col-lg-3 text-secondary">MIME</dt>
++        <dt class="col-sm-4 col-lg-3 text-secondary">Tipo MIME</dt>
+         <dd class="col-sm-8 col-lg-9">{{ document.mime_type }}</dd>
+-        <dt class="col-sm-4 col-lg-3 text-secondary">Tamaño</dt>
++        <dt class="col-sm-4 col-lg-3 text-secondary">Tamaño en bytes</dt>
+         <dd class="col-sm-8 col-lg-9">{{ document.size_bytes }} bytes</dd>
+         <dt class="col-sm-4 col-lg-3 text-secondary">Versión</dt>
+         <dd class="col-sm-8 col-lg-9">{{ document.version }}</dd>
+diff --git a/tests/test_catalog.py b/tests/test_catalog.py
+index a7eec8c..5c3db68 100644
+--- a/tests/test_catalog.py
++++ b/tests/test_catalog.py
+@@ -103,6 +103,9 @@ def test_create_consulting_room() -> None:
+     room = ConsultingRoom.objects.create(
+         clinic=clinic,
+         owner=owner,
++        campus="Campus Centro",
++        tower="Torre A",
++        number="101",
+         name="Consultorio 1",
+         floor="PB",
+         capacity=2,
+@@ -112,6 +115,9 @@ def test_create_consulting_room() -> None:
+ 
+     assert room.clinic == clinic
+     assert room.owner == owner
++    assert room.campus == "Campus Centro"
++    assert room.tower == "Torre A"
++    assert room.number == "101"
+     assert room.capacity == 2
+ 
+ 
+@@ -125,6 +131,7 @@ def test_consulting_room_specialties_must_not_overlap() -> None:
+         data={
+             "clinic": str(clinic.pk),
+             "owner": str(owner.pk),
++            "number": "202",
+             "name": "Consultorio 2",
+             "capacity": "1",
+             "allowed_specialties": [str(specialty.pk)],
+@@ -139,6 +146,29 @@ def test_consulting_room_specialties_must_not_overlap() -> None:
+     assert "excluded_specialties" in form.errors
+ 
+ 
++@pytest.mark.django_db
++def test_consulting_room_form_requires_number() -> None:
++    clinic = Clinic.objects.create(name="Clínica Número")
++    owner = OwnerProfile.objects.create(user=create_user("owner-number@example.com"))
++
++    form = ConsultingRoomForm(
++        data={
++            "clinic": str(clinic.pk),
++            "owner": str(owner.pk),
++            "name": "Consultorio sin número",
++            "capacity": "1",
++            "allowed_specialties": [],
++            "excluded_specialties": [],
++            "equipment": [],
++            "status": "available",
++            "is_active": "on",
++        }
++    )
++
++    assert form.is_valid() is False
++    assert "number" in form.errors
++
++
+ @pytest.mark.django_db
+ @pytest.mark.parametrize(
+     "path",
+diff --git a/tests/test_reservations.py b/tests/test_reservations.py
+index d828a28..fef1717 100644
+--- a/tests/test_reservations.py
++++ b/tests/test_reservations.py
+@@ -46,6 +46,7 @@ def create_room(name: str = "Consultorio Reserva") -> ConsultingRoom:
+     return ConsultingRoom.objects.create(
+         clinic=clinic,
+         owner=owner,
++        number="101",
+         name=name,
+         capacity=1,
+     )
+@@ -287,7 +288,7 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
+     create_rate(room)
+     client.force_login(user)
+ 
+-    response = client.get(f"/calendario/?week=2026-08-03&room={room.pk}")
++    response = client.get(f"/calendario/?week=2026-08-10&room={room.pk}")
+ 
+     assert response.status_code == 200
+     assert "Solicitar reservación" in response.content.decode()
+@@ -331,8 +332,8 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
+     client.force_login(user)
+ 
+     response = client.get(
+-        f"/calendario/vista-rapida/?week=2026-08-03"
+-        f"&room={room.pk}&selected_date=2026-08-03"
++        f"/calendario/vista-rapida/?week=2026-08-10"
++        f"&room={room.pk}&selected_date=2026-08-10"
+     )
+ 
+     content = response.content.decode()
+@@ -354,15 +355,15 @@ def test_quick_calendar_shows_reserved_day_when_no_free_blocks(client: Any) -> N
+     create_reservation(
+         room=room,
+         tenant_doctor=doctor,
+-        reservation_date=date(2026, 8, 3),
++        reservation_date=date(2026, 8, 10),
+         start_time=time(8, 0),
+         end_time=time(13, 0),
+     )
+     client.force_login(user)
+ 
+     response = client.get(
+-        f"/calendario/vista-rapida/?week=2026-08-03"
+-        f"&room={room.pk}&selected_date=2026-08-03"
++        f"/calendario/vista-rapida/?week=2026-08-10"
++        f"&room={room.pk}&selected_date=2026-08-10"
+     )
+ 
+     content = response.content.decode()
+diff --git a/tests/test_views.py b/tests/test_views.py
+index 1e6aa6d..ccc7ddb 100644
+--- a/tests/test_views.py
++++ b/tests/test_views.py
+@@ -16,7 +16,7 @@ def test_dashboard_responds(client: Any) -> None:
+     assert response.status_code == 200
+     assert "Dashboard Ejecutivo" in content
+     assert "UNA MISIÓN EN PROGRESO DE:" in content
+-    assert "astrogato-texto-derecha-centrado.png" in content
++    assert "astrogato-texto-derecha-centrado-v03.png" in content
+     assert 'id="footer-clock"' in content
+     assert "--:--:--" in content
+ 
