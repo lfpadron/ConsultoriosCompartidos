@@ -338,6 +338,23 @@ def test_availability_tariff_detail_creates_availability_and_rate(
 
 
 @pytest.mark.django_db
+def test_availability_tariff_detail_uses_list_htmx_container(client: Any) -> None:
+    user = create_user("availability-tariff-detail-container@example.com")
+    room = create_room("Consultorio Contenedor HTMX")
+    client.force_login(user)
+
+    response = client.get(
+        f"/disponibilidad/consultorios/{room.pk}/",
+        HTTP_HX_REQUEST="true",
+    )
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert 'id="availability-tariff-content"' in content
+    assert "Detalle de disponibilidad" in content
+
+
+@pytest.mark.django_db
 def test_availability_tariff_detail_edits_existing_block(client: Any) -> None:
     user = create_user("availability-tariff-edit@example.com")
     room = create_room("Consultorio Bloque Editar")

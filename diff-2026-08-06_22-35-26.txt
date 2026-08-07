@@ -1,0 +1,41 @@
+diff --git a/templates/scheduling/availability_tariff_detail.html b/templates/scheduling/availability_tariff_detail.html
+index abe4282..c560055 100644
+--- a/templates/scheduling/availability_tariff_detail.html
++++ b/templates/scheduling/availability_tariff_detail.html
+@@ -1,7 +1,7 @@
+ {% extends "base.html" %}
+ 
+ {% block content %}
+-  <section id="availability-tariff-detail" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#availability-tariff-detail" hx-select="#availability-tariff-detail" hx-swap="outerHTML" hx-push-url="true">
++  <section id="availability-tariff-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#availability-tariff-content" hx-select="#availability-tariff-content" hx-swap="outerHTML" hx-push-url="true">
+     <div class="status-panel p-3 p-lg-4">
+       <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+         <div>
+diff --git a/tests/test_scheduling.py b/tests/test_scheduling.py
+index 1d53fd0..436d414 100644
+--- a/tests/test_scheduling.py
++++ b/tests/test_scheduling.py
+@@ -337,6 +337,23 @@ def test_availability_tariff_detail_creates_availability_and_rate(
+     assert TraceEvent.objects.filter(event_type="rate_rule.created").exists()
+ 
+ 
++@pytest.mark.django_db
++def test_availability_tariff_detail_uses_list_htmx_container(client: Any) -> None:
++    user = create_user("availability-tariff-detail-container@example.com")
++    room = create_room("Consultorio Contenedor HTMX")
++    client.force_login(user)
++
++    response = client.get(
++        f"/disponibilidad/consultorios/{room.pk}/",
++        HTTP_HX_REQUEST="true",
++    )
++    content = response.content.decode()
++
++    assert response.status_code == 200
++    assert 'id="availability-tariff-content"' in content
++    assert "Detalle de disponibilidad" in content
++
++
+ @pytest.mark.django_db
+ def test_availability_tariff_detail_edits_existing_block(client: Any) -> None:
+     user = create_user("availability-tariff-edit@example.com")
