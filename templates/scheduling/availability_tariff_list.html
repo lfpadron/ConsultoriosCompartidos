@@ -3,23 +3,10 @@
 {% block content %}
   <section id="availability-tariff-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#availability-tariff-content" hx-select="#availability-tariff-content" hx-swap="outerHTML" hx-push-url="true">
     <div class="status-panel p-3 p-lg-4">
-      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+      <div class="mb-4">
         <div>
           <p class="text-uppercase text-secondary small fw-semibold mb-2">Operación</p>
           <h1 class="h4 mb-0">Disponibilidad y tarifas</h1>
-        </div>
-        <div class="d-flex flex-wrap gap-2">
-          {% if new_room_url %}
-            <a class="btn btn-primary" href="{{ new_room_url }}">
-              <i class="bi bi-plus-lg me-1"></i>
-              Nuevo
-            </a>
-          {% else %}
-            <button class="btn btn-primary" type="button" disabled>
-              <i class="bi bi-plus-lg me-1"></i>
-              Nuevo
-            </button>
-          {% endif %}
         </div>
       </div>
 

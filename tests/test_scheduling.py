@@ -9,6 +9,7 @@ from django.forms import ModelChoiceField
 from apps.astrotrace.models import TraceEvent
 from apps.catalog.models import Clinic, ConsultingRoom, OwnerProfile
 from apps.finance.models import PriceType, RateRule
+from apps.presentation.navigation import NAVIGATION_ITEMS
 from apps.scheduling.forms import WeeklyCalendarFilterForm
 from apps.scheduling.models import (
     AvailabilityException,
@@ -293,8 +294,13 @@ def test_availability_tariff_list_filters_by_campus_and_status(client: Any) -> N
     assert "Torre A" in content
     assert "Piso 3" in content
     assert "Consultorio Campus A" in content
+    assert "Editar" in content
+    assert "Nuevo" not in content
     assert f"/disponibilidad/consultorios/{room.pk}/" in content
     assert f"/disponibilidad/consultorios/{other_room.pk}/" not in content
+    assert "availability_room_detail" not in {
+        item["url_name"] for item in NAVIGATION_ITEMS
+    }
 
 
 @pytest.mark.django_db

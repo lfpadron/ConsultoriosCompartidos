@@ -553,11 +553,6 @@ class AvailabilityTariffListView(LoginRequiredMixin, ListView):
                 "page_title": "Disponibilidad y tarifas",
                 "filter_form": self.filter_form,
                 "rows": [self._room_row(room) for room in rooms],
-                "new_room_url": (
-                    reverse("availability_room_detail", kwargs={"pk": rooms[0].pk})
-                    if rooms
-                    else ""
-                ),
             }
         )
         return context
