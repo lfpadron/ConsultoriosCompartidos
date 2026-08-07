@@ -1,0 +1,66 @@
+diff --git a/apps/scheduling/views.py b/apps/scheduling/views.py
+index d7e045c..1fc8b00 100644
+--- a/apps/scheduling/views.py
++++ b/apps/scheduling/views.py
+@@ -570,6 +570,7 @@ class AvailabilityTariffListView(LoginRequiredMixin, ListView):
+             "clinic": room.clinic,
+             "campus": room.campus or "Sin campus",
+             "tower": room.tower or "Sin torre",
++            "floor": room.floor or "Sin piso",
+             "number": room.number or "Sin número",
+             "owner": room.owner,
+             "active_availability_count": getattr(
+diff --git a/templates/scheduling/availability_tariff_list.html b/templates/scheduling/availability_tariff_list.html
+index a2fd156..50793a9 100644
+--- a/templates/scheduling/availability_tariff_list.html
++++ b/templates/scheduling/availability_tariff_list.html
+@@ -74,6 +74,7 @@
+               <th scope="col">Clínica</th>
+               <th scope="col">Campus</th>
+               <th scope="col">Torre</th>
++              <th scope="col">Piso</th>
+               <th scope="col">Número</th>
+               <th scope="col">Consultorio</th>
+               <th scope="col">Médico propietario</th>
+@@ -94,6 +95,7 @@
+                 <td>{{ row.clinic }}</td>
+                 <td>{{ row.campus }}</td>
+                 <td>{{ row.tower }}</td>
++                <td>{{ row.floor }}</td>
+                 <td>{{ row.number }}</td>
+                 <td>{{ row.room.name }}</td>
+                 <td>{{ row.owner }}</td>
+@@ -103,7 +105,7 @@
+               </tr>
+             {% empty %}
+               <tr>
+-                <td colspan="10" class="text-center text-secondary py-5">
++                <td colspan="11" class="text-center text-secondary py-5">
+                   Sin consultorios con esos criterios.
+                 </td>
+               </tr>
+diff --git a/tests/test_scheduling.py b/tests/test_scheduling.py
+index e4ce189..ee5638b 100644
+--- a/tests/test_scheduling.py
++++ b/tests/test_scheduling.py
+@@ -266,8 +266,10 @@ def test_availability_tariff_list_filters_by_campus_and_status(client: Any) -> N
+     user = create_user("availability-campus@example.com")
+     room = create_room("Consultorio Campus A")
+     room.campus = "Campus Norte"
++    room.tower = "Torre A"
++    room.floor = "Piso 3"
+     room.number = "101"
+-    room.save(update_fields=["campus", "number"])
++    room.save(update_fields=["campus", "tower", "floor", "number"])
+     other_room = create_room("Consultorio Campus B")
+     other_room.campus = "Campus Sur"
+     other_room.is_active = False
+@@ -288,6 +290,8 @@ def test_availability_tariff_list_filters_by_campus_and_status(client: Any) -> N
+     assert response.status_code == 200
+     assert "Disponibilidad y tarifas" in content
+     assert "Campus Norte" in content
++    assert "Torre A" in content
++    assert "Piso 3" in content
+     assert "Consultorio Campus A" in content
+     assert f"/disponibilidad/consultorios/{room.pk}/" in content
+     assert f"/disponibilidad/consultorios/{other_room.pk}/" not in content

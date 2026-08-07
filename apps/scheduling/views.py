@@ -570,6 +570,7 @@ class AvailabilityTariffListView(LoginRequiredMixin, ListView):
             "clinic": room.clinic,
             "campus": room.campus or "Sin campus",
             "tower": room.tower or "Sin torre",
+            "floor": room.floor or "Sin piso",
             "number": room.number or "Sin número",
             "owner": room.owner,
             "active_availability_count": getattr(

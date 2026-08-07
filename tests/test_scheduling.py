@@ -266,8 +266,10 @@ def test_availability_tariff_list_filters_by_campus_and_status(client: Any) -> N
     user = create_user("availability-campus@example.com")
     room = create_room("Consultorio Campus A")
     room.campus = "Campus Norte"
+    room.tower = "Torre A"
+    room.floor = "Piso 3"
     room.number = "101"
-    room.save(update_fields=["campus", "number"])
+    room.save(update_fields=["campus", "tower", "floor", "number"])
     other_room = create_room("Consultorio Campus B")
     other_room.campus = "Campus Sur"
     other_room.is_active = False
@@ -288,6 +290,8 @@ def test_availability_tariff_list_filters_by_campus_and_status(client: Any) -> N
     assert response.status_code == 200
     assert "Disponibilidad y tarifas" in content
     assert "Campus Norte" in content
+    assert "Torre A" in content
+    assert "Piso 3" in content
     assert "Consultorio Campus A" in content
     assert f"/disponibilidad/consultorios/{room.pk}/" in content
     assert f"/disponibilidad/consultorios/{other_room.pk}/" not in content

@@ -74,6 +74,7 @@
               <th scope="col">Clínica</th>
               <th scope="col">Campus</th>
               <th scope="col">Torre</th>
+              <th scope="col">Piso</th>
               <th scope="col">Número</th>
               <th scope="col">Consultorio</th>
               <th scope="col">Médico propietario</th>
@@ -94,6 +95,7 @@
                 <td>{{ row.clinic }}</td>
                 <td>{{ row.campus }}</td>
                 <td>{{ row.tower }}</td>
+                <td>{{ row.floor }}</td>
                 <td>{{ row.number }}</td>
                 <td>{{ row.room.name }}</td>
                 <td>{{ row.owner }}</td>
@@ -103,7 +105,7 @@
               </tr>
             {% empty %}
               <tr>
-                <td colspan="10" class="text-center text-secondary py-5">
+                <td colspan="11" class="text-center text-secondary py-5">
                   Sin consultorios con esos criterios.
                 </td>
               </tr>
