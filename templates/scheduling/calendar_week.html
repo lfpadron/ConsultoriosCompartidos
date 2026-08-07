@@ -27,12 +27,12 @@
           {{ form.clinic }}
         </div>
         <div class="col-md-3">
-          <label class="form-label" for="{{ form.owner.id_for_label }}">{{ form.owner.label }}</label>
-          {{ form.owner }}
-        </div>
-        <div class="col-md-3">
           <label class="form-label" for="{{ form.room.id_for_label }}">{{ form.room.label }}</label>
           {{ form.room }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ form.owner.id_for_label }}">{{ form.owner.label }}</label>
+          {{ form.owner }}
         </div>
         <div class="col-md-3">
           <label class="form-label" for="{{ form.tenant_doctor.id_for_label }}">{{ form.tenant_doctor.label }}</label>
@@ -119,7 +119,7 @@
                                 <div class="small text-secondary mt-2">Sin tarifa configurada</div>
                               {% endif %}
                               {% if entry.can_request %}
-                                <a class="btn btn-sm btn-outline-primary mt-2" href="{% url 'reservation_request' %}?room={{ row.room.pk }}&date={{ day.date|date:'Y-m-d' }}&start_time={{ block.start_time|time:'H:i' }}&end_time={{ block.end_time|time:'H:i' }}">
+                                <a class="btn btn-sm btn-outline-primary mt-2" hx-boost="false" href="{% url 'reservation_request' %}?source=calendar&room={{ row.room.pk }}&date={{ day.date|date:'Y-m-d' }}&start_time={{ block.start_time|time:'H:i' }}&end_time={{ block.end_time|time:'H:i' }}{% if selected_tenant_doctor %}&tenant_doctor={{ selected_tenant_doctor.pk }}{% endif %}">
                                   <i class="bi bi-calendar-plus me-1"></i>
                                   Solicitar reservación
                                 </a>

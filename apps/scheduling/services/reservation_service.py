@@ -3,14 +3,20 @@
 from datetime import date, time
 from typing import Any, cast
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Model
 from django.utils import timezone
 
 from apps.astrotrace.services import record_event
 from apps.catalog.models import ConsultingRoom, TenantDoctorProfile, TenantDoctorStatus
-from apps.finance.models import StatementStatus
+from apps.finance.models import PriceType, StatementStatus
+from apps.finance.services.pricing_engine import (
+    PricingConfigurationError,
+    calculate_block_price,
+)
 from apps.finance.services.statement_engine import generate_statement_for_reservation
 from apps.scheduling.models import Reservation, ReservationStatus
 from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
@@ -64,6 +70,7 @@ def create_reservation(
             "hash": statement.calculation_hash,
         },
     )
+    _send_reservation_confirmation_email(reservation)
     return reservation
 
 
@@ -152,17 +159,61 @@ def _validate_available_block(
             block
             for block in blocks
             if block.date == reservation_date
-            and block.start_time == start_time
-            and block.end_time == end_time
+            and block.status == BLOCK_STATUS_FREE
+            and block.start_time <= start_time
+            and end_time <= block.end_time
         ),
         None,
     )
     if matching_block is None:
         raise ValidationError(
-            {"start_time": "El bloque solicitado no existe en la disponibilidad."}
+            {"start_time": "El horario solicitado no está libre en la disponibilidad."}
         )
-    if matching_block.status != BLOCK_STATUS_FREE:
-        raise ValidationError({"start_time": "El bloque solicitado no está libre."})
+    try:
+        pricing = calculate_block_price(
+            consulting_room=room,
+            date=reservation_date,
+            start_time=start_time,
+            end_time=end_time,
+        )
+    except PricingConfigurationError as exc:
+        raise ValidationError({"start_time": str(exc)}) from exc
+
+    if pricing.applied_rule is None:
+        raise ValidationError(
+            {"start_time": "No hay tarifa configurada para el horario solicitado."}
+        )
+    if pricing.price_type == PriceType.BLOCK and (
+        matching_block.start_time != start_time or matching_block.end_time != end_time
+    ):
+        raise ValidationError(
+            {"start_time": "La tarifa por bloque requiere reservar el bloque completo."}
+        )
+
+
+def _send_reservation_confirmation_email(reservation: Reservation) -> None:
+    owner = reservation.room.owner
+    recipients = [
+        reservation.tenant_doctor.user.email,
+        owner.user.email if owner else "",
+    ]
+    recipient_list = list(dict.fromkeys(email for email in recipients if email))
+    if not recipient_list:
+        return
+
+    room_label = reservation.room.number.strip() or reservation.room.name
+    message = (
+        f"Estimado Dr. {reservation.tenant_doctor}, su reservación ha quedado "
+        f"registrada para el día {reservation.date:%d/%m/%Y} de las "
+        f"{reservation.start_time:%H:%M} hasta las {reservation.end_time:%H:%M}"
+    )
+    send_mail(
+        subject=f"Consultorio {room_label}, reservación confirmada",
+        message=message,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=recipient_list,
+        fail_silently=True,
+    )
 
 
 def _reservation_payload(reservation: Reservation, *, level: str) -> dict[str, str]:

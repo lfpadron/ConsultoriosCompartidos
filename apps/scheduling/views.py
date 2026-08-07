@@ -33,6 +33,7 @@ from apps.finance.services.pricing_engine import (
 from apps.finance.services.settlement_service import (
     get_settlement_summary_for_reservation,
 )
+from apps.finance.services.statement_engine import StatementGenerationError
 from apps.integration.services.access_simulator import get_access_status_for_reservation
 from apps.scheduling.forms import (
     AvailabilityExceptionForm,
@@ -1050,15 +1051,28 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
 
     def get_initial(self) -> dict[str, Any]:
         initial = super().get_initial()
-        for field in ("room", "date", "start_time", "end_time"):
+        for field in ("room", "date", "start_time", "end_time", "tenant_doctor"):
             value = self.request.GET.get(field)
             if value:
                 initial[field] = value
+        initial["source"] = self._source()
+        tenant_profile = getattr(self.request.user, "tenant_doctor_profile", None)
+        if tenant_profile and "tenant_doctor" not in initial:
+            initial["tenant_doctor"] = tenant_profile.pk
         return initial
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
+        form = context["form"]
         context["page_title"] = "Solicitar reservación"
+        context["back_label"] = self._back_label()
+        context["back_url"] = self._back_url()
+        context["reservation_pricing_options"] = form.pricing_options
         return context
 
     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
@@ -1078,12 +1092,31 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
                 notes=form.cleaned_data["notes"],
                 actor=cast(Model, self.request.user),
             )
+        except StatementGenerationError as exc:
+            form.add_error(None, str(exc))
+            return self.form_invalid(form)
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
 
         messages.success(self.request, "Reservación solicitada.")
         return redirect("reservation_detail", pk=reservation.pk)
+
+    def _source(self) -> str:
+        source = self.request.POST.get("source") or self.request.GET.get("source")
+        if source in {"quick", "calendar_quick", "vista_rapida"}:
+            return "quick"
+        return "calendar"
+
+    def _back_label(self) -> str:
+        if self._source() == "quick":
+            return "Volver a la vista rápida"
+        return "Volver al calendario"
+
+    def _back_url(self) -> str:
+        if self._source() == "quick":
+            return reverse("calendar_quick")
+        return reverse("calendar_week")
 
 
 class ReservationCancelView(LoginRequiredMixin, FormMixin, TemplateView):
@@ -1151,13 +1184,19 @@ class WeeklyCalendarView(LoginRequiredMixin, TemplateView):
         selected_tenant_doctor = cleaned_data.get("tenant_doctor")
         selected_weekdays = set(cleaned_data.get("weekdays") or [])
         weeks = _week_groups(date_from, date_to)
-        rooms = self._get_rooms(selected_room, selected_clinic, selected_owner)
+        rooms = self._get_rooms(
+            selected_room,
+            selected_clinic,
+            selected_owner,
+            selected_tenant_doctor,
+        )
         today = timezone.localdate()
 
         context.update(
             {
                 "page_title": "Calendario",
                 "form": form,
+                "selected_tenant_doctor": selected_tenant_doctor,
                 "week_start": date_from,
                 "week_end": date_to,
                 "week_dates": week_dates,
@@ -1315,6 +1354,7 @@ class WeeklyCalendarView(LoginRequiredMixin, TemplateView):
         selected_room: ConsultingRoom | None,
         selected_clinic: Any,
         selected_owner: Any,
+        selected_tenant_doctor: Any = None,
     ) -> QuerySet[ConsultingRoom] | list[ConsultingRoom]:
         if selected_room:
             return [selected_room]
@@ -1327,7 +1367,13 @@ class WeeklyCalendarView(LoginRequiredMixin, TemplateView):
             queryset = queryset.filter(clinic=selected_clinic)
         if selected_owner:
             queryset = queryset.filter(owner=selected_owner)
-        return queryset.order_by("clinic__name", "name")
+        if selected_tenant_doctor:
+            assigned_rooms = selected_tenant_doctor.assigned_rooms.filter(
+                is_deleted=False
+            )
+            if assigned_rooms.exists():
+                queryset = queryset.filter(pk__in=assigned_rooms.values("pk"))
+        return queryset.distinct().order_by("clinic__name", "name")
 
     def _range_url(self, date_from: date, date_to: date) -> str:
         params = self.request.GET.copy()
@@ -1346,6 +1392,7 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
         form = WeeklyCalendarFilterForm(
             self.request.GET or None,
             user=self.request.user,
+            default_tenant_doctor=True,
         )
         cleaned_data = _cleaned_filter_data(form)
         date_from, date_to = WeeklyCalendarView._calendar_date_range(
@@ -1353,15 +1400,18 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
             cleaned_data,
         )
         selected_date = self._selected_date(date_from, date_to)
+        selected_tenant_doctor = (
+            cleaned_data.get("tenant_doctor") or form.default_tenant_doctor
+        )
         rooms = list(
             WeeklyCalendarView._get_rooms(
                 cleaned_data.get("room"),
                 cleaned_data.get("clinic"),
                 cleaned_data.get("owner"),
+                selected_tenant_doctor,
             )
         )
         selected_weekdays = set(cleaned_data.get("weekdays") or [])
-        selected_tenant_doctor = cleaned_data.get("tenant_doctor")
         today = timezone.localdate()
         blocks_by_room = self._blocks_by_room(rooms, date_from, date_to)
         detail_rows = self._detail_rows(
@@ -1379,6 +1429,9 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
             {
                 "page_title": "Vista rápida",
                 "form": form,
+                "tenant_assignment_warning": self._tenant_assignment_warning(
+                    selected_tenant_doctor
+                ),
                 "date_from": date_from,
                 "date_to": date_to,
                 "weeks": self._summary_weeks(
@@ -1399,6 +1452,15 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
             }
         )
         return context
+
+    @staticmethod
+    def _tenant_assignment_warning(selected_tenant_doctor: Any) -> str:
+        if not selected_tenant_doctor:
+            return ""
+        assigned_rooms = selected_tenant_doctor.assigned_rooms.filter(is_deleted=False)
+        if assigned_rooms.exists():
+            return ""
+        return "El usuario registrado no está asignado a ningún consultorio."
 
     def _selected_date(self, date_from: date, date_to: date) -> date:
         selected_date_text = self.request.GET.get("selected_date")
@@ -1580,7 +1642,15 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
                 )
                 continue
             for block in blocks:
-                rows.append(self._detail_row(room, block, selected_date, today))
+                rows.append(
+                    self._detail_row(
+                        room,
+                        block,
+                        selected_date,
+                        today,
+                        selected_tenant_doctor,
+                    )
+                )
         return rows
 
     @staticmethod
@@ -1589,6 +1659,7 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
         block: Any,
         selected_date: date,
         today: date,
+        selected_tenant_doctor: Any,
     ) -> dict[str, Any]:
         tenant_doctor = ""
         if block.reservation:
@@ -1600,14 +1671,16 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
         }
         reservation_url = ""
         if block.status == BLOCK_STATUS_FREE and selected_date >= today:
-            query = urlencode(
-                {
-                    "room": str(room.pk),
-                    "date": selected_date.isoformat(),
-                    "start_time": f"{block.start_time:%H:%M}",
-                    "end_time": f"{block.end_time:%H:%M}",
-                }
-            )
+            query_params = {
+                "source": "quick",
+                "room": str(room.pk),
+                "date": selected_date.isoformat(),
+                "start_time": f"{block.start_time:%H:%M}",
+                "end_time": f"{block.end_time:%H:%M}",
+            }
+            if selected_tenant_doctor:
+                query_params["tenant_doctor"] = str(selected_tenant_doctor.pk)
+            query = urlencode(query_params)
             reservation_url = f"{reverse('reservation_request')}?{query}"
         return {
             "room": room,

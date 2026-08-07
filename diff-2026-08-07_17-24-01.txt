@@ -1,0 +1,1296 @@
+diff --git a/apps/scheduling/forms.py b/apps/scheduling/forms.py
+index 05c297e..faa0721 100644
+--- a/apps/scheduling/forms.py
++++ b/apps/scheduling/forms.py
+@@ -1,5 +1,6 @@
+ """Forms for scheduling screens."""
+ 
++from datetime import date, datetime, time, timedelta
+ from decimal import Decimal
+ from typing import Any, cast
+ 
+@@ -21,12 +22,20 @@ from apps.core.form_utils import (
+ )
+ from apps.core.permissions import scope_queryset_for_user
+ from apps.finance.models import PriceType
++from apps.finance.services.pricing_engine import (
++    BlockPrice,
++    PricingConfigurationError,
++    calculate_block_price,
++)
+ from apps.scheduling.models import (
+     AvailabilityException,
+     AvailabilityRule,
+     Reservation,
+     Weekday,
+ )
++from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
++
++TIME_CHOICE_STEP_MINUTES = 30
+ 
+ 
+ def set_model_queryset(field: forms.Field, queryset: QuerySet[Any]) -> None:
+@@ -70,11 +79,19 @@ def _room_queryset(data: Any = None, *, active_only: bool = False) -> QuerySet[A
+ 
+     clinic_pk = selected_model_pk(data, "clinic")
+     owner_pk = selected_model_pk(data, "owner")
++    tenant_doctor_pk = selected_model_pk(data, "tenant_doctor")
+     if clinic_pk:
+         queryset = queryset.filter(clinic_id=clinic_pk)
+     if owner_pk:
+         queryset = queryset.filter(owner_id=owner_pk)
+-    return queryset.order_by("clinic__name", "owner__display_name", "name")
++    if tenant_doctor_pk:
++        assigned_rooms = ConsultingRoom.objects.filter(
++            assigned_tenant_doctors__pk=tenant_doctor_pk,
++            is_deleted=False,
++        )
++        if assigned_rooms.exists():
++            queryset = queryset.filter(pk__in=assigned_rooms.values("pk"))
++    return queryset.distinct().order_by("clinic__name", "owner__display_name", "name")
+ 
+ 
+ def _campus_choices(data: Any = None) -> list[tuple[str, str]]:
+@@ -94,6 +111,77 @@ def _tenant_doctor_queryset() -> QuerySet[TenantDoctorProfile]:
+     )
+ 
+ 
++def _tenant_doctor_profile_for_user(user: Any) -> TenantDoctorProfile | None:
++    return cast(
++        TenantDoctorProfile | None,
++        getattr(user, "tenant_doctor_profile", None),
++    )
++
++
++def _parse_date_value(value: Any) -> date | None:
++    if isinstance(value, date):
++        return value
++    if value in ("", None):
++        return None
++    try:
++        return date.fromisoformat(str(value))
++    except ValueError:
++        return None
++
++
++def _parse_time_value(value: Any) -> time | None:
++    if isinstance(value, time):
++        return value
++    if value in ("", None):
++        return None
++    for fmt in ("%H:%M", "%H:%M:%S"):
++        try:
++            return datetime.strptime(str(value), fmt).time()
++        except ValueError:
++            continue
++    return None
++
++
++def _time_value(value: time) -> str:
++    return f"{value:%H:%M}"
++
++
++def _slot_value(start_time: time, end_time: time) -> str:
++    return f"{_time_value(start_time)}|{_time_value(end_time)}"
++
++
++def _parse_slot_value(value: str) -> tuple[time, time] | None:
++    parts = value.split("|")
++    if len(parts) != 2:
++        return None
++    start_time = _parse_time_value(parts[0])
++    end_time = _parse_time_value(parts[1])
++    if start_time is None or end_time is None:
++        return None
++    return start_time, end_time
++
++
++def _time_range_points(start_time: time, end_time: time) -> list[time]:
++    current = datetime.combine(date.min, start_time)
++    end = datetime.combine(date.min, end_time)
++    points: list[time] = []
++    while current <= end:
++        points.append(current.time())
++        current += timedelta(minutes=TIME_CHOICE_STEP_MINUTES)
++    if not points or points[-1] != end_time:
++        points.append(end_time)
++    return points
++
++
++def _unique_time_choices(values: list[time], empty_label: str) -> list[tuple[str, str]]:
++    unique_values = sorted({_time_value(value) for value in values})
++    return [("", empty_label), *((value, value) for value in unique_values)]
++
++
++def _price_type_label(price_type: str | None) -> str:
++    return dict(PriceType.choices).get(price_type, "Sin tarifa")
++
++
+ class AvailabilityRuleForm(BootstrapModelForm):
+     clinic = forms.ModelChoiceField(
+         label="Clínica",
+@@ -328,17 +416,29 @@ class OperationalFilterForm(forms.Form):
+         widget=forms.CheckboxSelectMultiple,
+     )
+ 
+-    def __init__(self, *args: Any, active_only: bool = True, **kwargs: Any) -> None:
++    def __init__(
++        self,
++        *args: Any,
++        active_only: bool = True,
++        default_tenant_doctor: bool = False,
++        **kwargs: Any,
++    ) -> None:
+         user = kwargs.pop("user", None)
+         provided_initial = kwargs.pop("initial", {}) or {}
++        self.default_tenant_doctor = None
++        if default_tenant_doctor and user is not None:
++            self.default_tenant_doctor = _tenant_doctor_profile_for_user(user)
++            if self.default_tenant_doctor and "tenant_doctor" not in provided_initial:
++                provided_initial["tenant_doctor"] = self.default_tenant_doctor.pk
+         kwargs["initial"] = {**date_range_initial(), **provided_initial}
+         super().__init__(*args, **kwargs)
++        source_data = self.data if self.is_bound else kwargs["initial"]
++        clinic_queryset = _clinic_queryset(active_only=active_only)
+         owner_queryset = _owner_queryset()
+         tenant_doctor_queryset = _tenant_doctor_queryset()
+-        room_queryset = _room_queryset(
+-            self.data if self.is_bound else None, active_only=active_only
+-        )
++        room_queryset = _room_queryset(source_data, active_only=active_only)
+         if user is not None:
++            clinic_queryset = scope_queryset_for_user(clinic_queryset, user)
+             owner_queryset = scope_queryset_for_user(owner_queryset, user)
+             room_queryset = scope_queryset_for_user(room_queryset, user)
+             tenant_doctor_queryset = scope_queryset_for_user(
+@@ -346,7 +446,7 @@ class OperationalFilterForm(forms.Form):
+             )
+         set_model_queryset(
+             self.fields["clinic"],
+-            _clinic_queryset(active_only=active_only),
++            clinic_queryset,
+         )
+         set_model_queryset(self.fields["owner"], owner_queryset)
+         set_model_queryset(self.fields["room"], room_queryset)
+@@ -382,6 +482,34 @@ class ReservationFilterForm(OperationalFilterForm):
+ 
+ 
+ class ReservationRequestForm(BootstrapModelForm):
++    clinic_info = forms.CharField(
++        label="Texto informativo de la clínica",
++        required=False,
++        disabled=True,
++        widget=forms.Textarea(attrs={"rows": 3}),
++    )
++    price_type_display = forms.CharField(
++        label="Tipo de tarifa",
++        required=False,
++        disabled=True,
++    )
++    rate_amount_display = forms.CharField(
++        label="Tarifa",
++        required=False,
++        disabled=True,
++    )
++    total_rate_display = forms.CharField(
++        label="Tarifa total",
++        required=False,
++        disabled=True,
++    )
++    block_slot = forms.ChoiceField(
++        label="Bloque disponible",
++        choices=(("", "Selecciona un bloque"),),
++        required=False,
++    )
++    source = forms.CharField(required=False, widget=forms.HiddenInput)
++
+     class Meta:
+         model = Reservation
+         fields = (
+@@ -403,19 +531,337 @@ class ReservationRequestForm(BootstrapModelForm):
+         super().__init__(*args, **kwargs)
+         self.fields["room"].label = "Consultorio"
+         self.fields["tenant_doctor"].label = "Médico arrendatario"
+-        set_model_queryset(
+-            self.fields["room"],
+-            _room_queryset(active_only=True),
+-        )
+-        set_model_queryset(
+-            self.fields["tenant_doctor"],
++        self.fields["start_time"].label = "Hora de inicio"
++        self.fields["end_time"].label = "Hora fin"
++
++        source_data = self.data if self.is_bound else self.initial
++        room_queryset = _room_queryset(source_data, active_only=True)
++        tenant_doctor_queryset = (
+             TenantDoctorProfile.objects.filter(
+                 is_active=True,
+                 is_deleted=False,
+                 status=TenantDoctorStatus.AUTHORIZED,
+             )
+             .select_related("user")
+-            .order_by("display_name"),
++            .order_by("display_name")
++        )
++        if self.user is not None:
++            room_queryset = scope_queryset_for_user(room_queryset, self.user)
++            tenant_doctor_queryset = scope_queryset_for_user(
++                tenant_doctor_queryset,
++                self.user,
++            )
++            tenant_profile = _tenant_doctor_profile_for_user(self.user)
++            if tenant_profile and not selected_model_pk(source_data, "tenant_doctor"):
++                self.initial.setdefault("tenant_doctor", tenant_profile.pk)
++
++        set_model_queryset(
++            self.fields["room"],
++            room_queryset,
++        )
++        set_model_queryset(
++            self.fields["tenant_doctor"],
++            tenant_doctor_queryset,
++        )
++        self.selected_room = self._selected_room(source_data)
++        self.selected_date = _parse_date_value(source_data.get("date"))
++        self.available_blocks = self._free_blocks(
++            self.selected_room,
++            self.selected_date,
++        )
++        self.selected_start_time, self.selected_end_time = self._selected_interval(
++            source_data
++        )
++        self.selected_pricing = self._pricing_for_selected_interval()
++        self.schedule_mode = (
++            self.selected_pricing.price_type
++            if self.selected_pricing and self.selected_pricing.price_type
++            else self._first_available_price_type()
++        )
++        self.schedule_message = self._schedule_message()
++        self.pricing_options = self._pricing_options()
++        self._configure_schedule_fields()
++        self._configure_display_fields()
++        style_form_fields(self.fields)
++
++    def clean(self) -> dict[str, Any]:
++        cleaned_data = super().clean() or {}
++        room = cleaned_data.get("room")
++        reservation_date = cleaned_data.get("date")
++        if not room or not reservation_date:
++            return cleaned_data
++
++        start_time = cleaned_data.get("start_time")
++        end_time = cleaned_data.get("end_time")
++        block_slot = cleaned_data.get("block_slot")
++        if isinstance(block_slot, str) and block_slot:
++            slot_interval = _parse_slot_value(block_slot)
++            if slot_interval is None:
++                self.add_error("block_slot", "Selecciona un bloque disponible.")
++                return cleaned_data
++            start_time, end_time = slot_interval
++            cleaned_data["start_time"] = start_time
++            cleaned_data["end_time"] = end_time
++
++        if start_time is None or end_time is None:
++            self.add_error("start_time", "Selecciona un horario disponible.")
++            return cleaned_data
++        if start_time >= end_time:
++            self.add_error("end_time", "La hora fin debe ser mayor.")
++            return cleaned_data
++
++        free_blocks = self._free_blocks(room, reservation_date)
++        if not self._interval_within_free_block(free_blocks, start_time, end_time):
++            self.add_error(
++                "start_time",
++                "El horario seleccionado no está disponible para este consultorio.",
++            )
++            return cleaned_data
++
++        try:
++            pricing = calculate_block_price(
++                consulting_room=room,
++                date=reservation_date,
++                start_time=start_time,
++                end_time=end_time,
++            )
++        except PricingConfigurationError as exc:
++            self.add_error("start_time", str(exc))
++            return cleaned_data
++
++        if pricing.applied_rule is None:
++            self.add_error(
++                "start_time",
++                "No hay tarifa configurada para el horario seleccionado.",
++            )
++        elif pricing.price_type == PriceType.BLOCK and not self._interval_matches_block(
++            free_blocks,
++            start_time,
++            end_time,
++        ):
++            self.add_error(
++                "block_slot",
++                "La tarifa por bloque requiere seleccionar un bloque completo.",
++            )
++        return cleaned_data
++
++    def _selected_room(self, source_data: Any) -> ConsultingRoom | None:
++        room_pk = selected_model_pk(source_data, "room")
++        if room_pk is None:
++            return None
++        return (
++            ConsultingRoom.objects.filter(pk=room_pk, is_active=True, is_deleted=False)
++            .select_related("clinic", "owner")
++            .first()
++        )
++
++    @staticmethod
++    def _free_blocks(
++        room: ConsultingRoom | None,
++        reservation_date: date | None,
++    ) -> list[Any]:
++        if room is None or reservation_date is None:
++            return []
++        return [
++            block
++            for block in generate_availability_blocks(
++                room,
++                reservation_date,
++                reservation_date,
++            )
++            if block.status == BLOCK_STATUS_FREE
++        ]
++
++    def _selected_interval(self, source_data: Any) -> tuple[time | None, time | None]:
++        block_slot = source_data.get("block_slot")
++        if isinstance(block_slot, str) and block_slot:
++            interval = _parse_slot_value(block_slot)
++            if interval is not None:
++                return interval
++
++        start_time = _parse_time_value(source_data.get("start_time"))
++        end_time = _parse_time_value(source_data.get("end_time"))
++        if start_time and end_time:
++            return start_time, end_time
++        if self.available_blocks:
++            first_block = self.available_blocks[0]
++            return first_block.start_time, first_block.end_time
++        return None, None
++
++    def _pricing_for_selected_interval(self) -> BlockPrice | None:
++        if (
++            self.selected_room is None
++            or self.selected_date is None
++            or self.selected_start_time is None
++            or self.selected_end_time is None
++        ):
++            return None
++        try:
++            return calculate_block_price(
++                consulting_room=self.selected_room,
++                date=self.selected_date,
++                start_time=self.selected_start_time,
++                end_time=self.selected_end_time,
++            )
++        except PricingConfigurationError:
++            return None
++
++    def _first_available_price_type(self) -> str | None:
++        if self.selected_room is None or self.selected_date is None:
++            return None
++        for block in self.available_blocks:
++            try:
++                pricing = calculate_block_price(
++                    consulting_room=self.selected_room,
++                    date=self.selected_date,
++                    start_time=block.start_time,
++                    end_time=block.end_time,
++                )
++            except PricingConfigurationError:
++                continue
++            if pricing.price_type:
++                return pricing.price_type
++        return None
++
++    def _schedule_message(self) -> str:
++        if self.selected_room is None or self.selected_date is None:
++            return "Selecciona consultorio y fecha para ver los horarios disponibles."
++        if not self.available_blocks:
++            return (
++                "No hay horarios disponibles para el consultorio y fecha "
++                "seleccionados."
++            )
++        if self.selected_pricing is None or self.selected_pricing.applied_rule is None:
++            return "No hay tarifa configurada para el horario seleccionado."
++        return ""
++
++    def _pricing_options(self) -> dict[str, Any]:
++        ranges: list[dict[str, str]] = []
++        block_slots: list[dict[str, str]] = []
++        if self.selected_room is None or self.selected_date is None:
++            return {"ranges": ranges, "block_slots": block_slots}
++
++        for block in self.available_blocks:
++            try:
++                pricing = calculate_block_price(
++                    consulting_room=self.selected_room,
++                    date=self.selected_date,
++                    start_time=block.start_time,
++                    end_time=block.end_time,
++                )
++            except PricingConfigurationError:
++                continue
++            if pricing.applied_rule is None or pricing.base_rate is None:
++                continue
++            option = {
++                "value": _slot_value(block.start_time, block.end_time),
++                "start": _time_value(block.start_time),
++                "end": _time_value(block.end_time),
++                "price_type": pricing.price_type or "",
++                "price_type_label": _price_type_label(pricing.price_type),
++                "base_rate": str(pricing.base_rate),
++                "subtotal": str(pricing.subtotal or Decimal("0.00")),
++                "currency": pricing.currency,
++            }
++            ranges.append(option)
++            if pricing.price_type == PriceType.BLOCK:
++                block_slots.append(option)
++        return {"ranges": ranges, "block_slots": block_slots}
++
++    def _configure_schedule_fields(self) -> None:
++        block_choices = [
++            (
++                option["value"],
++                (
++                    f"{option['start']} - {option['end']} "
++                    f"({option['subtotal']} {option['currency']})"
++                ),
++            )
++            for option in self.pricing_options["block_slots"]
++        ]
++        self.fields["block_slot"].choices = [
++            ("", "Selecciona un bloque"),
++            *block_choices,
++        ]
++
++        start_points: list[time] = []
++        end_points: list[time] = []
++        for block in self.available_blocks:
++            points = _time_range_points(block.start_time, block.end_time)
++            start_points.extend(points[:-1])
++            end_points.extend(points[1:])
++
++        self.fields["start_time"].widget = forms.Select(
++            choices=_unique_time_choices(start_points, "Selecciona hora inicio")
++        )
++        self.fields["end_time"].widget = forms.Select(
++            choices=_unique_time_choices(end_points, "Selecciona hora fin")
++        )
++        if self.selected_start_time:
++            self.initial["start_time"] = _time_value(self.selected_start_time)
++        if self.selected_end_time:
++            self.initial["end_time"] = _time_value(self.selected_end_time)
++
++        if self.schedule_mode == PriceType.BLOCK:
++            selected_value = ""
++            if self.selected_start_time and self.selected_end_time:
++                selected_value = _slot_value(
++                    self.selected_start_time,
++                    self.selected_end_time,
++                )
++            self.initial["block_slot"] = selected_value
++            self.fields["block_slot"].required = True
++            self.fields["start_time"].widget = forms.HiddenInput()
++            self.fields["end_time"].widget = forms.HiddenInput()
++        else:
++            self.fields["block_slot"].widget = forms.HiddenInput()
++
++    def _configure_display_fields(self) -> None:
++        clinic_info = ""
++        if self.selected_room is not None:
++            clinic_info = self.selected_room.clinic.schedule_text
++        self.fields["clinic_info"].initial = (
++            clinic_info or "Sin información registrada."
++        )
++        self.fields["source"].initial = self.initial.get("source", "calendar")
++
++        pricing = self.selected_pricing
++        if pricing and pricing.applied_rule and pricing.base_rate is not None:
++            suffix = "/h" if pricing.price_type == PriceType.HOURLY else " por bloque"
++            self.fields["price_type_display"].initial = _price_type_label(
++                pricing.price_type
++            )
++            self.fields["rate_amount_display"].initial = (
++                f"{pricing.base_rate} {pricing.currency}{suffix}"
++            )
++            self.fields["total_rate_display"].initial = (
++                f"{pricing.subtotal} {pricing.currency}"
++            )
++        else:
++            self.fields["price_type_display"].initial = "Sin tarifa"
++            self.fields["rate_amount_display"].initial = "Sin tarifa configurada"
++            self.fields["total_rate_display"].initial = "Sin tarifa configurada"
++
++    @staticmethod
++    def _interval_within_free_block(
++        blocks: list[Any],
++        start_time: time,
++        end_time: time,
++    ) -> bool:
++        return any(
++            block.start_time <= start_time and end_time <= block.end_time
++            for block in blocks
++        )
++
++    @staticmethod
++    def _interval_matches_block(
++        blocks: list[Any],
++        start_time: time,
++        end_time: time,
++    ) -> bool:
++        return any(
++            block.start_time == start_time and block.end_time == end_time
++            for block in blocks
+         )
+ 
+ 
+diff --git a/apps/scheduling/services/reservation_service.py b/apps/scheduling/services/reservation_service.py
+index 2232f92..8b7638c 100644
+--- a/apps/scheduling/services/reservation_service.py
++++ b/apps/scheduling/services/reservation_service.py
+@@ -3,14 +3,20 @@
+ from datetime import date, time
+ from typing import Any, cast
+ 
++from django.conf import settings
+ from django.core.exceptions import ValidationError
++from django.core.mail import send_mail
+ from django.db import transaction
+ from django.db.models import Model
+ from django.utils import timezone
+ 
+ from apps.astrotrace.services import record_event
+ from apps.catalog.models import ConsultingRoom, TenantDoctorProfile, TenantDoctorStatus
+-from apps.finance.models import StatementStatus
++from apps.finance.models import PriceType, StatementStatus
++from apps.finance.services.pricing_engine import (
++    PricingConfigurationError,
++    calculate_block_price,
++)
+ from apps.finance.services.statement_engine import generate_statement_for_reservation
+ from apps.scheduling.models import Reservation, ReservationStatus
+ from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
+@@ -64,6 +70,7 @@ def create_reservation(
+             "hash": statement.calculation_hash,
+         },
+     )
++    _send_reservation_confirmation_email(reservation)
+     return reservation
+ 
+ 
+@@ -152,17 +159,61 @@ def _validate_available_block(
+             block
+             for block in blocks
+             if block.date == reservation_date
+-            and block.start_time == start_time
+-            and block.end_time == end_time
++            and block.status == BLOCK_STATUS_FREE
++            and block.start_time <= start_time
++            and end_time <= block.end_time
+         ),
+         None,
+     )
+     if matching_block is None:
+         raise ValidationError(
+-            {"start_time": "El bloque solicitado no existe en la disponibilidad."}
++            {"start_time": "El horario solicitado no está libre en la disponibilidad."}
+         )
+-    if matching_block.status != BLOCK_STATUS_FREE:
+-        raise ValidationError({"start_time": "El bloque solicitado no está libre."})
++    try:
++        pricing = calculate_block_price(
++            consulting_room=room,
++            date=reservation_date,
++            start_time=start_time,
++            end_time=end_time,
++        )
++    except PricingConfigurationError as exc:
++        raise ValidationError({"start_time": str(exc)}) from exc
++
++    if pricing.applied_rule is None:
++        raise ValidationError(
++            {"start_time": "No hay tarifa configurada para el horario solicitado."}
++        )
++    if pricing.price_type == PriceType.BLOCK and (
++        matching_block.start_time != start_time or matching_block.end_time != end_time
++    ):
++        raise ValidationError(
++            {"start_time": "La tarifa por bloque requiere reservar el bloque completo."}
++        )
++
++
++def _send_reservation_confirmation_email(reservation: Reservation) -> None:
++    owner = reservation.room.owner
++    recipients = [
++        reservation.tenant_doctor.user.email,
++        owner.user.email if owner else "",
++    ]
++    recipient_list = list(dict.fromkeys(email for email in recipients if email))
++    if not recipient_list:
++        return
++
++    room_label = reservation.room.number.strip() or reservation.room.name
++    message = (
++        f"Estimado Dr. {reservation.tenant_doctor}, su reservación ha quedado "
++        f"registrada para el día {reservation.date:%d/%m/%Y} de las "
++        f"{reservation.start_time:%H:%M} hasta las {reservation.end_time:%H:%M}"
++    )
++    send_mail(
++        subject=f"Consultorio {room_label}, reservación confirmada",
++        message=message,
++        from_email=settings.DEFAULT_FROM_EMAIL,
++        recipient_list=recipient_list,
++        fail_silently=True,
++    )
+ 
+ 
+ def _reservation_payload(reservation: Reservation, *, level: str) -> dict[str, str]:
+diff --git a/apps/scheduling/views.py b/apps/scheduling/views.py
+index c9bf54d..42356b6 100644
+--- a/apps/scheduling/views.py
++++ b/apps/scheduling/views.py
+@@ -33,6 +33,7 @@ from apps.finance.services.pricing_engine import (
+ from apps.finance.services.settlement_service import (
+     get_settlement_summary_for_reservation,
+ )
++from apps.finance.services.statement_engine import StatementGenerationError
+ from apps.integration.services.access_simulator import get_access_status_for_reservation
+ from apps.scheduling.forms import (
+     AvailabilityExceptionForm,
+@@ -1050,15 +1051,28 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+ 
+     def get_initial(self) -> dict[str, Any]:
+         initial = super().get_initial()
+-        for field in ("room", "date", "start_time", "end_time"):
++        for field in ("room", "date", "start_time", "end_time", "tenant_doctor"):
+             value = self.request.GET.get(field)
+             if value:
+                 initial[field] = value
++        initial["source"] = self._source()
++        tenant_profile = getattr(self.request.user, "tenant_doctor_profile", None)
++        if tenant_profile and "tenant_doctor" not in initial:
++            initial["tenant_doctor"] = tenant_profile.pk
+         return initial
+ 
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["user"] = self.request.user
++        return kwargs
++
+     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+         context = super().get_context_data(**kwargs)
++        form = context["form"]
+         context["page_title"] = "Solicitar reservación"
++        context["back_label"] = self._back_label()
++        context["back_url"] = self._back_url()
++        context["reservation_pricing_options"] = form.pricing_options
+         return context
+ 
+     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+@@ -1078,6 +1092,9 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+                 notes=form.cleaned_data["notes"],
+                 actor=cast(Model, self.request.user),
+             )
++        except StatementGenerationError as exc:
++            form.add_error(None, str(exc))
++            return self.form_invalid(form)
+         except ValidationError as exc:
+             form.add_error(None, exc)
+             return self.form_invalid(form)
+@@ -1085,6 +1102,22 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+         messages.success(self.request, "Reservación solicitada.")
+         return redirect("reservation_detail", pk=reservation.pk)
+ 
++    def _source(self) -> str:
++        source = self.request.POST.get("source") or self.request.GET.get("source")
++        if source in {"quick", "calendar_quick", "vista_rapida"}:
++            return "quick"
++        return "calendar"
++
++    def _back_label(self) -> str:
++        if self._source() == "quick":
++            return "Volver a la vista rápida"
++        return "Volver al calendario"
++
++    def _back_url(self) -> str:
++        if self._source() == "quick":
++            return reverse("calendar_quick")
++        return reverse("calendar_week")
++
+ 
+ class ReservationCancelView(LoginRequiredMixin, FormMixin, TemplateView):
+     template_name = "scheduling/reservation_cancel.html"
+@@ -1151,13 +1184,19 @@ class WeeklyCalendarView(LoginRequiredMixin, TemplateView):
+         selected_tenant_doctor = cleaned_data.get("tenant_doctor")
+         selected_weekdays = set(cleaned_data.get("weekdays") or [])
+         weeks = _week_groups(date_from, date_to)
+-        rooms = self._get_rooms(selected_room, selected_clinic, selected_owner)
++        rooms = self._get_rooms(
++            selected_room,
++            selected_clinic,
++            selected_owner,
++            selected_tenant_doctor,
++        )
+         today = timezone.localdate()
+ 
+         context.update(
+             {
+                 "page_title": "Calendario",
+                 "form": form,
++                "selected_tenant_doctor": selected_tenant_doctor,
+                 "week_start": date_from,
+                 "week_end": date_to,
+                 "week_dates": week_dates,
+@@ -1315,6 +1354,7 @@ class WeeklyCalendarView(LoginRequiredMixin, TemplateView):
+         selected_room: ConsultingRoom | None,
+         selected_clinic: Any,
+         selected_owner: Any,
++        selected_tenant_doctor: Any = None,
+     ) -> QuerySet[ConsultingRoom] | list[ConsultingRoom]:
+         if selected_room:
+             return [selected_room]
+@@ -1327,7 +1367,13 @@ class WeeklyCalendarView(LoginRequiredMixin, TemplateView):
+             queryset = queryset.filter(clinic=selected_clinic)
+         if selected_owner:
+             queryset = queryset.filter(owner=selected_owner)
+-        return queryset.order_by("clinic__name", "name")
++        if selected_tenant_doctor:
++            assigned_rooms = selected_tenant_doctor.assigned_rooms.filter(
++                is_deleted=False
++            )
++            if assigned_rooms.exists():
++                queryset = queryset.filter(pk__in=assigned_rooms.values("pk"))
++        return queryset.distinct().order_by("clinic__name", "name")
+ 
+     def _range_url(self, date_from: date, date_to: date) -> str:
+         params = self.request.GET.copy()
+@@ -1346,6 +1392,7 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+         form = WeeklyCalendarFilterForm(
+             self.request.GET or None,
+             user=self.request.user,
++            default_tenant_doctor=True,
+         )
+         cleaned_data = _cleaned_filter_data(form)
+         date_from, date_to = WeeklyCalendarView._calendar_date_range(
+@@ -1353,15 +1400,18 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+             cleaned_data,
+         )
+         selected_date = self._selected_date(date_from, date_to)
++        selected_tenant_doctor = (
++            cleaned_data.get("tenant_doctor") or form.default_tenant_doctor
++        )
+         rooms = list(
+             WeeklyCalendarView._get_rooms(
+                 cleaned_data.get("room"),
+                 cleaned_data.get("clinic"),
+                 cleaned_data.get("owner"),
++                selected_tenant_doctor,
+             )
+         )
+         selected_weekdays = set(cleaned_data.get("weekdays") or [])
+-        selected_tenant_doctor = cleaned_data.get("tenant_doctor")
+         today = timezone.localdate()
+         blocks_by_room = self._blocks_by_room(rooms, date_from, date_to)
+         detail_rows = self._detail_rows(
+@@ -1379,6 +1429,9 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+             {
+                 "page_title": "Vista rápida",
+                 "form": form,
++                "tenant_assignment_warning": self._tenant_assignment_warning(
++                    selected_tenant_doctor
++                ),
+                 "date_from": date_from,
+                 "date_to": date_to,
+                 "weeks": self._summary_weeks(
+@@ -1400,6 +1453,15 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+         )
+         return context
+ 
++    @staticmethod
++    def _tenant_assignment_warning(selected_tenant_doctor: Any) -> str:
++        if not selected_tenant_doctor:
++            return ""
++        assigned_rooms = selected_tenant_doctor.assigned_rooms.filter(is_deleted=False)
++        if assigned_rooms.exists():
++            return ""
++        return "El usuario registrado no está asignado a ningún consultorio."
++
+     def _selected_date(self, date_from: date, date_to: date) -> date:
+         selected_date_text = self.request.GET.get("selected_date")
+         if selected_date_text:
+@@ -1580,7 +1642,15 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+                 )
+                 continue
+             for block in blocks:
+-                rows.append(self._detail_row(room, block, selected_date, today))
++                rows.append(
++                    self._detail_row(
++                        room,
++                        block,
++                        selected_date,
++                        today,
++                        selected_tenant_doctor,
++                    )
++                )
+         return rows
+ 
+     @staticmethod
+@@ -1589,6 +1659,7 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+         block: Any,
+         selected_date: date,
+         today: date,
++        selected_tenant_doctor: Any,
+     ) -> dict[str, Any]:
+         tenant_doctor = ""
+         if block.reservation:
+@@ -1600,14 +1671,16 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+         }
+         reservation_url = ""
+         if block.status == BLOCK_STATUS_FREE and selected_date >= today:
+-            query = urlencode(
+-                {
+-                    "room": str(room.pk),
+-                    "date": selected_date.isoformat(),
+-                    "start_time": f"{block.start_time:%H:%M}",
+-                    "end_time": f"{block.end_time:%H:%M}",
+-                }
+-            )
++            query_params = {
++                "source": "quick",
++                "room": str(room.pk),
++                "date": selected_date.isoformat(),
++                "start_time": f"{block.start_time:%H:%M}",
++                "end_time": f"{block.end_time:%H:%M}",
++            }
++            if selected_tenant_doctor:
++                query_params["tenant_doctor"] = str(selected_tenant_doctor.pk)
++            query = urlencode(query_params)
+             reservation_url = f"{reverse('reservation_request')}?{query}"
+         return {
+             "room": room,
+diff --git a/templates/scheduling/calendar_quick.html b/templates/scheduling/calendar_quick.html
+index 07381ea..c7542b2 100644
+--- a/templates/scheduling/calendar_quick.html
++++ b/templates/scheduling/calendar_quick.html
+@@ -21,14 +21,14 @@
+           <label class="form-label" for="{{ form.clinic.id_for_label }}">{{ form.clinic.label }}</label>
+           {{ form.clinic }}
+         </div>
+-        <div class="col-md-3">
+-          <label class="form-label" for="{{ form.owner.id_for_label }}">{{ form.owner.label }}</label>
+-          {{ form.owner }}
+-        </div>
+         <div class="col-md-3">
+           <label class="form-label" for="{{ form.room.id_for_label }}">{{ form.room.label }}</label>
+           {{ form.room }}
+         </div>
++        <div class="col-md-3">
++          <label class="form-label" for="{{ form.owner.id_for_label }}">{{ form.owner.label }}</label>
++          {{ form.owner }}
++        </div>
+         <div class="col-md-3">
+           <label class="form-label" for="{{ form.tenant_doctor.id_for_label }}">{{ form.tenant_doctor.label }}</label>
+           {{ form.tenant_doctor }}
+@@ -58,6 +58,12 @@
+           </a>
+         </div>
+       </form>
++
++      {% if tenant_assignment_warning %}
++        <div class="alert alert-warning mt-3 mb-0" role="alert">
++          {{ tenant_assignment_warning }}
++        </div>
++      {% endif %}
+     </div>
+ 
+     <div class="status-panel p-3 p-lg-4">
+@@ -123,7 +129,7 @@
+                 <td>{{ row.label }}</td>
+                 <td class="text-end">
+                   {% if row.reservation_url %}
+-                    <a class="btn btn-sm btn-primary" href="{{ row.reservation_url }}">
++                    <a class="btn btn-sm btn-primary" hx-boost="false" href="{{ row.reservation_url }}">
+                       <i class="bi bi-calendar-plus me-1"></i>
+                       Reservar
+                     </a>
+diff --git a/templates/scheduling/calendar_week.html b/templates/scheduling/calendar_week.html
+index 2a13346..46048b6 100644
+--- a/templates/scheduling/calendar_week.html
++++ b/templates/scheduling/calendar_week.html
+@@ -26,14 +26,14 @@
+           <label class="form-label" for="{{ form.clinic.id_for_label }}">{{ form.clinic.label }}</label>
+           {{ form.clinic }}
+         </div>
+-        <div class="col-md-3">
+-          <label class="form-label" for="{{ form.owner.id_for_label }}">{{ form.owner.label }}</label>
+-          {{ form.owner }}
+-        </div>
+         <div class="col-md-3">
+           <label class="form-label" for="{{ form.room.id_for_label }}">{{ form.room.label }}</label>
+           {{ form.room }}
+         </div>
++        <div class="col-md-3">
++          <label class="form-label" for="{{ form.owner.id_for_label }}">{{ form.owner.label }}</label>
++          {{ form.owner }}
++        </div>
+         <div class="col-md-3">
+           <label class="form-label" for="{{ form.tenant_doctor.id_for_label }}">{{ form.tenant_doctor.label }}</label>
+           {{ form.tenant_doctor }}
+@@ -119,7 +119,7 @@
+                                 <div class="small text-secondary mt-2">Sin tarifa configurada</div>
+                               {% endif %}
+                               {% if entry.can_request %}
+-                                <a class="btn btn-sm btn-outline-primary mt-2" href="{% url 'reservation_request' %}?room={{ row.room.pk }}&date={{ day.date|date:'Y-m-d' }}&start_time={{ block.start_time|time:'H:i' }}&end_time={{ block.end_time|time:'H:i' }}">
++                                <a class="btn btn-sm btn-outline-primary mt-2" hx-boost="false" href="{% url 'reservation_request' %}?source=calendar&room={{ row.room.pk }}&date={{ day.date|date:'Y-m-d' }}&start_time={{ block.start_time|time:'H:i' }}&end_time={{ block.end_time|time:'H:i' }}{% if selected_tenant_doctor %}&tenant_doctor={{ selected_tenant_doctor.pk }}{% endif %}">
+                                   <i class="bi bi-calendar-plus me-1"></i>
+                                   Solicitar reservación
+                                 </a>
+diff --git a/templates/scheduling/reservation_form.html b/templates/scheduling/reservation_form.html
+index ddb3a2f..98b8f48 100644
+--- a/templates/scheduling/reservation_form.html
++++ b/templates/scheduling/reservation_form.html
+@@ -7,32 +7,103 @@
+         <p class="text-uppercase text-secondary small fw-semibold mb-2">Reservación</p>
+         <h1 class="h4 mb-0">Solicitar reservación</h1>
+       </div>
+-      <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
++      <a class="btn btn-outline-secondary" href="{{ back_url }}">
+         <i class="bi bi-arrow-left me-1"></i>
+-        Volver al calendario
++        {{ back_label }}
+       </a>
+     </div>
+ 
+     <form method="post" novalidate>
+       {% csrf_token %}
++      {% for hidden in form.hidden_fields %}
++        {{ hidden }}
++      {% endfor %}
+       {% if form.non_field_errors %}
+         <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
+       {% endif %}
++      {% if form.schedule_message %}
++        <div class="alert alert-warning" role="alert">{{ form.schedule_message }}</div>
++      {% endif %}
+ 
+       <div class="row g-3">
+-        {% for field in form %}
++        <div class="col-md-6">
++          <label class="form-label" for="{{ form.room.id_for_label }}">{{ form.room.label }}</label>
++          {{ form.room }}
++          {% for error in form.room.errors %}
++            <div class="invalid-feedback d-block">{{ error }}</div>
++          {% endfor %}
++        </div>
++        <div class="col-md-6">
++          <label class="form-label" for="{{ form.tenant_doctor.id_for_label }}">{{ form.tenant_doctor.label }}</label>
++          {{ form.tenant_doctor }}
++          {% for error in form.tenant_doctor.errors %}
++            <div class="invalid-feedback d-block">{{ error }}</div>
++          {% endfor %}
++        </div>
++        <div class="col-md-6">
++          <label class="form-label" for="{{ form.date.id_for_label }}">{{ form.date.label }}</label>
++          {{ form.date }}
++          {% for error in form.date.errors %}
++            <div class="invalid-feedback d-block">{{ error }}</div>
++          {% endfor %}
++        </div>
++        <div class="col-md-6">
++          <label class="form-label" for="{{ form.clinic_info.id_for_label }}">{{ form.clinic_info.label }}</label>
++          {{ form.clinic_info }}
++        </div>
++        <div class="col-md-4">
++          <label class="form-label" for="{{ form.price_type_display.id_for_label }}">{{ form.price_type_display.label }}</label>
++          {{ form.price_type_display }}
++        </div>
++        <div class="col-md-4">
++          <label class="form-label" for="{{ form.rate_amount_display.id_for_label }}">{{ form.rate_amount_display.label }}</label>
++          {{ form.rate_amount_display }}
++        </div>
++        <div class="col-md-4">
++          <label class="form-label" for="{{ form.total_rate_display.id_for_label }}">{{ form.total_rate_display.label }}</label>
++          {{ form.total_rate_display }}
++        </div>
++        {% if form.schedule_mode == "por_bloque" %}
+           <div class="col-md-6">
+-            <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+-            {{ field }}
+-            {% for error in field.errors %}
++            <label class="form-label" for="{{ form.block_slot.id_for_label }}">{{ form.block_slot.label }}</label>
++            {{ form.block_slot }}
++            {% for error in form.block_slot.errors %}
++              <div class="invalid-feedback d-block">{{ error }}</div>
++            {% endfor %}
++            {% for error in form.start_time.errors %}
++              <div class="invalid-feedback d-block">{{ error }}</div>
++            {% endfor %}
++            {% for error in form.end_time.errors %}
++              <div class="invalid-feedback d-block">{{ error }}</div>
++            {% endfor %}
++          </div>
++        {% else %}
++          <div class="col-md-3">
++            <label class="form-label" for="{{ form.start_time.id_for_label }}">{{ form.start_time.label }}</label>
++            {{ form.start_time }}
++            {% for error in form.start_time.errors %}
++              <div class="invalid-feedback d-block">{{ error }}</div>
++            {% endfor %}
++          </div>
++          <div class="col-md-3">
++            <label class="form-label" for="{{ form.end_time.id_for_label }}">{{ form.end_time.label }}</label>
++            {{ form.end_time }}
++            {% for error in form.end_time.errors %}
+               <div class="invalid-feedback d-block">{{ error }}</div>
+             {% endfor %}
+           </div>
+-        {% endfor %}
++        {% endif %}
++        <div class="col-12">
++          <label class="form-label" for="{{ form.notes.id_for_label }}">{{ form.notes.label }}</label>
++          {{ form.notes }}
++          {% for error in form.notes.errors %}
++            <div class="invalid-feedback d-block">{{ error }}</div>
++          {% endfor %}
++        </div>
+       </div>
+ 
+       <div class="d-flex justify-content-end gap-2 mt-4">
+-        <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
++        <a class="btn btn-outline-secondary" href="{{ back_url }}">
+           <i class="bi bi-x-lg me-1"></i>
+           Cancelar
+         </a>
+@@ -42,5 +113,62 @@
+         </button>
+       </div>
+     </form>
++
++    {{ reservation_pricing_options|json_script:"reservation-pricing-options" }}
++    <script>
++      (() => {
++        const dataElement = document.getElementById("reservation-pricing-options");
++        if (!dataElement) return;
++        const options = JSON.parse(dataElement.textContent);
++        const blockField = document.getElementById("id_block_slot");
++        const startField = document.getElementById("id_start_time");
++        const endField = document.getElementById("id_end_time");
++        const typeField = document.getElementById("id_price_type_display");
++        const rateField = document.getElementById("id_rate_amount_display");
++        const totalField = document.getElementById("id_total_rate_display");
++        const toMinutes = (value) => {
++          const parts = value.split(":").map(Number);
++          return parts[0] * 60 + parts[1];
++        };
++        const setPricing = (option, total) => {
++          if (!option) {
++            if (totalField) totalField.value = "Horario no disponible";
++            return;
++          }
++          if (typeField) typeField.value = option.price_type_label;
++          if (rateField) {
++            const suffix = option.price_type === "por_hora" ? "/h" : " por bloque";
++            rateField.value = `${option.base_rate} ${option.currency}${suffix}`;
++          }
++          if (totalField) totalField.value = `${total || option.subtotal} ${option.currency}`;
++        };
++        const updateBlockPricing = () => {
++          if (!blockField) return;
++          const option = options.block_slots.find((item) => item.value === blockField.value);
++          setPricing(option);
++        };
++        const updateHourlyPricing = () => {
++          if (!startField || !endField || !startField.value || !endField.value) return;
++          const start = toMinutes(startField.value);
++          const end = toMinutes(endField.value);
++          const option = options.ranges.find((item) => {
++            return item.price_type === "por_hora" &&
++              toMinutes(item.start) <= start &&
++              end <= toMinutes(item.end) &&
++              start < end;
++          });
++          if (!option) {
++            setPricing(null);
++            return;
++          }
++          const hours = (end - start) / 60;
++          const total = (Number(option.base_rate) * hours).toFixed(2);
++          setPricing(option, total);
++        };
++        if (blockField) blockField.addEventListener("change", updateBlockPricing);
++        if (startField) startField.addEventListener("change", updateHourlyPricing);
++        if (endField) endField.addEventListener("change", updateHourlyPricing);
++      })();
++    </script>
+   </section>
+ {% endblock %}
+diff --git a/tests/test_reservations.py b/tests/test_reservations.py
+index fef1717..e111e21 100644
+--- a/tests/test_reservations.py
++++ b/tests/test_reservations.py
+@@ -4,6 +4,7 @@ from typing import Any
+ 
+ import pytest
+ from django.contrib.auth import get_user_model
++from django.core import mail
+ from django.core.exceptions import ValidationError
+ 
+ from apps.astrotrace.models import TraceEvent
+@@ -323,6 +324,23 @@ def test_calendar_shows_tenant_doctor_filter(client: Any) -> None:
+     assert 'name="tenant_doctor"' in response.content.decode()
+ 
+ 
++@pytest.mark.django_db
++def test_calendar_room_dropdown_filters_by_tenant_doctor(client: Any) -> None:
++    user = create_user("calendar-consultorio-arrendatario@example.com")
++    assigned_room = create_room("Consultorio Asignado")
++    other_room = create_room("Consultorio No Asignado")
++    doctor = create_tenant_doctor("doctor-asignado@example.com")
++    doctor.assigned_rooms.add(assigned_room)
++    client.force_login(user)
++
++    response = client.get(f"/calendario/?tenant_doctor={doctor.pk}")
++
++    content = response.content.decode()
++    assert response.status_code == 200
++    assert str(assigned_room.pk) in content
++    assert str(other_room.pk) not in content
++
++
+ @pytest.mark.django_db
+ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> None:
+     user = create_user("vista-rapida-libre@example.com")
+@@ -345,6 +363,27 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
+     assert 'name="tenant_doctor"' in content
+ 
+ 
++@pytest.mark.django_db
++def test_quick_calendar_defaults_logged_tenant_and_warns_without_rooms(
++    client: Any,
++) -> None:
++    room = create_room("Consultorio Vista Rápida Sin Asignación")
++    doctor = create_tenant_doctor("doctor-sin-consultorio@example.com")
++    create_availability(room)
++    create_rate(room)
++    client.force_login(doctor.user)
++
++    response = client.get(
++        "/calendario/vista-rapida/?week=2026-08-10&selected_date=2026-08-10"
++    )
++
++    content = response.content.decode()
++    assert response.status_code == 200
++    assert str(doctor.pk) in content
++    assert "El usuario registrado no está asignado a ningún consultorio." in content
++    assert room.name in content
++
++
+ @pytest.mark.django_db
+ def test_quick_calendar_shows_reserved_day_when_no_free_blocks(client: Any) -> None:
+     user = create_user("vista-rapida-reservado@example.com")
+@@ -423,6 +462,57 @@ def test_reservation_list_filters_by_tenant_doctor(client: Any) -> None:
+     assert f"/reservaciones/{second.pk}/" not in content
+ 
+ 
++@pytest.mark.django_db
++def test_reservation_request_prefills_context_and_pricing(client: Any) -> None:
++    user = create_user("solicitud-contexto@example.com")
++    room = create_room("Consultorio Contexto")
++    room.clinic.schedule_text = "Presentarse 10 minutos antes."
++    room.clinic.save(update_fields=["schedule_text"])
++    doctor = create_tenant_doctor("doctor-contexto@example.com")
++    create_availability(room)
++    create_rate(room)
++    client.force_login(user)
++
++    response = client.get(
++        "/reservaciones/solicitar/"
++        f"?source=quick&room={room.pk}&tenant_doctor={doctor.pk}"
++        "&date=2026-08-10&start_time=08:00&end_time=13:00"
++    )
++
++    content = response.content.decode()
++    assert response.status_code == 200
++    assert "Volver a la vista rápida" in content
++    assert "Presentarse 10 minutos antes." in content
++    assert "Tipo de tarifa" in content
++    assert "Tarifa total" in content
++    assert "75.00 MXN/h" in content
++    assert "375.00 MXN" in content
++    assert f'value="{room.pk}" selected' in content
++    assert f'value="{doctor.pk}" selected' in content
++
++
++@pytest.mark.django_db
++def test_reservation_request_shows_block_dropdown(client: Any) -> None:
++    user = create_user("solicitud-bloque@example.com")
++    room = create_room("Consultorio Bloque UI")
++    doctor = create_tenant_doctor("doctor-bloque-ui@example.com")
++    create_availability(room)
++    create_rate(room, price_type=PriceType.BLOCK, amount=Decimal("150.00"))
++    client.force_login(user)
++
++    response = client.get(
++        "/reservaciones/solicitar/"
++        f"?room={room.pk}&tenant_doctor={doctor.pk}"
++        "&date=2026-08-10&start_time=08:00&end_time=13:00"
++    )
++
++    content = response.content.decode()
++    assert response.status_code == 200
++    assert 'name="block_slot"' in content
++    assert "Bloque disponible" in content
++    assert "150.00 MXN" in content
++
++
+ @pytest.mark.django_db
+ def test_create_reservation_from_ui(client: Any) -> None:
+     user = create_user("ui-reserva@example.com")
+@@ -446,3 +536,39 @@ def test_create_reservation_from_ui(client: Any) -> None:
+ 
+     assert response.status_code == 302
+     assert Statement.objects.filter(reservation__notes="Solicitud desde UI").exists()
++
++
++@pytest.mark.django_db
++def test_create_reservation_from_ui_sends_confirmation_email(
++    client: Any,
++    settings: Any,
++) -> None:
++    settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
++    mail.outbox = []
++    user = create_user("ui-correo@example.com")
++    room = create_room("Consultorio Correo")
++    doctor = create_tenant_doctor("doctor-correo@example.com")
++    create_availability(room)
++    create_rate(room)
++    client.force_login(user)
++
++    response = client.post(
++        "/reservaciones/solicitar/",
++        {
++            "room": str(room.pk),
++            "tenant_doctor": str(doctor.pk),
++            "date": "2026-06-29",
++            "start_time": "08:00",
++            "end_time": "13:00",
++            "notes": "",
++        },
++    )
++
++    assert response.status_code == 302
++    assert len(mail.outbox) == 1
++    message = mail.outbox[0]
++    assert message.subject == "Consultorio 101, reservación confirmada"
++    assert set(message.to) == {doctor.user.email, room.owner.user.email}
++    assert "Estimado Dr." in message.body
++    assert "29/06/2026" in message.body
++    assert "08:00 hasta las 13:00" in message.body

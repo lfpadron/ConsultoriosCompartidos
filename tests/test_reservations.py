@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.exceptions import ValidationError
 
 from apps.astrotrace.models import TraceEvent
@@ -324,6 +325,23 @@ def test_calendar_shows_tenant_doctor_filter(client: Any) -> None:
 
 
 @pytest.mark.django_db
+def test_calendar_room_dropdown_filters_by_tenant_doctor(client: Any) -> None:
+    user = create_user("calendar-consultorio-arrendatario@example.com")
+    assigned_room = create_room("Consultorio Asignado")
+    other_room = create_room("Consultorio No Asignado")
+    doctor = create_tenant_doctor("doctor-asignado@example.com")
+    doctor.assigned_rooms.add(assigned_room)
+    client.force_login(user)
+
+    response = client.get(f"/calendario/?tenant_doctor={doctor.pk}")
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert str(assigned_room.pk) in content
+    assert str(other_room.pk) not in content
+
+
+@pytest.mark.django_db
 def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> None:
     user = create_user("vista-rapida-libre@example.com")
     room = create_room("Consultorio Vista Rápida Libre")
@@ -343,6 +361,27 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
     assert "Libre" in content
     assert "Reservar" in content
     assert 'name="tenant_doctor"' in content
+
+
+@pytest.mark.django_db
+def test_quick_calendar_defaults_logged_tenant_and_warns_without_rooms(
+    client: Any,
+) -> None:
+    room = create_room("Consultorio Vista Rápida Sin Asignación")
+    doctor = create_tenant_doctor("doctor-sin-consultorio@example.com")
+    create_availability(room)
+    create_rate(room)
+    client.force_login(doctor.user)
+
+    response = client.get(
+        "/calendario/vista-rapida/?week=2026-08-10&selected_date=2026-08-10"
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert str(doctor.pk) in content
+    assert "El usuario registrado no está asignado a ningún consultorio." in content
+    assert room.name in content
 
 
 @pytest.mark.django_db
@@ -424,6 +463,57 @@ def test_reservation_list_filters_by_tenant_doctor(client: Any) -> None:
 
 
 @pytest.mark.django_db
+def test_reservation_request_prefills_context_and_pricing(client: Any) -> None:
+    user = create_user("solicitud-contexto@example.com")
+    room = create_room("Consultorio Contexto")
+    room.clinic.schedule_text = "Presentarse 10 minutos antes."
+    room.clinic.save(update_fields=["schedule_text"])
+    doctor = create_tenant_doctor("doctor-contexto@example.com")
+    create_availability(room)
+    create_rate(room)
+    client.force_login(user)
+
+    response = client.get(
+        "/reservaciones/solicitar/"
+        f"?source=quick&room={room.pk}&tenant_doctor={doctor.pk}"
+        "&date=2026-08-10&start_time=08:00&end_time=13:00"
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "Volver a la vista rápida" in content
+    assert "Presentarse 10 minutos antes." in content
+    assert "Tipo de tarifa" in content
+    assert "Tarifa total" in content
+    assert "75.00 MXN/h" in content
+    assert "375.00 MXN" in content
+    assert f'value="{room.pk}" selected' in content
+    assert f'value="{doctor.pk}" selected' in content
+
+
+@pytest.mark.django_db
+def test_reservation_request_shows_block_dropdown(client: Any) -> None:
+    user = create_user("solicitud-bloque@example.com")
+    room = create_room("Consultorio Bloque UI")
+    doctor = create_tenant_doctor("doctor-bloque-ui@example.com")
+    create_availability(room)
+    create_rate(room, price_type=PriceType.BLOCK, amount=Decimal("150.00"))
+    client.force_login(user)
+
+    response = client.get(
+        "/reservaciones/solicitar/"
+        f"?room={room.pk}&tenant_doctor={doctor.pk}"
+        "&date=2026-08-10&start_time=08:00&end_time=13:00"
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert 'name="block_slot"' in content
+    assert "Bloque disponible" in content
+    assert "150.00 MXN" in content
+
+
+@pytest.mark.django_db
 def test_create_reservation_from_ui(client: Any) -> None:
     user = create_user("ui-reserva@example.com")
     room = create_room("Consultorio UI")
@@ -446,3 +536,39 @@ def test_create_reservation_from_ui(client: Any) -> None:
 
     assert response.status_code == 302
     assert Statement.objects.filter(reservation__notes="Solicitud desde UI").exists()
+
+
+@pytest.mark.django_db
+def test_create_reservation_from_ui_sends_confirmation_email(
+    client: Any,
+    settings: Any,
+) -> None:
+    settings.EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+    mail.outbox = []
+    user = create_user("ui-correo@example.com")
+    room = create_room("Consultorio Correo")
+    doctor = create_tenant_doctor("doctor-correo@example.com")
+    create_availability(room)
+    create_rate(room)
+    client.force_login(user)
+
+    response = client.post(
+        "/reservaciones/solicitar/",
+        {
+            "room": str(room.pk),
+            "tenant_doctor": str(doctor.pk),
+            "date": "2026-06-29",
+            "start_time": "08:00",
+            "end_time": "13:00",
+            "notes": "",
+        },
+    )
+
+    assert response.status_code == 302
+    assert len(mail.outbox) == 1
+    message = mail.outbox[0]
+    assert message.subject == "Consultorio 101, reservación confirmada"
+    assert set(message.to) == {doctor.user.email, room.owner.user.email}
+    assert "Estimado Dr." in message.body
+    assert "29/06/2026" in message.body
+    assert "08:00 hasta las 13:00" in message.body
