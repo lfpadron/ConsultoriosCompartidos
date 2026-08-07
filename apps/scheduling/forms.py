@@ -1,6 +1,7 @@
 """Forms for scheduling screens."""
 
-from typing import Any
+from decimal import Decimal
+from typing import Any, cast
 
 from django import forms
 from django.db.models import QuerySet
@@ -19,6 +20,7 @@ from apps.core.form_utils import (
     style_form_fields,
 )
 from apps.core.permissions import scope_queryset_for_user
+from apps.finance.models import PriceType
 from apps.scheduling.models import (
     AvailabilityException,
     AvailabilityRule,
@@ -73,6 +75,15 @@ def _room_queryset(data: Any = None, *, active_only: bool = False) -> QuerySet[A
     if owner_pk:
         queryset = queryset.filter(owner_id=owner_pk)
     return queryset.order_by("clinic__name", "owner__display_name", "name")
+
+
+def _campus_choices(data: Any = None) -> list[tuple[str, str]]:
+    queryset = ConsultingRoom.objects.filter(is_deleted=False).exclude(campus="")
+    clinic_pk = selected_model_pk(data, "clinic")
+    if clinic_pk:
+        queryset = queryset.filter(clinic_id=clinic_pk)
+    campuses = queryset.order_by("campus").values_list("campus", flat=True).distinct()
+    return [("", "Todos"), *((campus, campus) for campus in campuses)]
 
 
 def _tenant_doctor_queryset() -> QuerySet[TenantDoctorProfile]:
@@ -153,6 +164,102 @@ class AvailabilityRuleForm(BootstrapModelForm):
         if isinstance(legacy_weekday, str) and legacy_weekday:
             return [int(legacy_weekday)]
         raise forms.ValidationError("Selecciona al menos un día de semana.")
+
+
+class AvailabilityTariffFilterForm(forms.Form):
+    q = forms.CharField(label="Buscar", required=False)
+    clinic = forms.ModelChoiceField(
+        label="Clínica",
+        queryset=Clinic.objects.none(),
+        required=False,
+    )
+    campus = forms.ChoiceField(
+        label="Campus",
+        choices=(("", "Todos"),),
+        required=False,
+    )
+    owner = forms.ModelChoiceField(
+        label="Médico propietario",
+        queryset=OwnerProfile.objects.none(),
+        required=False,
+    )
+    is_active = forms.ChoiceField(
+        label="Estado",
+        choices=(("", "Todos"), ("true", "Activos"), ("false", "Inactivos")),
+        required=False,
+    )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        user = kwargs.pop("user", None)
+        super().__init__(*args, **kwargs)
+        clinic_queryset = _clinic_queryset()
+        owner_queryset = _owner_queryset()
+        if user is not None:
+            clinic_queryset = scope_queryset_for_user(clinic_queryset, user)
+            owner_queryset = scope_queryset_for_user(owner_queryset, user)
+
+        set_model_queryset(self.fields["clinic"], clinic_queryset)
+        set_model_queryset(self.fields["owner"], owner_queryset)
+        campus_field = cast(forms.ChoiceField, self.fields["campus"])
+        campus_field.choices = _campus_choices(self.data if self.is_bound else None)
+        style_form_fields(self.fields)
+
+
+class AvailabilityTariffBlockForm(forms.Form):
+    availability_rule_id = forms.UUIDField(required=False, widget=forms.HiddenInput)
+    rate_rule_id = forms.UUIDField(required=False, widget=forms.HiddenInput)
+    weekday = forms.ChoiceField(label="Día de semana", choices=Weekday.choices)
+    start_time = forms.TimeField(
+        label="Hora de inicio",
+        widget=forms.TimeInput(attrs={"type": "time"}),
+    )
+    end_time = forms.TimeField(
+        label="Hora de fin",
+        widget=forms.TimeInput(attrs={"type": "time"}),
+    )
+    price_type = forms.ChoiceField(
+        label="Tipo de tarifa",
+        choices=PriceType.choices,
+    )
+    amount = forms.DecimalField(
+        label="Tarifa",
+        min_value=Decimal("0.00"),
+        max_digits=12,
+        decimal_places=2,
+    )
+    start_date = forms.DateField(
+        label="Fecha de inicio de vigencia",
+        widget=monday_date_input(),
+    )
+    end_date = forms.DateField(
+        label="Fecha de fin de vigencia",
+        required=False,
+        widget=monday_date_input(),
+    )
+    is_active = forms.BooleanField(label="Activo", required=False, initial=True)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        style_form_fields(self.fields)
+
+    def clean_weekday(self) -> int:
+        return int(self.cleaned_data["weekday"])
+
+    def clean(self) -> dict[str, Any]:
+        cleaned_data = super().clean() or {}
+        start_time = cleaned_data.get("start_time")
+        end_time = cleaned_data.get("end_time")
+        start_date = cleaned_data.get("start_date")
+        end_date = cleaned_data.get("end_date")
+
+        if start_time and end_time and start_time >= end_time:
+            self.add_error("end_time", "La hora de fin debe ser mayor.")
+        if start_date and end_date and end_date < start_date:
+            self.add_error(
+                "end_date",
+                "La fecha de fin no puede ser menor que la fecha de inicio.",
+            )
+        return cleaned_data
 
 
 class AvailabilityExceptionForm(BootstrapModelForm):

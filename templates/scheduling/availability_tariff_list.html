@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="availability-tariff-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#availability-tariff-content" hx-select="#availability-tariff-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Operación</p>
+          <h1 class="h4 mb-0">Disponibilidad y tarifas</h1>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+          {% if new_room_url %}
+            <a class="btn btn-primary" href="{{ new_room_url }}">
+              <i class="bi bi-plus-lg me-1"></i>
+              Nuevo
+            </a>
+          {% else %}
+            <button class="btn btn-primary" type="button" disabled>
+              <i class="bi bi-plus-lg me-1"></i>
+              Nuevo
+            </button>
+          {% endif %}
+        </div>
+      </div>
+
+      <form method="get" class="row g-3 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.q.id_for_label }}">{{ filter_form.q.label }}</label>
+          {{ filter_form.q }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.clinic.id_for_label }}">{{ filter_form.clinic.label }}</label>
+          {{ filter_form.clinic }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.campus.id_for_label }}">{{ filter_form.campus.label }}</label>
+          {{ filter_form.campus }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.owner.id_for_label }}">{{ filter_form.owner.label }}</label>
+          {{ filter_form.owner }}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label" for="{{ filter_form.is_active.id_for_label }}">{{ filter_form.is_active.label }}</label>
+          {{ filter_form.is_active }}
+        </div>
+        <div class="col-md-2 d-grid">
+          <button class="btn btn-primary" type="submit">
+            <i class="bi bi-search me-1"></i>
+            Buscar
+          </button>
+        </div>
+        <div class="col-md-2 d-grid">
+          <button class="btn btn-outline-secondary" type="submit">
+            <i class="bi bi-funnel me-1"></i>
+            Filtrar
+          </button>
+        </div>
+        <div class="col-md-2 d-grid">
+          <a class="btn btn-outline-secondary" href="{% url 'availability' %}">
+            <i class="bi bi-x-lg me-1"></i>
+            Limpiar
+          </a>
+        </div>
+      </form>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle">
+          <thead>
+            <tr>
+              <th scope="col">Editar</th>
+              <th scope="col">Clínica</th>
+              <th scope="col">Campus</th>
+              <th scope="col">Torre</th>
+              <th scope="col">Número</th>
+              <th scope="col">Consultorio</th>
+              <th scope="col">Médico propietario</th>
+              <th scope="col">Disponibilidad</th>
+              <th scope="col">Tarifas</th>
+              <th scope="col">Estado</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr>
+                <td>
+                  <a class="btn btn-sm btn-outline-primary" href="{{ row.edit_url }}">
+                    <i class="bi bi-pencil me-1"></i>
+                    Editar
+                  </a>
+                </td>
+                <td>{{ row.clinic }}</td>
+                <td>{{ row.campus }}</td>
+                <td>{{ row.tower }}</td>
+                <td>{{ row.number }}</td>
+                <td>{{ row.room.name }}</td>
+                <td>{{ row.owner }}</td>
+                <td>{{ row.active_availability_count }}</td>
+                <td>{{ row.active_rate_count }}</td>
+                <td>{{ row.is_active }}</td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="10" class="text-center text-secondary py-5">
+                  Sin consultorios con esos criterios.
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/pagination.html" %}
+    </div>
+  </section>
+{% endblock %}

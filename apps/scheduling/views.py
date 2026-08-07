@@ -9,7 +9,8 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
-from django.db.models import Model, Q, QuerySet
+from django.db import transaction
+from django.db.models import Count, Model, Q, QuerySet
 from django.forms import ModelForm
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect
@@ -23,7 +24,7 @@ from apps.catalog.models import ConsultingRoom
 from apps.core.form_utils import django_weekday_values
 from apps.core.permissions import scope_queryset_for_user
 from apps.core.templatetags.clinic_time import format_time_for_clinic
-from apps.finance.models import StatementStatus
+from apps.finance.models import RateRule, StatementStatus
 from apps.finance.services.payment_service import get_payment_summary_for_reservation
 from apps.finance.services.pricing_engine import (
     PricingConfigurationError,
@@ -36,6 +37,8 @@ from apps.integration.services.access_simulator import get_access_status_for_res
 from apps.scheduling.forms import (
     AvailabilityExceptionForm,
     AvailabilityRuleForm,
+    AvailabilityTariffBlockForm,
+    AvailabilityTariffFilterForm,
     OperationalFilterForm,
     ReservationCancelForm,
     ReservationFilterForm,
@@ -475,6 +478,462 @@ class AvailabilityRuleDetailView(SchedulingDetailView):
 
 class AvailabilityRuleDeactivateView(SchedulingDeactivateView):
     resource = RULE
+
+
+class AvailabilityTariffListView(LoginRequiredMixin, ListView):
+    template_name = "scheduling/availability_tariff_list.html"
+    context_object_name = "rooms"
+    paginate_by = 25
+
+    def get_queryset(self) -> QuerySet[ConsultingRoom]:
+        queryset = (
+            ConsultingRoom.objects.filter(is_deleted=False)
+            .select_related("clinic", "owner", "owner__user")
+            .annotate(
+                active_availability_count=Count(
+                    "availability_rules",
+                    filter=Q(
+                        availability_rules__is_active=True,
+                        availability_rules__is_deleted=False,
+                    ),
+                    distinct=True,
+                ),
+                active_rate_count=Count(
+                    "rate_rules",
+                    filter=Q(
+                        rate_rules__is_active=True,
+                        rate_rules__is_deleted=False,
+                    ),
+                    distinct=True,
+                ),
+            )
+        )
+        self.filter_form = AvailabilityTariffFilterForm(
+            self.request.GET or None,
+            user=self.request.user,
+        )
+        cleaned_data = _cleaned_filter_data(self.filter_form)
+        search_query = (cleaned_data.get("q") or "").strip()
+        clinic = cleaned_data.get("clinic")
+        campus = cleaned_data.get("campus")
+        owner = cleaned_data.get("owner")
+        is_active = cleaned_data.get("is_active")
+
+        if search_query:
+            queryset = queryset.filter(
+                Q(name__icontains=search_query)
+                | Q(number__icontains=search_query)
+                | Q(campus__icontains=search_query)
+                | Q(tower__icontains=search_query)
+                | Q(clinic__name__icontains=search_query)
+                | Q(owner__display_name__icontains=search_query)
+                | Q(owner__user__email__icontains=search_query)
+            )
+        if clinic:
+            queryset = queryset.filter(clinic=clinic)
+        if campus:
+            queryset = queryset.filter(campus=campus)
+        if owner:
+            queryset = queryset.filter(owner=owner)
+        if is_active == "true":
+            queryset = queryset.filter(is_active=True)
+        elif is_active == "false":
+            queryset = queryset.filter(is_active=False)
+
+        return scope_queryset_for_user(
+            queryset.order_by("clinic__name", "campus", "number", "name"),
+            self.request.user,
+        )
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        rooms = list(context["rooms"])
+        context.update(
+            {
+                "page_title": "Disponibilidad y tarifas",
+                "filter_form": self.filter_form,
+                "rows": [self._room_row(room) for room in rooms],
+                "new_room_url": (
+                    reverse("availability_room_detail", kwargs={"pk": rooms[0].pk})
+                    if rooms
+                    else ""
+                ),
+            }
+        )
+        return context
+
+    @staticmethod
+    def _room_row(room: ConsultingRoom) -> dict[str, Any]:
+        return {
+            "room": room,
+            "edit_url": reverse("availability_room_detail", kwargs={"pk": room.pk}),
+            "clinic": room.clinic,
+            "campus": room.campus or "Sin campus",
+            "tower": room.tower or "Sin torre",
+            "number": room.number or "Sin número",
+            "owner": room.owner,
+            "active_availability_count": getattr(
+                room,
+                "active_availability_count",
+                0,
+            ),
+            "active_rate_count": getattr(room, "active_rate_count", 0),
+            "is_active": "Activo" if room.is_active else "Inactivo",
+        }
+
+
+class AvailabilityTariffDetailView(LoginRequiredMixin, TemplateView):
+    template_name = "scheduling/availability_tariff_detail.html"
+
+    def get_room(self) -> ConsultingRoom:
+        queryset = ConsultingRoom.objects.filter(is_deleted=False).select_related(
+            "clinic",
+            "owner",
+            "owner__user",
+        )
+        queryset = scope_queryset_for_user(queryset, self.request.user)
+        return queryset.get(pk=self.kwargs["pk"])
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        room = self.get_room()
+        form = kwargs.get("form") or AvailabilityTariffBlockForm(
+            initial=self._initial_block_data(room)
+        )
+        context.update(
+            {
+                "page_title": "Detalle de disponibilidad",
+                "room": room,
+                "blocks": availability_tariff_blocks(room),
+                "form": form,
+                "is_editing": bool(
+                    self.request.GET.get("availability_rule")
+                    or self.request.GET.get("rate_rule")
+                ),
+            }
+        )
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        room = self.get_room()
+        form = AvailabilityTariffBlockForm(request.POST)
+        if form.is_valid():
+            try:
+                self._save_block(room, form)
+            except ValidationError as exc:
+                form.add_error(None, exc)
+            else:
+                messages.success(
+                    request,
+                    "Bloque de disponibilidad y tarifa guardado.",
+                )
+                return redirect("availability_room_detail", pk=room.pk)
+        return self.render_to_response(self.get_context_data(form=form))
+
+    def _initial_block_data(self, room: ConsultingRoom) -> dict[str, Any]:
+        availability_rule = self._get_availability_rule(room)
+        rate_rule = self._get_rate_rule(room)
+        weekday = self._selected_weekday(availability_rule, rate_rule)
+        source = availability_rule or rate_rule
+        if source is None:
+            return {"is_active": True}
+
+        initial = {
+            "availability_rule_id": getattr(availability_rule, "pk", None),
+            "rate_rule_id": getattr(rate_rule, "pk", None),
+            "weekday": weekday,
+            "start_time": source.start_time,
+            "end_time": source.end_time,
+            "start_date": source.start_date,
+            "end_date": source.end_date,
+            "is_active": source.is_active,
+        }
+        if rate_rule is not None:
+            initial.update(
+                {
+                    "price_type": rate_rule.price_type,
+                    "amount": rate_rule.amount,
+                }
+            )
+        return initial
+
+    def _get_availability_rule(self, room: ConsultingRoom) -> AvailabilityRule | None:
+        rule_id = self.request.GET.get("availability_rule")
+        if not rule_id:
+            return None
+        return AvailabilityRule.objects.filter(
+            pk=rule_id,
+            room=room,
+            is_deleted=False,
+        ).first()
+
+    def _get_rate_rule(self, room: ConsultingRoom) -> RateRule | None:
+        rule_id = self.request.GET.get("rate_rule")
+        if not rule_id:
+            return None
+        return RateRule.objects.filter(pk=rule_id, room=room, is_deleted=False).first()
+
+    def _selected_weekday(
+        self,
+        availability_rule: AvailabilityRule | None,
+        rate_rule: RateRule | None,
+    ) -> int | None:
+        weekday_text = self.request.GET.get("weekday")
+        if isinstance(weekday_text, str) and weekday_text:
+            return int(weekday_text)
+        if availability_rule is not None:
+            return rule_weekdays(availability_rule)[0]
+        if rate_rule is not None and rate_rule.weekdays:
+            return int(rate_rule.weekdays[0])
+        return None
+
+    def _save_block(
+        self,
+        room: ConsultingRoom,
+        form: AvailabilityTariffBlockForm,
+    ) -> None:
+        cleaned_data = form.cleaned_data
+        weekday = cleaned_data["weekday"]
+        label = _block_name(
+            room,
+            weekday,
+            cleaned_data["start_time"],
+            cleaned_data["end_time"],
+        )
+        actor = cast(Any, self.request.user)
+        with transaction.atomic():
+            availability_rule, availability_created = self._save_availability_rule(
+                room,
+                label,
+                cleaned_data,
+                actor,
+            )
+            rate_rule, rate_created = self._save_rate_rule(
+                room,
+                label,
+                cleaned_data,
+                actor,
+            )
+
+        record_event(
+            event_type=(
+                "availability_rule.created"
+                if availability_created
+                else "availability_rule.updated"
+            ),
+            object_label=str(availability_rule),
+            actor=cast(Model, self.request.user),
+            payload=_trace_payload(availability_rule),
+        )
+        record_event(
+            event_type="rate_rule.created" if rate_created else "rate_rule.updated",
+            object_label=str(rate_rule),
+            actor=cast(Model, self.request.user),
+            payload=_rate_trace_payload(rate_rule),
+        )
+
+    def _save_availability_rule(
+        self,
+        room: ConsultingRoom,
+        label: str,
+        cleaned_data: dict[str, Any],
+        actor: Any,
+    ) -> tuple[AvailabilityRule, bool]:
+        rule_id = cleaned_data.get("availability_rule_id")
+        rule = None
+        if rule_id:
+            rule = AvailabilityRule.objects.filter(
+                pk=rule_id,
+                room=room,
+                is_deleted=False,
+            ).first()
+        created = rule is None
+        if rule is None:
+            rule = AvailabilityRule(room=room, created_by=actor)
+
+        rule.name = f"Disponibilidad {label}"
+        rule.weekday = cleaned_data["weekday"]
+        rule.weekdays = [cleaned_data["weekday"]]
+        rule.start_time = cleaned_data["start_time"]
+        rule.end_time = cleaned_data["end_time"]
+        rule.start_date = cleaned_data["start_date"]
+        rule.end_date = cleaned_data["end_date"]
+        rule.is_active = cleaned_data["is_active"]
+        rule.updated_by = actor
+        rule.save()
+        return rule, created
+
+    def _save_rate_rule(
+        self,
+        room: ConsultingRoom,
+        label: str,
+        cleaned_data: dict[str, Any],
+        actor: Any,
+    ) -> tuple[RateRule, bool]:
+        rule_id = cleaned_data.get("rate_rule_id")
+        rule = None
+        if rule_id:
+            rule = RateRule.objects.filter(
+                pk=rule_id, room=room, is_deleted=False
+            ).first()
+        created = rule is None
+        if rule is None:
+            rule = RateRule(
+                room=room,
+                created_by=actor,
+                currency="MXN",
+                priority=1,
+            )
+
+        rule.name = f"Tarifa {label}"
+        rule.weekdays = [cleaned_data["weekday"]]
+        rule.start_time = cleaned_data["start_time"]
+        rule.end_time = cleaned_data["end_time"]
+        rule.start_date = cleaned_data["start_date"]
+        rule.end_date = cleaned_data["end_date"]
+        rule.price_type = cleaned_data["price_type"]
+        rule.amount = cleaned_data["amount"]
+        rule.is_active = cleaned_data["is_active"]
+        rule.updated_by = actor
+        rule.save()
+        return rule, created
+
+
+def availability_tariff_blocks(room: ConsultingRoom) -> list[dict[str, Any]]:
+    availability_rules = list(
+        AvailabilityRule.objects.filter(room=room, is_deleted=False).order_by(
+            "weekday",
+            "start_time",
+            "end_time",
+        )
+    )
+    rate_rules = list(
+        RateRule.objects.filter(room=room, is_deleted=False).order_by(
+            "start_time",
+            "end_time",
+        )
+    )
+    used_rate_keys: set[tuple[str, int]] = set()
+    blocks: list[dict[str, Any]] = []
+
+    for availability_rule in availability_rules:
+        for weekday in rule_weekdays(availability_rule):
+            rate_rule = _matching_rate_rule(availability_rule, weekday, rate_rules)
+            if rate_rule is not None:
+                used_rate_keys.add((str(rate_rule.pk), weekday))
+            blocks.append(
+                _availability_tariff_block(room, availability_rule, rate_rule, weekday)
+            )
+
+    for rate_rule in rate_rules:
+        for weekday in rate_rule.weekdays:
+            rate_key = (str(rate_rule.pk), int(weekday))
+            if rate_key in used_rate_keys:
+                continue
+            blocks.append(
+                _availability_tariff_block(room, None, rate_rule, int(weekday))
+            )
+
+    return sorted(
+        blocks,
+        key=lambda block: (
+            block["weekday"],
+            block["start_time"] or time.min,
+            block["end_time"] or time.min,
+        ),
+    )
+
+
+def _matching_rate_rule(
+    availability_rule: AvailabilityRule,
+    weekday: int,
+    rate_rules: list[RateRule],
+) -> RateRule | None:
+    for rate_rule in rate_rules:
+        if int(weekday) not in {int(day) for day in rate_rule.weekdays}:
+            continue
+        if (
+            availability_rule.start_time == rate_rule.start_time
+            and availability_rule.end_time == rate_rule.end_time
+            and availability_rule.start_date == rate_rule.start_date
+            and availability_rule.end_date == rate_rule.end_date
+        ):
+            return rate_rule
+    return None
+
+
+def _availability_tariff_block(
+    room: ConsultingRoom,
+    availability_rule: AvailabilityRule | None,
+    rate_rule: RateRule | None,
+    weekday: int,
+) -> dict[str, Any]:
+    source = availability_rule or rate_rule
+    weekday_labels = dict(Weekday.choices)
+    edit_params: dict[str, str] = {"weekday": str(weekday)}
+    if availability_rule is not None:
+        edit_params["availability_rule"] = str(availability_rule.pk)
+    if rate_rule is not None:
+        edit_params["rate_rule"] = str(rate_rule.pk)
+    edit_url = (
+        f"{reverse('availability_room_detail', kwargs={'pk': room.pk})}"
+        f"?{urlencode(edit_params)}"
+    )
+    return {
+        "availability_rule": availability_rule,
+        "rate_rule": rate_rule,
+        "weekday": weekday,
+        "weekday_label": weekday_labels[weekday],
+        "start_time": getattr(source, "start_time", None),
+        "end_time": getattr(source, "end_time", None),
+        "time_range": (
+            f"{format_time_for_clinic(source.start_time, room)} - "
+            f"{format_time_for_clinic(source.end_time, room)}"
+            if source is not None
+            else "Sin horario"
+        ),
+        "price_type": (
+            rate_rule.get_price_type_display()
+            if rate_rule is not None
+            else "Sin tarifa"
+        ),
+        "amount": (
+            f"{rate_rule.amount} {rate_rule.currency}"
+            if rate_rule is not None
+            else "Sin tarifa"
+        ),
+        "start_date": getattr(source, "start_date", None),
+        "end_date": getattr(source, "end_date", None),
+        "status": "Activo" if getattr(source, "is_active", False) else "Inactivo",
+        "edit_url": edit_url,
+    }
+
+
+def _block_name(
+    room: ConsultingRoom,
+    weekday: int,
+    start_time: time,
+    end_time: time,
+) -> str:
+    weekday_label = dict(Weekday.choices)[weekday]
+    return f"{room.name} {weekday_label} {start_time:%H:%M}-{end_time:%H:%M}"
+
+
+def _rate_trace_payload(instance: RateRule) -> dict[str, str]:
+    description = (
+        f"{instance.room} {instance.start_time:%H:%M}-{instance.end_time:%H:%M} "
+        f"{instance.amount} {instance.currency} prioridad {instance.priority}"
+    )
+    return {
+        "model": instance._meta.label,
+        "id": str(instance.pk),
+        "level": "financiero",
+        "description": description,
+        "room": str(instance.room),
+        "amount": str(instance.amount),
+        "currency": instance.currency,
+        "priority": str(instance.priority),
+    }
 
 
 class AvailabilityExceptionListView(SchedulingListView):

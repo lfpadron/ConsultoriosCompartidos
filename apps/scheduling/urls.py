@@ -7,8 +7,13 @@ from apps.scheduling import views
 urlpatterns = [
     path(
         "disponibilidad/",
-        views.AvailabilityRuleListView.as_view(),
+        views.AvailabilityTariffListView.as_view(),
         name="availability",
+    ),
+    path(
+        "disponibilidad/consultorios/<uuid:pk>/",
+        views.AvailabilityTariffDetailView.as_view(),
+        name="availability_room_detail",
     ),
     path(
         "disponibilidad/reglas/nueva/",

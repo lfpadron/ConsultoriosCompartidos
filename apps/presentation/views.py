@@ -57,9 +57,9 @@ def _quick_links() -> list[dict[str, str]]:
             "icon": "bi-calendar3",
         },
         {
-            "label": "Nueva tarifa",
-            "url": reverse("rate_create"),
-            "icon": "bi-cash-coin",
+            "label": "Disponibilidad y tarifas",
+            "url": reverse("availability"),
+            "icon": "bi-calendar-week",
         },
         {
             "label": "Reservaciones",

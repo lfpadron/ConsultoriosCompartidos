@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="availability-tariff-detail" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#availability-tariff-detail" hx-select="#availability-tariff-detail" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Detalle de disponibilidad</p>
+          <h1 class="h4 mb-1">{{ room.name }}</h1>
+          <div class="text-secondary">
+            {{ room.clinic }} · {{ room.campus|default:"Sin campus" }} · {{ room.tower|default:"Sin torre" }} · {{ room.number|default:"Sin número" }}
+          </div>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+          <a class="btn btn-outline-secondary" href="{% url 'availability' %}">
+            <i class="bi bi-arrow-left me-1"></i>
+            Volver
+          </a>
+          <a class="btn btn-primary" href="{% url 'availability_room_detail' room.pk %}">
+            <i class="bi bi-plus-lg me-1"></i>
+            Nuevo bloque
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Bloques configurados</h2>
+      <div class="table-responsive">
+        <table class="table table-hover align-middle">
+          <thead>
+            <tr>
+              <th scope="col">Editar</th>
+              <th scope="col">Día de semana</th>
+              <th scope="col">Horario</th>
+              <th scope="col">Tipo de tarifa</th>
+              <th scope="col">Tarifa</th>
+              <th scope="col">Inicio de vigencia</th>
+              <th scope="col">Fin de vigencia</th>
+              <th scope="col">Estado</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for block in blocks %}
+              <tr>
+                <td>
+                  <a class="btn btn-sm btn-outline-primary" href="{{ block.edit_url }}">
+                    <i class="bi bi-pencil me-1"></i>
+                    Editar
+                  </a>
+                </td>
+                <td>{{ block.weekday_label }}</td>
+                <td>{{ block.time_range }}</td>
+                <td>{{ block.price_type }}</td>
+                <td>{{ block.amount }}</td>
+                <td>{{ block.start_date|date:"d/m/Y"|default:"Sin fecha" }}</td>
+                <td>{{ block.end_date|date:"d/m/Y"|default:"Sin fecha fin" }}</td>
+                <td>{{ block.status }}</td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="8" class="text-center text-secondary py-5">
+                  Este consultorio todavía no tiene bloques configurados.
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="mb-3">
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">
+          {% if is_editing %}Editar bloque{% else %}Alta de bloque{% endif %}
+        </p>
+        <h2 class="h5 mb-0">Disponibilidad y tarifa</h2>
+      </div>
+
+      <form method="post" novalidate>
+        {% csrf_token %}
+        {{ form.availability_rule_id }}
+        {{ form.rate_rule_id }}
+
+        {% if form.non_field_errors %}
+          <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
+        {% endif %}
+
+        <div class="row g-3">
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.weekday.id_for_label }}">{{ form.weekday.label }}</label>
+            {{ form.weekday }}
+            {% for error in form.weekday.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.start_time.id_for_label }}">{{ form.start_time.label }}</label>
+            {{ form.start_time }}
+            {% for error in form.start_time.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.end_time.id_for_label }}">{{ form.end_time.label }}</label>
+            {{ form.end_time }}
+            {% for error in form.end_time.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.price_type.id_for_label }}">{{ form.price_type.label }}</label>
+            {{ form.price_type }}
+            {% for error in form.price_type.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.amount.id_for_label }}">{{ form.amount.label }}</label>
+            {{ form.amount }}
+            {% for error in form.amount.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.start_date.id_for_label }}">{{ form.start_date.label }}</label>
+            {{ form.start_date }}
+            {% for error in form.start_date.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label" for="{{ form.end_date.id_for_label }}">{{ form.end_date.label }}</label>
+            {{ form.end_date }}
+            {% for error in form.end_date.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+          </div>
+          <div class="col-md-4 d-flex align-items-end">
+            <div class="form-check mb-2">
+              {{ form.is_active }}
+              <label class="form-check-label" for="{{ form.is_active.id_for_label }}">{{ form.is_active.label }}</label>
+              {% for error in form.is_active.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+            </div>
+          </div>
+        </div>
+
+        <div class="d-flex justify-content-end gap-2 mt-4">
+          <a class="btn btn-outline-secondary" href="{% url 'availability_room_detail' room.pk %}">
+            <i class="bi bi-x-lg me-1"></i>
+            Cancelar
+          </a>
+          <button class="btn btn-primary" type="submit">
+            <i class="bi bi-save me-1"></i>
+            Guardar
+          </button>
+        </div>
+      </form>
+    </div>
+  </section>
+{% endblock %}

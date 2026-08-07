@@ -8,6 +8,7 @@ from django.forms import ModelChoiceField
 
 from apps.astrotrace.models import TraceEvent
 from apps.catalog.models import Clinic, ConsultingRoom, OwnerProfile
+from apps.finance.models import PriceType, RateRule
 from apps.scheduling.forms import WeeklyCalendarFilterForm
 from apps.scheduling.models import (
     AvailabilityException,
@@ -258,6 +259,119 @@ def test_availability_list_view_returns_200(client: Any) -> None:
     response = client.get("/disponibilidad/")
 
     assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_availability_tariff_list_filters_by_campus_and_status(client: Any) -> None:
+    user = create_user("availability-campus@example.com")
+    room = create_room("Consultorio Campus A")
+    room.campus = "Campus Norte"
+    room.number = "101"
+    room.save(update_fields=["campus", "number"])
+    other_room = create_room("Consultorio Campus B")
+    other_room.campus = "Campus Sur"
+    other_room.is_active = False
+    other_room.save(update_fields=["campus", "is_active"])
+    client.force_login(user)
+
+    response = client.get(
+        "/disponibilidad/",
+        {
+            "clinic": str(room.clinic.pk),
+            "campus": "Campus Norte",
+            "owner": str(room.owner_id),
+            "is_active": "true",
+        },
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "Disponibilidad y tarifas" in content
+    assert "Campus Norte" in content
+    assert "Consultorio Campus A" in content
+    assert f"/disponibilidad/consultorios/{room.pk}/" in content
+    assert f"/disponibilidad/consultorios/{other_room.pk}/" not in content
+
+
+@pytest.mark.django_db
+def test_availability_tariff_detail_creates_availability_and_rate(
+    client: Any,
+) -> None:
+    user = create_user("availability-tariff-create@example.com")
+    room = create_room("Consultorio Bloque Unificado")
+    client.force_login(user)
+
+    response = client.post(
+        f"/disponibilidad/consultorios/{room.pk}/",
+        {
+            "weekday": str(Weekday.MONDAY),
+            "start_time": "07:00",
+            "end_time": "13:00",
+            "price_type": PriceType.HOURLY,
+            "amount": "75.00",
+            "start_date": "2026-06-29",
+            "end_date": "",
+            "is_active": "on",
+        },
+    )
+
+    availability_rule = AvailabilityRule.objects.get(room=room)
+    rate_rule = RateRule.objects.get(room=room)
+    assert response.status_code == 302
+    assert availability_rule.weekdays == [Weekday.MONDAY]
+    assert availability_rule.start_time == time(7, 0)
+    assert rate_rule.weekdays == [Weekday.MONDAY]
+    assert rate_rule.price_type == PriceType.HOURLY
+    assert rate_rule.amount == 75
+    assert TraceEvent.objects.filter(event_type="availability_rule.created").exists()
+    assert TraceEvent.objects.filter(event_type="rate_rule.created").exists()
+
+
+@pytest.mark.django_db
+def test_availability_tariff_detail_edits_existing_block(client: Any) -> None:
+    user = create_user("availability-tariff-edit@example.com")
+    room = create_room("Consultorio Bloque Editar")
+    availability_rule = create_rule(room, start_time=time(7, 0), end_time=time(13, 0))
+    rate_rule = RateRule.objects.create(
+        room=room,
+        name="Tarifa editar",
+        weekdays=[Weekday.MONDAY],
+        start_time=time(7, 0),
+        end_time=time(13, 0),
+        start_date=date(2026, 6, 29),
+        price_type=PriceType.HOURLY,
+        amount="75.00",
+        currency="MXN",
+        priority=1,
+    )
+    client.force_login(user)
+
+    response = client.post(
+        f"/disponibilidad/consultorios/{room.pk}/",
+        {
+            "availability_rule_id": str(availability_rule.pk),
+            "rate_rule_id": str(rate_rule.pk),
+            "weekday": str(Weekday.TUESDAY),
+            "start_time": "14:00",
+            "end_time": "21:00",
+            "price_type": PriceType.BLOCK,
+            "amount": "500.00",
+            "start_date": "2026-07-01",
+            "end_date": "2026-12-31",
+            "is_active": "on",
+        },
+    )
+
+    availability_rule.refresh_from_db()
+    rate_rule.refresh_from_db()
+    assert response.status_code == 302
+    assert availability_rule.weekdays == [Weekday.TUESDAY]
+    assert availability_rule.start_time == time(14, 0)
+    assert rate_rule.weekdays == [Weekday.TUESDAY]
+    assert rate_rule.price_type == PriceType.BLOCK
+    assert rate_rule.amount == 500
+    assert TraceEvent.objects.filter(event_type="availability_rule.updated").exists()
+    assert TraceEvent.objects.filter(event_type="rate_rule.updated").exists()
 
 
 @pytest.mark.django_db

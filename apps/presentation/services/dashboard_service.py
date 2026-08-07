@@ -204,7 +204,7 @@ def get_dashboard_metrics() -> DashboardMetrics:
                     finance["calculated_commissions"],
                     "bi-percent",
                     "warning",
-                    "rates",
+                    "availability",
                 ),
                 _money_metric(
                     "pending_owner_net",
@@ -382,7 +382,7 @@ def get_dashboard_alerts() -> list[DashboardAlert]:
             alert_type="Tarifas",
             description="Consultorios activos sin reglas tarifarias",
             count=_active_rooms_without_rates(),
-            url=reverse("rates"),
+            url=reverse("availability"),
             icon="bi-cash-coin",
             variant="warning",
         ),
