@@ -115,18 +115,6 @@ if (-not [string]::IsNullOrWhiteSpace($KeyPath)) {
 }
 
 $Remote = "$User@$Server"
-$SiteHost = "localhost"
-if (-not [string]::IsNullOrWhiteSpace($SiteUrl)) {
-    try {
-        $parsedSiteUrl = [System.Uri]$SiteUrl
-        if (-not [string]::IsNullOrWhiteSpace($parsedSiteUrl.Host)) {
-            $SiteHost = $parsedSiteUrl.Host
-        }
-    }
-    catch {
-        Write-Host "Aviso: no pude leer el host de SiteUrl; usare localhost para el smoke test."
-    }
-}
 
 try {
     Test-Command "ssh"
@@ -153,8 +141,6 @@ try {
 
     $remoteDirQ = Quote-Sh $RemoteDir
     $composeFileQ = Quote-Sh $ComposeFile
-    $hostHeaderQ = Quote-Sh "Host: $SiteHost"
-    $waitAttempts = (1..45) -join " "
     $remoteDeploySteps = @(
         "set -e",
         "cd $remoteDirQ",
@@ -180,14 +166,17 @@ try {
 
     if (-not $SkipRestartWeb) {
         $remoteDeploySteps += "docker compose -f $composeFileQ restart web"
+        $remoteDeploySteps += "docker compose -f $composeFileQ up -d web"
+        $remoteDeploySteps += "sleep 8"
     }
-
-    $remoteDeploySteps += "echo 'Esperando a que Django responda en 127.0.0.1:8000...'"
-    $remoteDeploySteps += "for i in $waitAttempts; do if curl -fsS -o /dev/null --max-time 3 -H $hostHeaderQ http://127.0.0.1:8000/; then echo 'Web lista'; break; fi; if [ `$i -eq 45 ]; then echo 'web no respondio a tiempo' >&2; docker compose -f $composeFileQ ps; docker compose -f $composeFileQ logs web --tail=180; exit 1; fi; sleep 2; done"
 
     if (-not $SkipNginxReload) {
         $remoteDeploySteps += "systemctl reload nginx"
     }
+
+    $remoteDeploySteps += "docker compose -f $composeFileQ ps"
+    $remoteDeploySteps += "curl -fsSIL --max-time 10 http://127.0.0.1:8000/ >/dev/null || echo 'Aviso: Django no respondio localmente despues del despliegue; si el navegador muestra 502 revisa logs de web.' >&2"
+    $remoteDeploySteps += "curl -fsSIL --max-time 15 $(Quote-Sh $SiteUrl) >/dev/null || echo 'Aviso: la URL publica no respondio correctamente; revisa nginx/DNS si el navegador falla.' >&2"
 
     $remoteDeployCommand = $remoteDeploySteps -join "; "
     $sshArgs = @()
