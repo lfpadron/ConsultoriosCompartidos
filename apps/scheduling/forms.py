@@ -36,6 +36,7 @@ from apps.scheduling.models import (
 from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
 
 TIME_CHOICE_STEP_MINUTES = 30
+MIN_HOURLY_RESERVATION_MINUTES = 60
 
 
 def set_model_queryset(field: forms.Field, queryset: QuerySet[Any]) -> None:
@@ -171,6 +172,10 @@ def _time_range_points(start_time: time, end_time: time) -> list[time]:
     if not points or points[-1] != end_time:
         points.append(end_time)
     return points
+
+
+def _add_minutes(value: time, minutes: int) -> time:
+    return (datetime.combine(date.min, value) + timedelta(minutes=minutes)).time()
 
 
 def _unique_time_choices(values: list[time], empty_label: str) -> list[tuple[str, str]]:
@@ -475,6 +480,10 @@ class WeeklyCalendarFilterForm(OperationalFilterForm):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.fields.pop("q", None)
+        self.fields["clinic"].widget.attrs["onchange"] = (
+            "this.form.querySelector('[name=room]').value='';"
+            "this.form.requestSubmit();"
+        )
 
 
 class ReservationFilterForm(OperationalFilterForm):
@@ -788,8 +797,16 @@ class ReservationRequestForm(BootstrapModelForm):
         end_points: list[time] = []
         for block in self.available_blocks:
             points = _time_range_points(block.start_time, block.end_time)
-            start_points.extend(points[:-1])
-            end_points.extend(points[1:])
+            latest_start = _add_minutes(
+                block.end_time,
+                -MIN_HOURLY_RESERVATION_MINUTES,
+            )
+            earliest_end = _add_minutes(
+                block.start_time,
+                MIN_HOURLY_RESERVATION_MINUTES,
+            )
+            start_points.extend(point for point in points if point <= latest_start)
+            end_points.extend(point for point in points if point >= earliest_end)
 
         self.fields["start_time"].widget = forms.Select(
             choices=_unique_time_choices(start_points, "Selecciona hora inicio")

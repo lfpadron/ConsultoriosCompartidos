@@ -7,7 +7,7 @@
         <p class="text-uppercase text-secondary small fw-semibold mb-2">Reservación</p>
         <h1 class="h4 mb-0">Solicitar reservación</h1>
       </div>
-      <a class="btn btn-outline-secondary" href="{{ back_url }}">
+      <a class="btn btn-outline-secondary" hx-boost="false" href="{{ back_url }}">
         <i class="bi bi-arrow-left me-1"></i>
         {{ back_label }}
       </a>
@@ -103,7 +103,7 @@
       </div>
 
       <div class="d-flex justify-content-end gap-2 mt-4">
-        <a class="btn btn-outline-secondary" href="{{ back_url }}">
+        <a class="btn btn-outline-secondary" hx-boost="false" href="{{ back_url }}">
           <i class="bi bi-x-lg me-1"></i>
           Cancelar
         </a>
@@ -126,6 +126,12 @@
         const typeField = document.getElementById("id_price_type_display");
         const rateField = document.getElementById("id_rate_amount_display");
         const totalField = document.getElementById("id_total_rate_display");
+        const originalEndOptions = endField
+          ? Array.from(endField.options).map((option) => ({
+              value: option.value,
+              text: option.text,
+            }))
+          : [];
         const toMinutes = (value) => {
           const parts = value.split(":").map(Number);
           return parts[0] * 60 + parts[1];
@@ -147,16 +153,38 @@
           const option = options.block_slots.find((item) => item.value === blockField.value);
           setPricing(option);
         };
+        const validHourlyOption = (start, end) => {
+          return options.ranges.find((item) => {
+            return item.price_type === "por_hora" &&
+              toMinutes(item.start) <= start &&
+              start < end &&
+              end <= toMinutes(item.end) &&
+              end - start >= 60;
+          });
+        };
+        const updateEndChoices = () => {
+          if (!startField || !endField || !startField.value) return;
+          const selectedStart = toMinutes(startField.value);
+          const currentEnd = endField.value;
+          endField.replaceChildren();
+          originalEndOptions.forEach((option) => {
+            const isEmpty = option.value === "";
+            const isValid = !isEmpty && validHourlyOption(selectedStart, toMinutes(option.value));
+            if (isEmpty || isValid) {
+              endField.add(new Option(option.text, option.value));
+            }
+          });
+          if (Array.from(endField.options).some((option) => option.value === currentEnd)) {
+            endField.value = currentEnd;
+          } else {
+            endField.value = "";
+          }
+        };
         const updateHourlyPricing = () => {
           if (!startField || !endField || !startField.value || !endField.value) return;
           const start = toMinutes(startField.value);
           const end = toMinutes(endField.value);
-          const option = options.ranges.find((item) => {
-            return item.price_type === "por_hora" &&
-              toMinutes(item.start) <= start &&
-              end <= toMinutes(item.end) &&
-              start < end;
-          });
+          const option = validHourlyOption(start, end);
           if (!option) {
             setPricing(null);
             return;
@@ -166,8 +194,14 @@
           setPricing(option, total);
         };
         if (blockField) blockField.addEventListener("change", updateBlockPricing);
-        if (startField) startField.addEventListener("change", updateHourlyPricing);
+        if (startField) {
+          startField.addEventListener("change", () => {
+            updateEndChoices();
+            updateHourlyPricing();
+          });
+        }
         if (endField) endField.addEventListener("change", updateHourlyPricing);
+        updateEndChoices();
       })();
     </script>
   </section>

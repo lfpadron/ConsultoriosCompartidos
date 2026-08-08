@@ -1,0 +1,343 @@
+diff --git a/apps/scheduling/forms.py b/apps/scheduling/forms.py
+index faa0721..0c64532 100644
+--- a/apps/scheduling/forms.py
++++ b/apps/scheduling/forms.py
+@@ -36,6 +36,7 @@ from apps.scheduling.models import (
+ from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
+ 
+ TIME_CHOICE_STEP_MINUTES = 30
++MIN_HOURLY_RESERVATION_MINUTES = 60
+ 
+ 
+ def set_model_queryset(field: forms.Field, queryset: QuerySet[Any]) -> None:
+@@ -173,6 +174,10 @@ def _time_range_points(start_time: time, end_time: time) -> list[time]:
+     return points
+ 
+ 
++def _add_minutes(value: time, minutes: int) -> time:
++    return (datetime.combine(date.min, value) + timedelta(minutes=minutes)).time()
++
++
+ def _unique_time_choices(values: list[time], empty_label: str) -> list[tuple[str, str]]:
+     unique_values = sorted({_time_value(value) for value in values})
+     return [("", empty_label), *((value, value) for value in unique_values)]
+@@ -475,6 +480,10 @@ class WeeklyCalendarFilterForm(OperationalFilterForm):
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         super().__init__(*args, **kwargs)
+         self.fields.pop("q", None)
++        self.fields["clinic"].widget.attrs["onchange"] = (
++            "this.form.querySelector('[name=room]').value='';"
++            "this.form.requestSubmit();"
++        )
+ 
+ 
+ class ReservationFilterForm(OperationalFilterForm):
+@@ -788,8 +797,16 @@ class ReservationRequestForm(BootstrapModelForm):
+         end_points: list[time] = []
+         for block in self.available_blocks:
+             points = _time_range_points(block.start_time, block.end_time)
+-            start_points.extend(points[:-1])
+-            end_points.extend(points[1:])
++            latest_start = _add_minutes(
++                block.end_time,
++                -MIN_HOURLY_RESERVATION_MINUTES,
++            )
++            earliest_end = _add_minutes(
++                block.start_time,
++                MIN_HOURLY_RESERVATION_MINUTES,
++            )
++            start_points.extend(point for point in points if point <= latest_start)
++            end_points.extend(point for point in points if point >= earliest_end)
+ 
+         self.fields["start_time"].widget = forms.Select(
+             choices=_unique_time_choices(start_points, "Selecciona hora inicio")
+diff --git a/apps/scheduling/views.py b/apps/scheduling/views.py
+index 42356b6..501394d 100644
+--- a/apps/scheduling/views.py
++++ b/apps/scheduling/views.py
+@@ -1434,6 +1434,16 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+                 ),
+                 "date_from": date_from,
+                 "date_to": date_to,
++                "previous_range_url": self._range_url(
++                    date_from - timedelta(weeks=4),
++                    date_to - timedelta(weeks=4),
++                    selected_date - timedelta(weeks=4),
++                ),
++                "next_range_url": self._range_url(
++                    date_from + timedelta(weeks=4),
++                    date_to + timedelta(weeks=4),
++                    selected_date + timedelta(weeks=4),
++                ),
+                 "weeks": self._summary_weeks(
+                     _week_groups(date_from, date_to),
+                     rooms,
+@@ -1699,6 +1709,20 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
+         params["selected_date"] = selected_date.isoformat()
+         return f"{reverse('calendar_quick')}?{urlencode(params, doseq=True)}"
+ 
++    def _range_url(
++        self,
++        date_from: date,
++        date_to: date,
++        selected_date: date,
++    ) -> str:
++        params = self.request.GET.copy()
++        params.pop("week", None)
++        params.pop("page", None)
++        params["date_from"] = date_from.isoformat()
++        params["date_to"] = date_to.isoformat()
++        params["selected_date"] = selected_date.isoformat()
++        return f"{reverse('calendar_quick')}?{urlencode(params, doseq=True)}"
++
+     def _pagination_querystring(self) -> str:
+         params = self.request.GET.copy()
+         params.pop("page", None)
+diff --git a/templates/scheduling/calendar_quick.html b/templates/scheduling/calendar_quick.html
+index c7542b2..3bc6ea3 100644
+--- a/templates/scheduling/calendar_quick.html
++++ b/templates/scheduling/calendar_quick.html
+@@ -10,10 +10,16 @@
+           <h1 class="h4 mb-0">Vista rápida</h1>
+           <div class="small text-secondary">{{ date_from|date:"d/m/Y" }} - {{ date_to|date:"d/m/Y" }}</div>
+         </div>
+-        <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
+-          <i class="bi bi-calendar3 me-1"></i>
+-          Calendario
+-        </a>
++        <div class="d-flex gap-2">
++          <a class="btn btn-outline-secondary" href="{{ previous_range_url }}">
++            <i class="bi bi-chevron-left me-1"></i>
++            Anterior
++          </a>
++          <a class="btn btn-outline-secondary" href="{{ next_range_url }}">
++            Siguiente
++            <i class="bi bi-chevron-right ms-1"></i>
++          </a>
++        </div>
+       </div>
+ 
+       <form method="get" class="row g-3 align-items-end">
+diff --git a/templates/scheduling/reservation_form.html b/templates/scheduling/reservation_form.html
+index 98b8f48..bdf4998 100644
+--- a/templates/scheduling/reservation_form.html
++++ b/templates/scheduling/reservation_form.html
+@@ -7,7 +7,7 @@
+         <p class="text-uppercase text-secondary small fw-semibold mb-2">Reservación</p>
+         <h1 class="h4 mb-0">Solicitar reservación</h1>
+       </div>
+-      <a class="btn btn-outline-secondary" href="{{ back_url }}">
++      <a class="btn btn-outline-secondary" hx-boost="false" href="{{ back_url }}">
+         <i class="bi bi-arrow-left me-1"></i>
+         {{ back_label }}
+       </a>
+@@ -103,7 +103,7 @@
+       </div>
+ 
+       <div class="d-flex justify-content-end gap-2 mt-4">
+-        <a class="btn btn-outline-secondary" href="{{ back_url }}">
++        <a class="btn btn-outline-secondary" hx-boost="false" href="{{ back_url }}">
+           <i class="bi bi-x-lg me-1"></i>
+           Cancelar
+         </a>
+@@ -126,6 +126,12 @@
+         const typeField = document.getElementById("id_price_type_display");
+         const rateField = document.getElementById("id_rate_amount_display");
+         const totalField = document.getElementById("id_total_rate_display");
++        const originalEndOptions = endField
++          ? Array.from(endField.options).map((option) => ({
++              value: option.value,
++              text: option.text,
++            }))
++          : [];
+         const toMinutes = (value) => {
+           const parts = value.split(":").map(Number);
+           return parts[0] * 60 + parts[1];
+@@ -147,16 +153,38 @@
+           const option = options.block_slots.find((item) => item.value === blockField.value);
+           setPricing(option);
+         };
+-        const updateHourlyPricing = () => {
+-          if (!startField || !endField || !startField.value || !endField.value) return;
+-          const start = toMinutes(startField.value);
+-          const end = toMinutes(endField.value);
+-          const option = options.ranges.find((item) => {
++        const validHourlyOption = (start, end) => {
++          return options.ranges.find((item) => {
+             return item.price_type === "por_hora" &&
+               toMinutes(item.start) <= start &&
++              start < end &&
+               end <= toMinutes(item.end) &&
+-              start < end;
++              end - start >= 60;
+           });
++        };
++        const updateEndChoices = () => {
++          if (!startField || !endField || !startField.value) return;
++          const selectedStart = toMinutes(startField.value);
++          const currentEnd = endField.value;
++          endField.replaceChildren();
++          originalEndOptions.forEach((option) => {
++            const isEmpty = option.value === "";
++            const isValid = !isEmpty && validHourlyOption(selectedStart, toMinutes(option.value));
++            if (isEmpty || isValid) {
++              endField.add(new Option(option.text, option.value));
++            }
++          });
++          if (Array.from(endField.options).some((option) => option.value === currentEnd)) {
++            endField.value = currentEnd;
++          } else {
++            endField.value = "";
++          }
++        };
++        const updateHourlyPricing = () => {
++          if (!startField || !endField || !startField.value || !endField.value) return;
++          const start = toMinutes(startField.value);
++          const end = toMinutes(endField.value);
++          const option = validHourlyOption(start, end);
+           if (!option) {
+             setPricing(null);
+             return;
+@@ -166,8 +194,14 @@
+           setPricing(option, total);
+         };
+         if (blockField) blockField.addEventListener("change", updateBlockPricing);
+-        if (startField) startField.addEventListener("change", updateHourlyPricing);
++        if (startField) {
++          startField.addEventListener("change", () => {
++            updateEndChoices();
++            updateHourlyPricing();
++          });
++        }
+         if (endField) endField.addEventListener("change", updateHourlyPricing);
++        updateEndChoices();
+       })();
+     </script>
+   </section>
+diff --git a/tests/test_reservations.py b/tests/test_reservations.py
+index e111e21..149b88b 100644
+--- a/tests/test_reservations.py
++++ b/tests/test_reservations.py
+@@ -1,3 +1,4 @@
++import re
+ from datetime import date, time
+ from decimal import Decimal
+ from typing import Any
+@@ -363,6 +364,43 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
+     assert 'name="tenant_doctor"' in content
+ 
+ 
++@pytest.mark.django_db
++def test_quick_calendar_has_four_week_navigation(client: Any) -> None:
++    user = create_user("vista-rapida-navegacion@example.com")
++    client.force_login(user)
++
++    response = client.get(
++        "/calendario/vista-rapida/?week=2026-08-10&selected_date=2026-08-10"
++    )
++
++    content = response.content.decode()
++    assert response.status_code == 200
++    assert "date_from=2026-07-13" in content
++    assert "date_from=2026-09-07" in content
++    assert "Anterior" in content
++    assert "Siguiente" in content
++
++
++@pytest.mark.django_db
++def test_calendar_and_quick_clinic_change_refreshes_room_dropdown(
++    client: Any,
++) -> None:
++    user = create_user("calendar-clinica-refresco@example.com")
++    client.force_login(user)
++
++    calendar_response = client.get("/calendario/")
++    quick_response = client.get("/calendario/vista-rapida/")
++
++    assert calendar_response.status_code == 200
++    assert quick_response.status_code == 200
++    assert "querySelector(&#x27;[name=room]&#x27;).value=&#x27;&#x27;" in (
++        calendar_response.content.decode()
++    )
++    assert "querySelector(&#x27;[name=room]&#x27;).value=&#x27;&#x27;" in (
++        quick_response.content.decode()
++    )
++
++
+ @pytest.mark.django_db
+ def test_quick_calendar_defaults_logged_tenant_and_warns_without_rooms(
+     client: Any,
+@@ -491,6 +529,45 @@ def test_reservation_request_prefills_context_and_pricing(client: Any) -> None:
+     assert f'value="{doctor.pk}" selected' in content
+ 
+ 
++@pytest.mark.django_db
++def test_reservation_request_hourly_time_dropdowns_keep_one_hour_margin(
++    client: Any,
++) -> None:
++    user = create_user("solicitud-horas@example.com")
++    room = create_room("Consultorio Horas")
++    doctor = create_tenant_doctor("doctor-horas@example.com")
++    create_availability(room)
++    create_rate(room)
++    client.force_login(user)
++
++    response = client.get(
++        "/reservaciones/solicitar/"
++        f"?room={room.pk}&tenant_doctor={doctor.pk}"
++        "&date=2026-08-10&start_time=08:00&end_time=13:00"
++    )
++
++    content = response.content.decode()
++    start_select = re.search(
++        r'<select[^>]*name="start_time"[^>]*>(.*?)</select>',
++        content,
++        re.DOTALL,
++    )
++    end_select = re.search(
++        r'<select[^>]*name="end_time"[^>]*>(.*?)</select>',
++        content,
++        re.DOTALL,
++    )
++    assert response.status_code == 200
++    assert start_select is not None
++    assert end_select is not None
++    assert 'value="08:00"' in start_select.group(1)
++    assert 'value="12:00"' in start_select.group(1)
++    assert 'value="12:30"' not in start_select.group(1)
++    assert 'value="08:30"' not in end_select.group(1)
++    assert 'value="09:00"' in end_select.group(1)
++    assert 'value="13:00"' in end_select.group(1)
++
++
+ @pytest.mark.django_db
+ def test_reservation_request_shows_block_dropdown(client: Any) -> None:
+     user = create_user("solicitud-bloque@example.com")
+@@ -513,6 +590,27 @@ def test_reservation_request_shows_block_dropdown(client: Any) -> None:
+     assert "150.00 MXN" in content
+ 
+ 
++@pytest.mark.django_db
++def test_reservation_request_back_buttons_disable_htmx_boost(client: Any) -> None:
++    user = create_user("solicitud-volver@example.com")
++    room = create_room("Consultorio Volver")
++    doctor = create_tenant_doctor("doctor-volver@example.com")
++    create_availability(room)
++    create_rate(room)
++    client.force_login(user)
++
++    response = client.get(
++        "/reservaciones/solicitar/"
++        f"?source=quick&room={room.pk}&tenant_doctor={doctor.pk}"
++        "&date=2026-08-10&start_time=08:00&end_time=13:00"
++    )
++
++    content = response.content.decode()
++    assert response.status_code == 200
++    assert "Volver a la vista rápida" in content
++    assert content.count('hx-boost="false" href="/calendario/vista-rapida/"') == 2
++
++
+ @pytest.mark.django_db
+ def test_create_reservation_from_ui(client: Any) -> None:
+     user = create_user("ui-reserva@example.com")

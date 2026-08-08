@@ -10,10 +10,16 @@
           <h1 class="h4 mb-0">Vista rápida</h1>
           <div class="small text-secondary">{{ date_from|date:"d/m/Y" }} - {{ date_to|date:"d/m/Y" }}</div>
         </div>
-        <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
-          <i class="bi bi-calendar3 me-1"></i>
-          Calendario
-        </a>
+        <div class="d-flex gap-2">
+          <a class="btn btn-outline-secondary" href="{{ previous_range_url }}">
+            <i class="bi bi-chevron-left me-1"></i>
+            Anterior
+          </a>
+          <a class="btn btn-outline-secondary" href="{{ next_range_url }}">
+            Siguiente
+            <i class="bi bi-chevron-right ms-1"></i>
+          </a>
+        </div>
       </div>
 
       <form method="get" class="row g-3 align-items-end">

@@ -1,3 +1,4 @@
+import re
 from datetime import date, time
 from decimal import Decimal
 from typing import Any
@@ -364,6 +365,43 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
 
 
 @pytest.mark.django_db
+def test_quick_calendar_has_four_week_navigation(client: Any) -> None:
+    user = create_user("vista-rapida-navegacion@example.com")
+    client.force_login(user)
+
+    response = client.get(
+        "/calendario/vista-rapida/?week=2026-08-10&selected_date=2026-08-10"
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "date_from=2026-07-13" in content
+    assert "date_from=2026-09-07" in content
+    assert "Anterior" in content
+    assert "Siguiente" in content
+
+
+@pytest.mark.django_db
+def test_calendar_and_quick_clinic_change_refreshes_room_dropdown(
+    client: Any,
+) -> None:
+    user = create_user("calendar-clinica-refresco@example.com")
+    client.force_login(user)
+
+    calendar_response = client.get("/calendario/")
+    quick_response = client.get("/calendario/vista-rapida/")
+
+    assert calendar_response.status_code == 200
+    assert quick_response.status_code == 200
+    assert "querySelector(&#x27;[name=room]&#x27;).value=&#x27;&#x27;" in (
+        calendar_response.content.decode()
+    )
+    assert "querySelector(&#x27;[name=room]&#x27;).value=&#x27;&#x27;" in (
+        quick_response.content.decode()
+    )
+
+
+@pytest.mark.django_db
 def test_quick_calendar_defaults_logged_tenant_and_warns_without_rooms(
     client: Any,
 ) -> None:
@@ -492,6 +530,45 @@ def test_reservation_request_prefills_context_and_pricing(client: Any) -> None:
 
 
 @pytest.mark.django_db
+def test_reservation_request_hourly_time_dropdowns_keep_one_hour_margin(
+    client: Any,
+) -> None:
+    user = create_user("solicitud-horas@example.com")
+    room = create_room("Consultorio Horas")
+    doctor = create_tenant_doctor("doctor-horas@example.com")
+    create_availability(room)
+    create_rate(room)
+    client.force_login(user)
+
+    response = client.get(
+        "/reservaciones/solicitar/"
+        f"?room={room.pk}&tenant_doctor={doctor.pk}"
+        "&date=2026-08-10&start_time=08:00&end_time=13:00"
+    )
+
+    content = response.content.decode()
+    start_select = re.search(
+        r'<select[^>]*name="start_time"[^>]*>(.*?)</select>',
+        content,
+        re.DOTALL,
+    )
+    end_select = re.search(
+        r'<select[^>]*name="end_time"[^>]*>(.*?)</select>',
+        content,
+        re.DOTALL,
+    )
+    assert response.status_code == 200
+    assert start_select is not None
+    assert end_select is not None
+    assert 'value="08:00"' in start_select.group(1)
+    assert 'value="12:00"' in start_select.group(1)
+    assert 'value="12:30"' not in start_select.group(1)
+    assert 'value="08:30"' not in end_select.group(1)
+    assert 'value="09:00"' in end_select.group(1)
+    assert 'value="13:00"' in end_select.group(1)
+
+
+@pytest.mark.django_db
 def test_reservation_request_shows_block_dropdown(client: Any) -> None:
     user = create_user("solicitud-bloque@example.com")
     room = create_room("Consultorio Bloque UI")
@@ -511,6 +588,27 @@ def test_reservation_request_shows_block_dropdown(client: Any) -> None:
     assert 'name="block_slot"' in content
     assert "Bloque disponible" in content
     assert "150.00 MXN" in content
+
+
+@pytest.mark.django_db
+def test_reservation_request_back_buttons_disable_htmx_boost(client: Any) -> None:
+    user = create_user("solicitud-volver@example.com")
+    room = create_room("Consultorio Volver")
+    doctor = create_tenant_doctor("doctor-volver@example.com")
+    create_availability(room)
+    create_rate(room)
+    client.force_login(user)
+
+    response = client.get(
+        "/reservaciones/solicitar/"
+        f"?source=quick&room={room.pk}&tenant_doctor={doctor.pk}"
+        "&date=2026-08-10&start_time=08:00&end_time=13:00"
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "Volver a la vista rápida" in content
+    assert content.count('hx-boost="false" href="/calendario/vista-rapida/"') == 2
 
 
 @pytest.mark.django_db

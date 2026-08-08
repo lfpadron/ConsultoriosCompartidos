@@ -1434,6 +1434,16 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
                 ),
                 "date_from": date_from,
                 "date_to": date_to,
+                "previous_range_url": self._range_url(
+                    date_from - timedelta(weeks=4),
+                    date_to - timedelta(weeks=4),
+                    selected_date - timedelta(weeks=4),
+                ),
+                "next_range_url": self._range_url(
+                    date_from + timedelta(weeks=4),
+                    date_to + timedelta(weeks=4),
+                    selected_date + timedelta(weeks=4),
+                ),
                 "weeks": self._summary_weeks(
                     _week_groups(date_from, date_to),
                     rooms,
@@ -1696,6 +1706,20 @@ class QuickCalendarView(LoginRequiredMixin, TemplateView):
     def _date_url(self, selected_date: date) -> str:
         params = self.request.GET.copy()
         params.pop("page", None)
+        params["selected_date"] = selected_date.isoformat()
+        return f"{reverse('calendar_quick')}?{urlencode(params, doseq=True)}"
+
+    def _range_url(
+        self,
+        date_from: date,
+        date_to: date,
+        selected_date: date,
+    ) -> str:
+        params = self.request.GET.copy()
+        params.pop("week", None)
+        params.pop("page", None)
+        params["date_from"] = date_from.isoformat()
+        params["date_to"] = date_to.isoformat()
         params["selected_date"] = selected_date.isoformat()
         return f"{reverse('calendar_quick')}?{urlencode(params, doseq=True)}"
 
