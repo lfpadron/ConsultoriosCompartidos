@@ -1,0 +1,175 @@
+diff --git a/apps/scheduling/forms.py b/apps/scheduling/forms.py
+index 0c64532..b9defd6 100644
+--- a/apps/scheduling/forms.py
++++ b/apps/scheduling/forms.py
+@@ -517,6 +517,14 @@ class ReservationRequestForm(BootstrapModelForm):
+         choices=(("", "Selecciona un bloque"),),
+         required=False,
+     )
++    availability_start_time = forms.TimeField(
++        required=False,
++        widget=forms.HiddenInput,
++    )
++    availability_end_time = forms.TimeField(
++        required=False,
++        widget=forms.HiddenInput,
++    )
+     source = forms.CharField(required=False, widget=forms.HiddenInput)
+ 
+     class Meta:
+@@ -581,6 +589,13 @@ class ReservationRequestForm(BootstrapModelForm):
+         self.selected_start_time, self.selected_end_time = self._selected_interval(
+             source_data
+         )
++        self.schedule_start_time = _parse_time_value(
++            source_data.get("availability_start_time")
++        )
++        self.schedule_end_time = _parse_time_value(
++            source_data.get("availability_end_time")
++        )
++        self.schedule_blocks = self._schedule_blocks()
+         self.selected_pricing = self._pricing_for_selected_interval()
+         self.schedule_mode = (
+             self.selected_pricing.price_type
+@@ -620,7 +635,8 @@ class ReservationRequestForm(BootstrapModelForm):
+             return cleaned_data
+ 
+         free_blocks = self._free_blocks(room, reservation_date)
+-        if not self._interval_within_free_block(free_blocks, start_time, end_time):
++        schedule_blocks = self.schedule_blocks or free_blocks
++        if not self._interval_within_free_block(schedule_blocks, start_time, end_time):
+             self.add_error(
+                 "start_time",
+                 "El horario seleccionado no está disponible para este consultorio.",
+@@ -644,7 +660,7 @@ class ReservationRequestForm(BootstrapModelForm):
+                 "No hay tarifa configurada para el horario seleccionado.",
+             )
+         elif pricing.price_type == PriceType.BLOCK and not self._interval_matches_block(
+-            free_blocks,
++            schedule_blocks,
+             start_time,
+             end_time,
+         ):
+@@ -697,6 +713,32 @@ class ReservationRequestForm(BootstrapModelForm):
+             return first_block.start_time, first_block.end_time
+         return None, None
+ 
++    def _schedule_blocks(self) -> list[Any]:
++        if self.schedule_start_time and self.schedule_end_time:
++            matching_blocks = [
++                block
++                for block in self.available_blocks
++                if block.start_time <= self.schedule_start_time
++                and self.schedule_end_time <= block.end_time
++            ]
++            if matching_blocks:
++                return matching_blocks
++
++        if self.selected_start_time and self.selected_end_time:
++            matching_blocks = [
++                block
++                for block in self.available_blocks
++                if block.start_time <= self.selected_start_time
++                and self.selected_end_time <= block.end_time
++            ]
++            if matching_blocks:
++                selected_block = matching_blocks[0]
++                self.schedule_start_time = selected_block.start_time
++                self.schedule_end_time = selected_block.end_time
++                return [selected_block]
++
++        return self.available_blocks
++
+     def _pricing_for_selected_interval(self) -> BlockPrice | None:
+         if (
+             self.selected_room is None
+@@ -718,7 +760,7 @@ class ReservationRequestForm(BootstrapModelForm):
+     def _first_available_price_type(self) -> str | None:
+         if self.selected_room is None or self.selected_date is None:
+             return None
+-        for block in self.available_blocks:
++        for block in self.schedule_blocks:
+             try:
+                 pricing = calculate_block_price(
+                     consulting_room=self.selected_room,
+@@ -795,7 +837,7 @@ class ReservationRequestForm(BootstrapModelForm):
+ 
+         start_points: list[time] = []
+         end_points: list[time] = []
+-        for block in self.available_blocks:
++        for block in self.schedule_blocks:
+             points = _time_range_points(block.start_time, block.end_time)
+             latest_start = _add_minutes(
+                 block.end_time,
+@@ -814,6 +856,12 @@ class ReservationRequestForm(BootstrapModelForm):
+         self.fields["end_time"].widget = forms.Select(
+             choices=_unique_time_choices(end_points, "Selecciona hora fin")
+         )
++        if self.schedule_start_time:
++            self.initial["availability_start_time"] = _time_value(
++                self.schedule_start_time
++            )
++        if self.schedule_end_time:
++            self.initial["availability_end_time"] = _time_value(self.schedule_end_time)
+         if self.selected_start_time:
+             self.initial["start_time"] = _time_value(self.selected_start_time)
+         if self.selected_end_time:
+diff --git a/tests/test_reservations.py b/tests/test_reservations.py
+index 149b88b..a017d75 100644
+--- a/tests/test_reservations.py
++++ b/tests/test_reservations.py
+@@ -568,6 +568,54 @@ def test_reservation_request_hourly_time_dropdowns_keep_one_hour_margin(
+     assert 'value="13:00"' in end_select.group(1)
+ 
+ 
++@pytest.mark.django_db
++def test_reservation_request_hourly_start_dropdown_stays_inside_selected_block(
++    client: Any,
++) -> None:
++    user = create_user("solicitud-horas-bloque@example.com")
++    room = create_room("Consultorio Horas Bloque")
++    doctor = create_tenant_doctor("doctor-horas-bloque@example.com")
++    AvailabilityRule.objects.create(
++        room=room,
++        name="Lunes temprano",
++        weekday=Weekday.MONDAY,
++        start_time=time(8, 0),
++        end_time=time(9, 0),
++        start_date=date(2026, 6, 29),
++    )
++    AvailabilityRule.objects.create(
++        room=room,
++        name="Lunes seleccionado",
++        weekday=Weekday.MONDAY,
++        start_time=time(10, 0),
++        end_time=time(13, 0),
++        start_date=date(2026, 6, 29),
++    )
++    create_rate(room)
++    client.force_login(user)
++
++    response = client.get(
++        "/reservaciones/solicitar/"
++        f"?room={room.pk}&tenant_doctor={doctor.pk}"
++        "&date=2026-08-10&start_time=10:00&end_time=13:00"
++    )
++
++    content = response.content.decode()
++    start_select = re.search(
++        r'<select[^>]*name="start_time"[^>]*>(.*?)</select>',
++        content,
++        re.DOTALL,
++    )
++    assert response.status_code == 200
++    assert start_select is not None
++    assert 'value="08:00"' not in start_select.group(1)
++    assert 'value="08:30"' not in start_select.group(1)
++    assert 'value="09:00"' not in start_select.group(1)
++    assert 'value="10:00"' in start_select.group(1)
++    assert 'value="12:00"' in start_select.group(1)
++    assert 'value="12:30"' not in start_select.group(1)
++
++
+ @pytest.mark.django_db
+ def test_reservation_request_shows_block_dropdown(client: Any) -> None:
+     user = create_user("solicitud-bloque@example.com")

@@ -569,6 +569,54 @@ def test_reservation_request_hourly_time_dropdowns_keep_one_hour_margin(
 
 
 @pytest.mark.django_db
+def test_reservation_request_hourly_start_dropdown_stays_inside_selected_block(
+    client: Any,
+) -> None:
+    user = create_user("solicitud-horas-bloque@example.com")
+    room = create_room("Consultorio Horas Bloque")
+    doctor = create_tenant_doctor("doctor-horas-bloque@example.com")
+    AvailabilityRule.objects.create(
+        room=room,
+        name="Lunes temprano",
+        weekday=Weekday.MONDAY,
+        start_time=time(8, 0),
+        end_time=time(9, 0),
+        start_date=date(2026, 6, 29),
+    )
+    AvailabilityRule.objects.create(
+        room=room,
+        name="Lunes seleccionado",
+        weekday=Weekday.MONDAY,
+        start_time=time(10, 0),
+        end_time=time(13, 0),
+        start_date=date(2026, 6, 29),
+    )
+    create_rate(room)
+    client.force_login(user)
+
+    response = client.get(
+        "/reservaciones/solicitar/"
+        f"?room={room.pk}&tenant_doctor={doctor.pk}"
+        "&date=2026-08-10&start_time=10:00&end_time=13:00"
+    )
+
+    content = response.content.decode()
+    start_select = re.search(
+        r'<select[^>]*name="start_time"[^>]*>(.*?)</select>',
+        content,
+        re.DOTALL,
+    )
+    assert response.status_code == 200
+    assert start_select is not None
+    assert 'value="08:00"' not in start_select.group(1)
+    assert 'value="08:30"' not in start_select.group(1)
+    assert 'value="09:00"' not in start_select.group(1)
+    assert 'value="10:00"' in start_select.group(1)
+    assert 'value="12:00"' in start_select.group(1)
+    assert 'value="12:30"' not in start_select.group(1)
+
+
+@pytest.mark.django_db
 def test_reservation_request_shows_block_dropdown(client: Any) -> None:
     user = create_user("solicitud-bloque@example.com")
     room = create_room("Consultorio Bloque UI")
