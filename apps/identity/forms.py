@@ -4,7 +4,7 @@ from typing import Any, cast
 
 from django import forms
 from django.contrib.auth import get_user_model, password_validation
-from django.contrib.auth.forms import AuthenticationForm
+from django.contrib.auth.forms import AuthenticationForm, PasswordChangeForm
 from django.db.models import QuerySet
 from django.utils.translation import gettext_lazy as _
 
@@ -260,3 +260,26 @@ class ForcedPasswordChangeForm(forms.Form):
         self.user.set_password(self.cleaned_data["new_password1"])
         self.user.save()
         return self.user
+
+
+class ProfilePasswordChangeForm(PasswordChangeForm):
+    old_password = forms.CharField(
+        label=_("Contraseña actual"),
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "current-password"}),
+    )
+    new_password1 = forms.CharField(
+        label=_("Nueva contraseña"),
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+        help_text=password_validation.password_validators_help_text_html(),
+    )
+    new_password2 = forms.CharField(
+        label=_("Confirmar nueva contraseña"),
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+    )
+
+    def __init__(self, user: Any, *args: Any, **kwargs: Any) -> None:
+        super().__init__(user, *args, **kwargs)
+        style_form_fields(self.fields)

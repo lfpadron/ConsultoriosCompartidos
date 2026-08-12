@@ -140,6 +140,114 @@ def _date_ranges_overlap(left: RateRule, right: RateRule) -> bool:
     return left.start_date <= right_end and right.start_date <= left_end
 
 
+class RoomRateDiscount(BaseModel):
+    room = models.ForeignKey(
+        "catalog.ConsultingRoom",
+        on_delete=models.PROTECT,
+        related_name="rate_discounts",
+        verbose_name=_("consultorio"),
+    )
+    rate_rule = models.ForeignKey(
+        RateRule,
+        on_delete=models.PROTECT,
+        related_name="room_discounts",
+        verbose_name=_("regla tarifaria"),
+    )
+    percentage = models.DecimalField(
+        _("porcentaje de descuento"),
+        max_digits=4,
+        decimal_places=1,
+    )
+    start_date = models.DateField(_("fecha inicio de vigencia"))
+    end_date = models.DateField(_("fecha fin de vigencia"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("descuento por consultorio")
+        verbose_name_plural = _("descuentos por consultorio")
+        ordering = ("room__clinic__name", "room__name", "-start_date", "-created_at")
+
+    def __str__(self) -> str:
+        return f"{self.room} - {self.rate_rule} - {self.percentage}%"
+
+    def clean(self) -> None:
+        super().clean()
+        errors = _discount_validation_errors(
+            self.percentage,
+            self.start_date,
+            self.end_date,
+        )
+        if (
+            self.room_id
+            and self.rate_rule_id
+            and self.rate_rule.room_id != self.room_id
+        ):
+            errors["rate_rule"] = _(
+                "La regla tarifaria debe pertenecer al consultorio seleccionado."
+            )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class TenantDoctorDiscount(BaseModel):
+    tenant_doctor = models.ForeignKey(
+        "catalog.TenantDoctorProfile",
+        on_delete=models.PROTECT,
+        related_name="discounts",
+        verbose_name=_("médico arrendatario"),
+    )
+    percentage = models.DecimalField(
+        _("porcentaje de descuento"),
+        max_digits=4,
+        decimal_places=1,
+    )
+    start_date = models.DateField(_("fecha inicio de vigencia"))
+    end_date = models.DateField(_("fecha fin de vigencia"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("descuento por médico arrendatario")
+        verbose_name_plural = _("descuentos por médico arrendatario")
+        ordering = ("tenant_doctor__display_name", "-start_date", "-created_at")
+
+    def __str__(self) -> str:
+        return f"{self.tenant_doctor} - {self.percentage}%"
+
+    def clean(self) -> None:
+        super().clean()
+        errors = _discount_validation_errors(
+            self.percentage,
+            self.start_date,
+            self.end_date,
+        )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+def _discount_validation_errors(
+    percentage: Decimal,
+    start_date: date | None,
+    end_date: date | None,
+) -> dict[str, Any]:
+    errors: dict[str, Any] = {}
+    if percentage is not None:
+        if percentage < Decimal("0.0"):
+            errors["percentage"] = _("El porcentaje no puede ser negativo.")
+        if percentage > Decimal("99.0"):
+            errors["percentage"] = _("El porcentaje no puede exceder 99%.")
+    if end_date and start_date and end_date < start_date:
+        errors["end_date"] = _(
+            "La fecha fin de vigencia no puede ser menor que la fecha inicio."
+        )
+    return errors
+
+
 class StatementStatus(models.TextChoices):
     CURRENT = "vigente", _("Vigente")
     REPLACED = "reemplazado", _("Reemplazado")
@@ -169,6 +277,21 @@ class Statement(BaseModel):
     discounts = models.DecimalField(
         _("descuentos"), max_digits=12, decimal_places=2, default=0
     )
+    room_discount_percentage = models.DecimalField(
+        _("descuento consultorio %"), max_digits=4, decimal_places=1, default=0
+    )
+    tenant_discount_percentage = models.DecimalField(
+        _("descuento médico arrendatario %"),
+        max_digits=4,
+        decimal_places=1,
+        default=0,
+    )
+    tariff_total = models.DecimalField(
+        _("tarifa total"), max_digits=12, decimal_places=2, default=0
+    )
+    tariff_final = models.DecimalField(
+        _("tarifa final"), max_digits=12, decimal_places=2, default=0
+    )
     taxes = models.DecimalField(
         _("impuestos"), max_digits=12, decimal_places=2, default=0
     )
@@ -186,6 +309,20 @@ class Statement(BaseModel):
     )
     applied_rate_rule = models.ForeignKey(
         RateRule,
+        blank=True,
+        null=True,
+        on_delete=models.PROTECT,
+        related_name="statements",
+    )
+    applied_room_discount = models.ForeignKey(
+        RoomRateDiscount,
+        blank=True,
+        null=True,
+        on_delete=models.PROTECT,
+        related_name="statements",
+    )
+    applied_tenant_discount = models.ForeignKey(
+        TenantDoctorDiscount,
         blank=True,
         null=True,
         on_delete=models.PROTECT,

@@ -5,6 +5,7 @@ from django.urls import path
 from apps.identity import views
 
 urlpatterns = [
+    path("perfil/", views.ProfileView.as_view(), name="profile"),
     path("usuarios/", views.UserListView.as_view(), name="users"),
     path("usuarios/nuevo/", views.UserCreateView.as_view(), name="user_create"),
     path("usuarios/<uuid:pk>/", views.UserDetailView.as_view(), name="user_detail"),

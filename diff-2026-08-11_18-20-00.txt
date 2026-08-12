@@ -1,0 +1,1709 @@
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index 4d52418..da9998b 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -121,8 +121,14 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
+         "scheduling.AvailabilityRule",
+         "scheduling.AvailabilityException",
+         "finance.RateRule",
++        "finance.RoomRateDiscount",
+     }:
+         return queryset.filter(room__clinic__in=clinics)
++    if model_label == "finance.TenantDoctorDiscount":
++        return queryset.filter(
++            Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
++            | Q(tenant_doctor__reservations__room__clinic__in=clinics)
++        ).distinct()
+     if model_label == "scheduling.Reservation":
+         return queryset.filter(room__clinic__in=clinics)
+     if model_label == "finance.Statement":
+@@ -156,6 +162,13 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
+         return queryset.filter(room__owner=owner)
+     if model_label == "finance.Statement":
+         return queryset.filter(reservation__room__owner=owner)
++    if model_label == "finance.RoomRateDiscount":
++        return queryset.filter(room__owner=owner)
++    if model_label == "finance.TenantDoctorDiscount":
++        return queryset.filter(
++            Q(tenant_doctor__assigned_rooms__owner=owner)
++            | Q(tenant_doctor__reservations__room__owner=owner)
++        ).distinct()
+     if model_label == "finance.Settlement":
+         return queryset.filter(owner=owner)
+     if model_label == "vault.DocumentAsset":
+@@ -183,6 +196,10 @@ def _scope_tenant_doctor_queryset(
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "finance.Statement":
+         return queryset.filter(reservation__tenant_doctor=tenant_doctor)
++    if model_label == "finance.RoomRateDiscount" and assigned_rooms.exists():
++        return queryset.filter(room__in=assigned_rooms)
++    if model_label == "finance.TenantDoctorDiscount":
++        return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "finance.Payment":
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "vault.DocumentAsset":
+@@ -210,6 +227,13 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
+         return queryset.filter(room__owner__in=owners)
+     if model_label == "finance.Statement":
+         return queryset.filter(reservation__room__owner__in=owners)
++    if model_label == "finance.RoomRateDiscount":
++        return queryset.filter(room__owner__in=owners)
++    if model_label == "finance.TenantDoctorDiscount":
++        return queryset.filter(
++            Q(tenant_doctor__assigned_rooms__owner__in=owners)
++            | Q(tenant_doctor__reservations__room__owner__in=owners)
++        ).distinct()
+     if model_label == "finance.Payment":
+         return queryset.filter(reservation__room__owner__in=owners)
+     if model_label == "finance.Settlement":
+diff --git a/apps/finance/admin.py b/apps/finance/admin.py
+index 694adff..61b1156 100644
+--- a/apps/finance/admin.py
++++ b/apps/finance/admin.py
+@@ -2,7 +2,14 @@
+ 
+ from django.contrib import admin
+ 
+-from apps.finance.models import Payment, RateRule, Settlement, Statement
++from apps.finance.models import (
++    Payment,
++    RateRule,
++    RoomRateDiscount,
++    Settlement,
++    Statement,
++    TenantDoctorDiscount,
++)
+ 
+ 
+ @admin.register(RateRule)
+@@ -20,6 +27,33 @@ class RateRuleAdmin(admin.ModelAdmin):
+     search_fields = ("name", "room__name", "room__clinic__name")
+ 
+ 
++@admin.register(RoomRateDiscount)
++class RoomRateDiscountAdmin(admin.ModelAdmin):
++    list_display = (
++        "room",
++        "rate_rule",
++        "percentage",
++        "start_date",
++        "end_date",
++        "is_active",
++    )
++    list_filter = ("is_active", "room__clinic", "start_date")
++    search_fields = ("room__name", "room__clinic__name", "rate_rule__name")
++
++
++@admin.register(TenantDoctorDiscount)
++class TenantDoctorDiscountAdmin(admin.ModelAdmin):
++    list_display = (
++        "tenant_doctor",
++        "percentage",
++        "start_date",
++        "end_date",
++        "is_active",
++    )
++    list_filter = ("is_active", "start_date")
++    search_fields = ("tenant_doctor__display_name", "tenant_doctor__user__email")
++
++
+ @admin.register(Statement)
+ class StatementAdmin(admin.ModelAdmin):
+     list_display = (
+@@ -27,6 +61,8 @@ class StatementAdmin(admin.ModelAdmin):
+         "version",
+         "status",
+         "subtotal",
++        "discounts",
++        "tariff_final",
+         "total_doctor",
+         "platform_commission",
+         "owner_net",
+diff --git a/apps/finance/forms.py b/apps/finance/forms.py
+index 68ee280..df0d3ea 100644
+--- a/apps/finance/forms.py
++++ b/apps/finance/forms.py
+@@ -1,5 +1,6 @@
+ """Forms for finance screens."""
+ 
++from decimal import Decimal
+ from typing import Any
+ 
+ from django import forms
+@@ -18,7 +19,14 @@ from apps.core.form_utils import (
+     style_form_fields,
+ )
+ from apps.core.permissions import scope_queryset_for_user
+-from apps.finance.models import Payment, PaymentStatus, RateRule, SettlementStatus
++from apps.finance.models import (
++    Payment,
++    PaymentStatus,
++    RateRule,
++    RoomRateDiscount,
++    SettlementStatus,
++    TenantDoctorDiscount,
++)
+ from apps.scheduling.models import Weekday
+ 
+ 
+@@ -64,6 +72,18 @@ def _room_queryset(data: Any = None) -> QuerySet[Any]:
+     return queryset.order_by("clinic__name", "owner__display_name", "name")
+ 
+ 
++def _rate_rule_queryset(data: Any = None) -> QuerySet[RateRule]:
++    queryset = RateRule.objects.filter(is_deleted=False).select_related(
++        "room",
++        "room__clinic",
++        "room__owner",
++    )
++    room_pk = selected_model_pk(data, "room")
++    if room_pk:
++        queryset = queryset.filter(room_id=room_pk)
++    return queryset.order_by("room__clinic__name", "room__name", "name")
++
++
+ class OperationalFinanceFilterForm(forms.Form):
+     date_from = forms.DateField(
+         label="Fecha desde",
+@@ -224,6 +244,89 @@ class RateRuleFilterForm(OperationalFinanceFilterForm):
+         super().__init__(*args, **kwargs)
+ 
+ 
++class RoomRateDiscountForm(BootstrapModelForm):
++    clinic = forms.ModelChoiceField(
++        label="Clínica",
++        queryset=Clinic.objects.none(),
++        required=False,
++    )
++
++    class Meta:
++        model = RoomRateDiscount
++        fields = (
++            "clinic",
++            "room",
++            "rate_rule",
++            "percentage",
++            "start_date",
++            "end_date",
++        )
++        labels = {
++            "room": "Consultorio",
++            "rate_rule": "Regla tarifaria",
++            "percentage": "Porcentaje de descuento",
++            "start_date": "Fecha inicio de vigencia",
++            "end_date": "Fecha fin de vigencia",
++        }
++        widgets = {
++            "start_date": monday_date_input(),
++            "end_date": monday_date_input(),
++        }
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        super().__init__(*args, **kwargs)
++        source_data = self.data if self.is_bound else self.filter_data
++        clinic_queryset = _clinic_queryset()
++        room_queryset = _room_queryset(source_data)
++        rate_rule_queryset = _rate_rule_queryset(source_data)
++        if self.user is not None:
++            clinic_queryset = scope_queryset_for_user(clinic_queryset, self.user)
++            room_queryset = scope_queryset_for_user(room_queryset, self.user)
++            rate_rule_queryset = scope_queryset_for_user(
++                rate_rule_queryset,
++                self.user,
++            )
++        set_model_queryset(self.fields["clinic"], clinic_queryset)
++        set_model_queryset(self.fields["room"], room_queryset)
++        set_model_queryset(self.fields["rate_rule"], rate_rule_queryset)
++        self.fields["percentage"].min_value = Decimal("0.0")
++        self.fields["percentage"].max_value = Decimal("99.0")
++
++
++class TenantDoctorDiscountForm(BootstrapModelForm):
++    class Meta:
++        model = TenantDoctorDiscount
++        fields = (
++            "tenant_doctor",
++            "percentage",
++            "start_date",
++            "end_date",
++        )
++        labels = {
++            "tenant_doctor": "Médico arrendatario",
++            "percentage": "Porcentaje de descuento",
++            "start_date": "Fecha inicio de vigencia",
++            "end_date": "Fecha fin de vigencia",
++        }
++        widgets = {
++            "start_date": monday_date_input(),
++            "end_date": monday_date_input(),
++        }
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        super().__init__(*args, **kwargs)
++        tenant_queryset = (
++            TenantDoctorProfile.objects.filter(is_deleted=False)
++            .select_related("user")
++            .order_by("display_name", "user__email")
++        )
++        if self.user is not None:
++            tenant_queryset = scope_queryset_for_user(tenant_queryset, self.user)
++        set_model_queryset(self.fields["tenant_doctor"], tenant_queryset)
++        self.fields["percentage"].min_value = Decimal("0.0")
++        self.fields["percentage"].max_value = Decimal("99.0")
++
++
+ class PaymentRegistrationForm(BootstrapModelForm):
+     class Meta:
+         model = Payment
+diff --git a/apps/finance/models.py b/apps/finance/models.py
+index 85a7f42..4d269f2 100644
+--- a/apps/finance/models.py
++++ b/apps/finance/models.py
+@@ -140,6 +140,114 @@ def _date_ranges_overlap(left: RateRule, right: RateRule) -> bool:
+     return left.start_date <= right_end and right.start_date <= left_end
+ 
+ 
++class RoomRateDiscount(BaseModel):
++    room = models.ForeignKey(
++        "catalog.ConsultingRoom",
++        on_delete=models.PROTECT,
++        related_name="rate_discounts",
++        verbose_name=_("consultorio"),
++    )
++    rate_rule = models.ForeignKey(
++        RateRule,
++        on_delete=models.PROTECT,
++        related_name="room_discounts",
++        verbose_name=_("regla tarifaria"),
++    )
++    percentage = models.DecimalField(
++        _("porcentaje de descuento"),
++        max_digits=4,
++        decimal_places=1,
++    )
++    start_date = models.DateField(_("fecha inicio de vigencia"))
++    end_date = models.DateField(_("fecha fin de vigencia"), blank=True, null=True)
++
++    class Meta:
++        verbose_name = _("descuento por consultorio")
++        verbose_name_plural = _("descuentos por consultorio")
++        ordering = ("room__clinic__name", "room__name", "-start_date", "-created_at")
++
++    def __str__(self) -> str:
++        return f"{self.room} - {self.rate_rule} - {self.percentage}%"
++
++    def clean(self) -> None:
++        super().clean()
++        errors = _discount_validation_errors(
++            self.percentage,
++            self.start_date,
++            self.end_date,
++        )
++        if (
++            self.room_id
++            and self.rate_rule_id
++            and self.rate_rule.room_id != self.room_id
++        ):
++            errors["rate_rule"] = _(
++                "La regla tarifaria debe pertenecer al consultorio seleccionado."
++            )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
++class TenantDoctorDiscount(BaseModel):
++    tenant_doctor = models.ForeignKey(
++        "catalog.TenantDoctorProfile",
++        on_delete=models.PROTECT,
++        related_name="discounts",
++        verbose_name=_("médico arrendatario"),
++    )
++    percentage = models.DecimalField(
++        _("porcentaje de descuento"),
++        max_digits=4,
++        decimal_places=1,
++    )
++    start_date = models.DateField(_("fecha inicio de vigencia"))
++    end_date = models.DateField(_("fecha fin de vigencia"), blank=True, null=True)
++
++    class Meta:
++        verbose_name = _("descuento por médico arrendatario")
++        verbose_name_plural = _("descuentos por médico arrendatario")
++        ordering = ("tenant_doctor__display_name", "-start_date", "-created_at")
++
++    def __str__(self) -> str:
++        return f"{self.tenant_doctor} - {self.percentage}%"
++
++    def clean(self) -> None:
++        super().clean()
++        errors = _discount_validation_errors(
++            self.percentage,
++            self.start_date,
++            self.end_date,
++        )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
++def _discount_validation_errors(
++    percentage: Decimal,
++    start_date: date | None,
++    end_date: date | None,
++) -> dict[str, Any]:
++    errors: dict[str, Any] = {}
++    if percentage is not None:
++        if percentage < Decimal("0.0"):
++            errors["percentage"] = _("El porcentaje no puede ser negativo.")
++        if percentage > Decimal("99.0"):
++            errors["percentage"] = _("El porcentaje no puede exceder 99%.")
++    if end_date and start_date and end_date < start_date:
++        errors["end_date"] = _(
++            "La fecha fin de vigencia no puede ser menor que la fecha inicio."
++        )
++    return errors
++
++
+ class StatementStatus(models.TextChoices):
+     CURRENT = "vigente", _("Vigente")
+     REPLACED = "reemplazado", _("Reemplazado")
+@@ -169,6 +277,21 @@ class Statement(BaseModel):
+     discounts = models.DecimalField(
+         _("descuentos"), max_digits=12, decimal_places=2, default=0
+     )
++    room_discount_percentage = models.DecimalField(
++        _("descuento consultorio %"), max_digits=4, decimal_places=1, default=0
++    )
++    tenant_discount_percentage = models.DecimalField(
++        _("descuento médico arrendatario %"),
++        max_digits=4,
++        decimal_places=1,
++        default=0,
++    )
++    tariff_total = models.DecimalField(
++        _("tarifa total"), max_digits=12, decimal_places=2, default=0
++    )
++    tariff_final = models.DecimalField(
++        _("tarifa final"), max_digits=12, decimal_places=2, default=0
++    )
+     taxes = models.DecimalField(
+         _("impuestos"), max_digits=12, decimal_places=2, default=0
+     )
+@@ -191,6 +314,20 @@ class Statement(BaseModel):
+         on_delete=models.PROTECT,
+         related_name="statements",
+     )
++    applied_room_discount = models.ForeignKey(
++        RoomRateDiscount,
++        blank=True,
++        null=True,
++        on_delete=models.PROTECT,
++        related_name="statements",
++    )
++    applied_tenant_discount = models.ForeignKey(
++        TenantDoctorDiscount,
++        blank=True,
++        null=True,
++        on_delete=models.PROTECT,
++        related_name="statements",
++    )
+     calculation_explanation = models.TextField(_("explicación de cálculo"), blank=True)
+     calculation_hash = models.CharField(_("hash de cálculo"), max_length=64, blank=True)
+     generated_at = models.DateTimeField(_("generado en"), default=timezone.now)
+diff --git a/apps/finance/services/statement_engine.py b/apps/finance/services/statement_engine.py
+index e5c4c2f..0d0f10d 100644
+--- a/apps/finance/services/statement_engine.py
++++ b/apps/finance/services/statement_engine.py
+@@ -9,6 +9,7 @@ from django.conf import settings
+ from django.db import transaction
+ 
+ from apps.finance.models import Statement, StatementStatus
++from apps.finance.services.discount_service import calculate_discount_quote
+ from apps.finance.services.pricing_engine import BlockPrice, calculate_block_price
+ from apps.scheduling.models import Reservation
+ 
+@@ -62,12 +63,18 @@ def replace_statement_if_needed(
+         duration_hours=payload["duration_hours"],
+         subtotal=payload["subtotal"],
+         discounts=payload["discounts"],
++        room_discount_percentage=payload["room_discount_percentage"],
++        tenant_discount_percentage=payload["tenant_discount_percentage"],
++        tariff_total=payload["tariff_total"],
++        tariff_final=payload["tariff_final"],
+         taxes=payload["taxes"],
+         total_doctor=payload["total_doctor"],
+         platform_commission=payload["platform_commission"],
+         commission_taxes=payload["commission_taxes"],
+         owner_net=payload["owner_net"],
+         applied_rate_rule=pricing.applied_rule,
++        applied_room_discount_id=payload["applied_room_discount_id"],
++        applied_tenant_discount_id=payload["applied_tenant_discount_id"],
+         calculation_explanation=payload["calculation_explanation"],
+         calculation_hash=calculation_hash,
+     )
+@@ -96,14 +103,29 @@ def _build_statement_payload(
+         raise StatementGenerationError(msg)
+ 
+     subtotal = _money(pricing.subtotal)
+-    discounts = ZERO
++    discount_quote = calculate_discount_quote(
++        room=reservation.room,
++        tenant_doctor=reservation.tenant_doctor,
++        rate_rule=pricing.applied_rule,
++        reservation_date=reservation.date,
++        tariff_total=subtotal,
++    )
++    discounts = discount_quote.discount_amount
+     taxes = ZERO
+-    total_doctor = _money(subtotal - discounts + taxes)
++    total_doctor = _money(discount_quote.tariff_final + taxes)
+     platform_commission = _money(
+-        subtotal * Decimal(str(settings.PLATFORM_COMMISSION_RATE))
++        discount_quote.tariff_final * Decimal(str(settings.PLATFORM_COMMISSION_RATE))
+     )
+     commission_taxes = ZERO
+-    owner_net = _money(subtotal - platform_commission - commission_taxes)
++    owner_net = _money(
++        discount_quote.tariff_final - platform_commission - commission_taxes
++    )
++    explanation = pricing.explanation
++    if discount_quote.applied_percentage > ZERO:
++        explanation = (
++            f"{pricing.explanation}. Descuento aplicado: "
++            f"{discount_quote.applied_percentage}%."
++        )
+ 
+     return {
+         "reservation_id": str(reservation.pk),
+@@ -117,12 +139,26 @@ def _build_statement_payload(
+         "currency": pricing.currency,
+         "subtotal": subtotal,
+         "discounts": discounts,
++        "room_discount_percentage": discount_quote.room_discount_percentage,
++        "tenant_discount_percentage": discount_quote.tenant_discount_percentage,
++        "tariff_total": discount_quote.tariff_total,
++        "tariff_final": discount_quote.tariff_final,
++        "applied_room_discount_id": (
++            str(discount_quote.room_discount.pk)
++            if discount_quote.room_discount
++            else None
++        ),
++        "applied_tenant_discount_id": (
++            str(discount_quote.tenant_discount.pk)
++            if discount_quote.tenant_discount
++            else None
++        ),
+         "taxes": taxes,
+         "total_doctor": total_doctor,
+         "platform_commission": platform_commission,
+         "commission_taxes": commission_taxes,
+         "owner_net": owner_net,
+-        "calculation_explanation": pricing.explanation,
++        "calculation_explanation": explanation,
+     }
+ 
+ 
+diff --git a/apps/finance/urls.py b/apps/finance/urls.py
+index 6fce32c..6d89290 100644
+--- a/apps/finance/urls.py
++++ b/apps/finance/urls.py
+@@ -18,6 +18,36 @@ urlpatterns = [
+         views.RateRuleDeactivateView.as_view(),
+         name="rate_deactivate",
+     ),
++    path(
++        "descuentos-consultorio/",
++        views.RoomRateDiscountListView.as_view(),
++        name="room_rate_discounts",
++    ),
++    path(
++        "descuentos-consultorio/nuevo/",
++        views.RoomRateDiscountCreateView.as_view(),
++        name="room_rate_discount_create",
++    ),
++    path(
++        "descuentos-consultorio/<uuid:pk>/activar-desactivar/",
++        views.RoomRateDiscountToggleView.as_view(),
++        name="room_rate_discount_toggle",
++    ),
++    path(
++        "descuentos-arrendatario/",
++        views.TenantDoctorDiscountListView.as_view(),
++        name="tenant_doctor_discounts",
++    ),
++    path(
++        "descuentos-arrendatario/nuevo/",
++        views.TenantDoctorDiscountCreateView.as_view(),
++        name="tenant_doctor_discount_create",
++    ),
++    path(
++        "descuentos-arrendatario/<uuid:pk>/activar-desactivar/",
++        views.TenantDoctorDiscountToggleView.as_view(),
++        name="tenant_doctor_discount_toggle",
++    ),
+     path("pagos/", views.PaymentListView.as_view(), name="payments"),
+     path(
+         "reservaciones/<uuid:reservation_pk>/pagos/nuevo/",
+diff --git a/apps/finance/views.py b/apps/finance/views.py
+index 7f6df8b..476efea 100644
+--- a/apps/finance/views.py
++++ b/apps/finance/views.py
+@@ -1,5 +1,6 @@
+ """Finance views for rate rules and manual payments."""
+ 
++from dataclasses import dataclass
+ from datetime import date
+ from typing import Any, cast
+ 
+@@ -24,11 +25,19 @@ from apps.finance.forms import (
+     PaymentRejectForm,
+     RateRuleFilterForm,
+     RateRuleForm,
++    RoomRateDiscountForm,
+     SettlementFilterForm,
+     SettlementGenerateForm,
+     SettlementPaidForm,
++    TenantDoctorDiscountForm,
++)
++from apps.finance.models import (
++    Payment,
++    RateRule,
++    RoomRateDiscount,
++    Settlement,
++    TenantDoctorDiscount,
+ )
+-from apps.finance.models import Payment, RateRule, Settlement
+ from apps.finance.services.payment_service import (
+     cancel_payment,
+     get_payment_summary_for_reservation,
+@@ -311,6 +320,189 @@ class RateRuleUpdateView(RateRuleFormView):
+     pass
+ 
+ 
++@dataclass(frozen=True)
++class DiscountResource:
++    model: type[Model]
++    form_class: type[ModelForm]
++    page_title: str
++    singular_label: str
++    create_url_name: str
++    list_url_name: str
++    toggle_url_name: str
++    create_event_type: str
++    activate_event_type: str
++    deactivate_event_type: str
++    list_columns: tuple[tuple[str, str], ...]
++    select_related: tuple[str, ...]
++
++
++ROOM_RATE_DISCOUNT = DiscountResource(
++    model=RoomRateDiscount,
++    form_class=RoomRateDiscountForm,
++    page_title="Descuentos por consultorio",
++    singular_label="descuento por consultorio",
++    create_url_name="room_rate_discount_create",
++    list_url_name="room_rate_discounts",
++    toggle_url_name="room_rate_discount_toggle",
++    create_event_type="room_rate_discount.created",
++    activate_event_type="room_rate_discount.activated",
++    deactivate_event_type="room_rate_discount.deactivated",
++    list_columns=(
++        ("Consultorio", "room"),
++        ("Regla tarifaria", "rate_rule"),
++        ("Porcentaje", "percentage"),
++        ("Vigencia", "validity"),
++        ("Estado", "is_active"),
++    ),
++    select_related=("room", "room__clinic", "room__owner", "rate_rule"),
++)
++
++TENANT_DOCTOR_DISCOUNT = DiscountResource(
++    model=TenantDoctorDiscount,
++    form_class=TenantDoctorDiscountForm,
++    page_title="Descuentos por médico arrendatario",
++    singular_label="descuento por médico arrendatario",
++    create_url_name="tenant_doctor_discount_create",
++    list_url_name="tenant_doctor_discounts",
++    toggle_url_name="tenant_doctor_discount_toggle",
++    create_event_type="tenant_doctor_discount.created",
++    activate_event_type="tenant_doctor_discount.activated",
++    deactivate_event_type="tenant_doctor_discount.deactivated",
++    list_columns=(
++        ("Médico arrendatario", "tenant_doctor"),
++        ("Porcentaje", "percentage"),
++        ("Vigencia", "validity"),
++        ("Estado", "is_active"),
++    ),
++    select_related=("tenant_doctor", "tenant_doctor__user"),
++)
++
++
++class DiscountBaseMixin(LoginRequiredMixin):
++    resource: DiscountResource
++
++    def get_queryset(self) -> QuerySet[Any]:
++        queryset = self.resource.model._default_manager.filter(is_deleted=False)
++        if self.resource.select_related:
++            queryset = queryset.select_related(*self.resource.select_related)
++        return scope_queryset_for_user(queryset, self.request.user)
++
++
++class DiscountListView(DiscountBaseMixin, ListView):
++    template_name = "finance/discount_list.html"
++    context_object_name = "objects"
++    paginate_by = 25
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = self.resource.page_title
++        context["resource"] = self.resource
++        context["rows"] = [
++            {
++                "object": item,
++                "cells": [
++                    resolve_discount_value(item, field_path)
++                    for _, field_path in self.resource.list_columns
++                ],
++            }
++            for item in context["objects"]
++        ]
++        return context
++
++
++class DiscountCreateView(DiscountBaseMixin, FormMixin, TemplateView):
++    template_name = "finance/discount_form.html"
++
++    def get_form_class(self) -> type[ModelForm]:
++        return self.resource.form_class
++
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["user"] = self.request.user
++        kwargs["filter_data"] = self.request.GET
++        kwargs["initial"] = {
++            **kwargs.get("initial", {}),
++            **_initial_from_query_data(self.request),
++        }
++        return kwargs
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = f"Alta de {self.resource.singular_label}"
++        context["resource"] = self.resource
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        form = self.get_form()
++        if form.is_valid():
++            return self.form_valid(form)
++        return self.form_invalid(form)
++
++    def form_valid(self, form: ModelForm) -> HttpResponse:
++        instance = form.save(commit=False)
++        instance.created_by = cast(Any, self.request.user)
++        instance.updated_by = cast(Any, self.request.user)
++        instance.is_active = True
++        instance.save()
++        record_event(
++            event_type=self.resource.create_event_type,
++            object_label=str(instance),
++            actor=cast(Model, self.request.user),
++            payload=_discount_trace_payload(instance, action="create"),
++        )
++        messages.success(self.request, "Descuento guardado.")
++        return redirect(self.resource.list_url_name)
++
++
++class DiscountToggleView(DiscountBaseMixin, TemplateView):
++    http_method_names = ["post"]
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        instance = self.get_queryset().get(pk=self.kwargs["pk"])
++        instance.is_active = not instance.is_active
++        instance.updated_by = cast(Any, request.user)
++        instance.save(update_fields=["is_active", "updated_by", "updated_at"])
++        event_type = (
++            self.resource.activate_event_type
++            if instance.is_active
++            else self.resource.deactivate_event_type
++        )
++        action = "activate" if instance.is_active else "deactivate"
++        record_event(
++            event_type=event_type,
++            object_label=str(instance),
++            actor=cast(Model, request.user),
++            payload=_discount_trace_payload(instance, action=action),
++        )
++        state = "activado" if instance.is_active else "desactivado"
++        messages.success(request, f"Descuento {state}.")
++        return redirect(self.resource.list_url_name)
++
++
++class RoomRateDiscountListView(DiscountListView):
++    resource = ROOM_RATE_DISCOUNT
++
++
++class RoomRateDiscountCreateView(DiscountCreateView):
++    resource = ROOM_RATE_DISCOUNT
++
++
++class RoomRateDiscountToggleView(DiscountToggleView):
++    resource = ROOM_RATE_DISCOUNT
++
++
++class TenantDoctorDiscountListView(DiscountListView):
++    resource = TENANT_DOCTOR_DISCOUNT
++
++
++class TenantDoctorDiscountCreateView(DiscountCreateView):
++    resource = TENANT_DOCTOR_DISCOUNT
++
++
++class TenantDoctorDiscountToggleView(DiscountToggleView):
++    resource = TENANT_DOCTOR_DISCOUNT
++
++
+ class PaymentListView(LoginRequiredMixin, ListView):
+     template_name = "finance/payment_list.html"
+     context_object_name = "payments"
+@@ -755,3 +947,46 @@ def _trace_payload(instance: RateRule) -> dict[str, str]:
+         "currency": instance.currency,
+         "priority": str(instance.priority),
+     }
++
++
++def resolve_discount_value(instance: Model, field_path: str) -> str:
++    discount = cast(Any, instance)
++    if field_path == "percentage":
++        return f"{discount.percentage}%"
++    if field_path == "validity":
++        start_date = discount.start_date
++        end_date = discount.end_date
++        start_text = f"{start_date:%Y-%m-%d}" if start_date else "Sin inicio"
++        end_text = f"{end_date:%Y-%m-%d}" if end_date else "Sin fin"
++        return f"{start_text} a {end_text}"
++
++    value: Any = instance
++    for attr in field_path.split("."):
++        value = getattr(value, attr)
++        if callable(value):
++            value = value()
++
++    if isinstance(value, bool):
++        return "Activo" if value else "Inactivo"
++    if isinstance(value, date):
++        return f"{value:%Y-%m-%d}"
++    return str(value) if value not in ("", None) else "Sin datos"
++
++
++def _discount_trace_payload(instance: Model, *, action: str) -> dict[str, str]:
++    discount = cast(Any, instance)
++    payload = {
++        "model": instance._meta.label,
++        "id": str(instance.pk),
++        "level": "financiero",
++        "action": action,
++        "percentage": str(discount.percentage),
++        "start_date": discount.start_date.isoformat(),
++        "end_date": discount.end_date.isoformat() if discount.end_date else "",
++    }
++    if isinstance(instance, RoomRateDiscount):
++        payload["room"] = str(instance.room)
++        payload["rate_rule"] = str(instance.rate_rule)
++    if isinstance(instance, TenantDoctorDiscount):
++        payload["tenant_doctor"] = str(instance.tenant_doctor)
++    return payload
+diff --git a/apps/identity/forms.py b/apps/identity/forms.py
+index 0b71690..4458352 100644
+--- a/apps/identity/forms.py
++++ b/apps/identity/forms.py
+@@ -4,7 +4,7 @@ from typing import Any, cast
+ 
+ from django import forms
+ from django.contrib.auth import get_user_model, password_validation
+-from django.contrib.auth.forms import AuthenticationForm
++from django.contrib.auth.forms import AuthenticationForm, PasswordChangeForm
+ from django.db.models import QuerySet
+ from django.utils.translation import gettext_lazy as _
+ 
+@@ -260,3 +260,26 @@ class ForcedPasswordChangeForm(forms.Form):
+         self.user.set_password(self.cleaned_data["new_password1"])
+         self.user.save()
+         return self.user
++
++
++class ProfilePasswordChangeForm(PasswordChangeForm):
++    old_password = forms.CharField(
++        label=_("Contraseña actual"),
++        strip=False,
++        widget=forms.PasswordInput(attrs={"autocomplete": "current-password"}),
++    )
++    new_password1 = forms.CharField(
++        label=_("Nueva contraseña"),
++        strip=False,
++        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
++        help_text=password_validation.password_validators_help_text_html(),
++    )
++    new_password2 = forms.CharField(
++        label=_("Confirmar nueva contraseña"),
++        strip=False,
++        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
++    )
++
++    def __init__(self, user: Any, *args: Any, **kwargs: Any) -> None:
++        super().__init__(user, *args, **kwargs)
++        style_form_fields(self.fields)
+diff --git a/apps/identity/urls.py b/apps/identity/urls.py
+index 9c90abd..9444bd9 100644
+--- a/apps/identity/urls.py
++++ b/apps/identity/urls.py
+@@ -5,6 +5,7 @@ from django.urls import path
+ from apps.identity import views
+ 
+ urlpatterns = [
++    path("perfil/", views.ProfileView.as_view(), name="profile"),
+     path("usuarios/", views.UserListView.as_view(), name="users"),
+     path("usuarios/nuevo/", views.UserCreateView.as_view(), name="user_create"),
+     path("usuarios/<uuid:pk>/", views.UserDetailView.as_view(), name="user_detail"),
+diff --git a/apps/identity/views.py b/apps/identity/views.py
+index 76f0fd1..e7c46ba 100644
+--- a/apps/identity/views.py
++++ b/apps/identity/views.py
+@@ -23,6 +23,7 @@ from apps.identity.forms import (
+     ForcedPasswordChangeForm,
+     ManagedUserFilterForm,
+     ManagedUserForm,
++    ProfilePasswordChangeForm,
+ )
+ from apps.identity.models import CustomUser, UserRole
+ from apps.identity.services import send_user_invitation
+@@ -255,6 +256,34 @@ class ForcedPasswordChangeView(LoginRequiredMixin, FormView):
+         return redirect("dashboard")
+ 
+ 
++class ProfileView(LoginRequiredMixin, FormView):
++    template_name = "identity/profile.html"
++    form_class = ProfilePasswordChangeForm
++
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["user"] = self.request.user
++        return kwargs
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Perfil"
++        context["profile_user"] = self.request.user
++        return context
++
++    def form_valid(self, form: ProfilePasswordChangeForm) -> HttpResponse:
++        user = form.save()
++        update_session_auth_hash(self.request, user)
++        record_event(
++            event_type="identity.profile.password_changed",
++            object_label=user.email,
++            actor=cast(Model, user),
++            payload={"user_id": str(user.pk), "role": user.role, "field": "password"},
++        )
++        messages.success(self.request, "Contraseña actualizada.")
++        return redirect("profile")
++
++
+ def scope_users_for_manager(
+     queryset: QuerySet[CustomUser],
+     manager: Any,
+diff --git a/apps/presentation/navigation.py b/apps/presentation/navigation.py
+index 632c168..9d5c311 100644
+--- a/apps/presentation/navigation.py
++++ b/apps/presentation/navigation.py
+@@ -25,6 +25,16 @@ NAVIGATION_ITEMS = [
+     {"label": "Vista rápida", "url_name": "calendar_quick", "icon": "bi-grid-3x3-gap"},
+     {"label": "Reservaciones", "url_name": "reservations", "icon": "bi-calendar-check"},
+     {"label": "Estados de Cuenta", "url_name": "statements", "icon": "bi-receipt"},
++    {
++        "label": "Descuentos Consultorio",
++        "url_name": "room_rate_discounts",
++        "icon": "bi-percent",
++    },
++    {
++        "label": "Descuentos Arrendatario",
++        "url_name": "tenant_doctor_discounts",
++        "icon": "bi-tags",
++    },
+     {"label": "Pagos", "url_name": "payments", "icon": "bi-credit-card"},
+     {"label": "Liquidaciones", "url_name": "settlements", "icon": "bi-bank"},
+     {"label": "Documentos", "url_name": "documents", "icon": "bi-file-earmark-pdf"},
+@@ -32,6 +42,7 @@ NAVIGATION_ITEMS = [
+     {"label": "Timeline", "url_name": "timeline", "icon": "bi-diagram-3"},
+     {"label": "Reportes", "url_name": "reports", "icon": "bi-bar-chart"},
+     {"label": "Usuarios", "url_name": "users", "icon": "bi-people"},
++    {"label": "Perfil", "url_name": "profile", "icon": "bi-person-circle"},
+     {"label": "Administración", "url_name": "administration", "icon": "bi-gear"},
+ ]
+ 
+@@ -47,6 +58,8 @@ PAGE_TITLES = {
+     "calendar_quick": "Vista rápida",
+     "reservations": "Reservaciones",
+     "statements": "Estados de Cuenta",
++    "room_rate_discounts": "Descuentos por consultorio",
++    "tenant_doctor_discounts": "Descuentos por médico arrendatario",
+     "payments": "Pagos",
+     "settlements": "Liquidaciones",
+     "documents": "Documentos",
+@@ -54,5 +67,6 @@ PAGE_TITLES = {
+     "timeline": "Timeline",
+     "reports": "Reportes",
+     "users": "Usuarios",
++    "profile": "Perfil",
+     "administration": "Administración",
+ }
+diff --git a/apps/scheduling/forms.py b/apps/scheduling/forms.py
+index b9defd6..f0d390a 100644
+--- a/apps/scheduling/forms.py
++++ b/apps/scheduling/forms.py
+@@ -22,6 +22,10 @@ from apps.core.form_utils import (
+ )
+ from apps.core.permissions import scope_queryset_for_user
+ from apps.finance.models import PriceType
++from apps.finance.services.discount_service import (
++    DiscountQuote,
++    calculate_discount_quote,
++)
+ from apps.finance.services.pricing_engine import (
+     BlockPrice,
+     PricingConfigurationError,
+@@ -187,6 +191,12 @@ def _price_type_label(price_type: str | None) -> str:
+     return dict(PriceType.choices).get(price_type, "Sin tarifa")
+ 
+ 
++def _discount_display(discount: Any | None, percentage: Decimal) -> str:
++    if discount is None:
++        return "Sin descuento activo"
++    return f"{percentage}%"
++
++
+ class AvailabilityRuleForm(BootstrapModelForm):
+     clinic = forms.ModelChoiceField(
+         label="Clínica",
+@@ -512,6 +522,21 @@ class ReservationRequestForm(BootstrapModelForm):
+         required=False,
+         disabled=True,
+     )
++    room_discount_display = forms.CharField(
++        label="Descuento consultorio",
++        required=False,
++        disabled=True,
++    )
++    tenant_discount_display = forms.CharField(
++        label="Descuento médico arrendatario",
++        required=False,
++        disabled=True,
++    )
++    final_rate_display = forms.CharField(
++        label="Tarifa final",
++        required=False,
++        disabled=True,
++    )
+     block_slot = forms.ChoiceField(
+         label="Bloque disponible",
+         choices=(("", "Selecciona un bloque"),),
+@@ -571,6 +596,7 @@ class ReservationRequestForm(BootstrapModelForm):
+             tenant_profile = _tenant_doctor_profile_for_user(self.user)
+             if tenant_profile and not selected_model_pk(source_data, "tenant_doctor"):
+                 self.initial.setdefault("tenant_doctor", tenant_profile.pk)
++                source_data = self.data if self.is_bound else self.initial
+ 
+         set_model_queryset(
+             self.fields["room"],
+@@ -581,6 +607,7 @@ class ReservationRequestForm(BootstrapModelForm):
+             tenant_doctor_queryset,
+         )
+         self.selected_room = self._selected_room(source_data)
++        self.selected_tenant_doctor = self._selected_tenant_doctor(source_data)
+         self.selected_date = _parse_date_value(source_data.get("date"))
+         self.available_blocks = self._free_blocks(
+             self.selected_room,
+@@ -603,6 +630,7 @@ class ReservationRequestForm(BootstrapModelForm):
+             else self._first_available_price_type()
+         )
+         self.schedule_message = self._schedule_message()
++        self.discount_message = ""
+         self.pricing_options = self._pricing_options()
+         self._configure_schedule_fields()
+         self._configure_display_fields()
+@@ -680,6 +708,23 @@ class ReservationRequestForm(BootstrapModelForm):
+             .first()
+         )
+ 
++    def _selected_tenant_doctor(
++        self,
++        source_data: Any,
++    ) -> TenantDoctorProfile | None:
++        tenant_doctor_pk = selected_model_pk(source_data, "tenant_doctor")
++        if tenant_doctor_pk is None:
++            return None
++        return (
++            TenantDoctorProfile.objects.filter(
++                pk=tenant_doctor_pk,
++                is_active=True,
++                is_deleted=False,
++            )
++            .select_related("user")
++            .first()
++        )
++
+     @staticmethod
+     def _free_blocks(
+         room: ConsultingRoom | None,
+@@ -786,9 +831,25 @@ class ReservationRequestForm(BootstrapModelForm):
+             return "No hay tarifa configurada para el horario seleccionado."
+         return ""
+ 
++    def _discount_quote(self, pricing: BlockPrice) -> DiscountQuote | None:
++        if (
++            self.selected_room is None
++            or self.selected_date is None
++            or pricing.applied_rule is None
++            or pricing.subtotal is None
++        ):
++            return None
++        return calculate_discount_quote(
++            room=self.selected_room,
++            tenant_doctor=self.selected_tenant_doctor,
++            rate_rule=pricing.applied_rule,
++            reservation_date=self.selected_date,
++            tariff_total=pricing.subtotal,
++        )
++
+     def _pricing_options(self) -> dict[str, Any]:
+-        ranges: list[dict[str, str]] = []
+-        block_slots: list[dict[str, str]] = []
++        ranges: list[dict[str, Any]] = []
++        block_slots: list[dict[str, Any]] = []
+         if self.selected_room is None or self.selected_date is None:
+             return {"ranges": ranges, "block_slots": block_slots}
+ 
+@@ -804,6 +865,7 @@ class ReservationRequestForm(BootstrapModelForm):
+                 continue
+             if pricing.applied_rule is None or pricing.base_rate is None:
+                 continue
++            discount_quote = self._discount_quote(pricing)
+             option = {
+                 "value": _slot_value(block.start_time, block.end_time),
+                 "start": _time_value(block.start_time),
+@@ -813,6 +875,38 @@ class ReservationRequestForm(BootstrapModelForm):
+                 "base_rate": str(pricing.base_rate),
+                 "subtotal": str(pricing.subtotal or Decimal("0.00")),
+                 "currency": pricing.currency,
++                "has_room_discount": bool(
++                    discount_quote and discount_quote.room_discount
++                ),
++                "has_tenant_discount": bool(
++                    discount_quote and discount_quote.tenant_discount
++                ),
++                "room_discount_percentage": str(
++                    discount_quote.room_discount_percentage
++                    if discount_quote
++                    else Decimal("0.0")
++                ),
++                "tenant_discount_percentage": str(
++                    discount_quote.tenant_discount_percentage
++                    if discount_quote
++                    else Decimal("0.0")
++                ),
++                "applied_discount_percentage": str(
++                    discount_quote.applied_percentage
++                    if discount_quote
++                    else Decimal("0.0")
++                ),
++                "discount_amount": str(
++                    discount_quote.discount_amount
++                    if discount_quote
++                    else Decimal("0.00")
++                ),
++                "tariff_final": str(
++                    discount_quote.tariff_final
++                    if discount_quote
++                    else pricing.subtotal or Decimal("0.00")
++                ),
++                "discount_message": discount_quote.message if discount_quote else "",
+             }
+             ranges.append(option)
+             if pricing.price_type == PriceType.BLOCK:
+@@ -892,6 +986,7 @@ class ReservationRequestForm(BootstrapModelForm):
+ 
+         pricing = self.selected_pricing
+         if pricing and pricing.applied_rule and pricing.base_rate is not None:
++            discount_quote = self._discount_quote(pricing)
+             suffix = "/h" if pricing.price_type == PriceType.HOURLY else " por bloque"
+             self.fields["price_type_display"].initial = _price_type_label(
+                 pricing.price_type
+@@ -902,10 +997,36 @@ class ReservationRequestForm(BootstrapModelForm):
+             self.fields["total_rate_display"].initial = (
+                 f"{pricing.subtotal} {pricing.currency}"
+             )
++            self.fields["room_discount_display"].initial = _discount_display(
++                discount_quote.room_discount if discount_quote else None,
++                (
++                    discount_quote.room_discount_percentage
++                    if discount_quote
++                    else Decimal("0.0")
++                ),
++            )
++            self.fields["tenant_discount_display"].initial = _discount_display(
++                discount_quote.tenant_discount if discount_quote else None,
++                (
++                    discount_quote.tenant_discount_percentage
++                    if discount_quote
++                    else Decimal("0.0")
++                ),
++            )
++            final_rate = (
++                discount_quote.tariff_final if discount_quote else pricing.subtotal
++            )
++            self.fields["final_rate_display"].initial = (
++                f"{final_rate} {pricing.currency}"
++            )
++            self.discount_message = discount_quote.message if discount_quote else ""
+         else:
+             self.fields["price_type_display"].initial = "Sin tarifa"
+             self.fields["rate_amount_display"].initial = "Sin tarifa configurada"
+             self.fields["total_rate_display"].initial = "Sin tarifa configurada"
++            self.fields["room_discount_display"].initial = "Sin descuento activo"
++            self.fields["tenant_discount_display"].initial = "Sin descuento activo"
++            self.fields["final_rate_display"].initial = "Sin tarifa configurada"
+ 
+     @staticmethod
+     def _interval_within_free_block(
+diff --git a/apps/scheduling/models.py b/apps/scheduling/models.py
+index 195c285..eb28a16 100644
+--- a/apps/scheduling/models.py
++++ b/apps/scheduling/models.py
+@@ -2,6 +2,7 @@
+ 
+ from dataclasses import dataclass
+ from datetime import date, time
++from decimal import Decimal
+ from typing import Any
+ 
+ from django.core.exceptions import ValidationError
+@@ -250,6 +251,30 @@ class Reservation(BaseModel):
+     )
+     notes = models.TextField(_("notas"), blank=True)
+     cancel_reason = models.TextField(_("motivo de cancelación"), blank=True)
++    room_discount_percentage = models.DecimalField(
++        _("descuento consultorio %"),
++        max_digits=4,
++        decimal_places=1,
++        default=Decimal("0.0"),
++    )
++    tenant_discount_percentage = models.DecimalField(
++        _("descuento médico arrendatario %"),
++        max_digits=4,
++        decimal_places=1,
++        default=Decimal("0.0"),
++    )
++    tariff_total = models.DecimalField(
++        _("tarifa total"),
++        max_digits=12,
++        decimal_places=2,
++        default=Decimal("0.00"),
++    )
++    tariff_final = models.DecimalField(
++        _("tarifa final"),
++        max_digits=12,
++        decimal_places=2,
++        default=Decimal("0.00"),
++    )
+     requested_at = models.DateTimeField(_("solicitada en"), default=timezone.now)
+     confirmed_at = models.DateTimeField(_("confirmada en"), blank=True, null=True)
+     cancelled_at = models.DateTimeField(_("cancelada en"), blank=True, null=True)
+diff --git a/apps/scheduling/services/reservation_service.py b/apps/scheduling/services/reservation_service.py
+index 8b7638c..9921b72 100644
+--- a/apps/scheduling/services/reservation_service.py
++++ b/apps/scheduling/services/reservation_service.py
+@@ -52,6 +52,7 @@ def create_reservation(
+     reservation.save()
+ 
+     statement = generate_statement_for_reservation(reservation)
++    _sync_reservation_financial_fields(reservation, statement)
+     record_event(
+         event_type="reservation.requested",
+         object_label=str(reservation),
+@@ -74,6 +75,24 @@ def create_reservation(
+     return reservation
+ 
+ 
++def _sync_reservation_financial_fields(
++    reservation: Reservation, statement: Any
++) -> None:
++    reservation.room_discount_percentage = statement.room_discount_percentage
++    reservation.tenant_discount_percentage = statement.tenant_discount_percentage
++    reservation.tariff_total = statement.tariff_total
++    reservation.tariff_final = statement.tariff_final
++    reservation.save(
++        update_fields=[
++            "room_discount_percentage",
++            "tenant_discount_percentage",
++            "tariff_total",
++            "tariff_final",
++            "updated_at",
++        ]
++    )
++
++
+ @transaction.atomic
+ def cancel_reservation(
+     *,
+diff --git a/templates/scheduling/reservation_detail.html b/templates/scheduling/reservation_detail.html
+index 1da33e6..b7079a4 100644
+--- a/templates/scheduling/reservation_detail.html
++++ b/templates/scheduling/reservation_detail.html
+@@ -104,8 +104,16 @@
+           <dd class="col-sm-8 col-lg-9">{{ statement.duration_hours }} horas</dd>
+           <dt class="col-sm-4 col-lg-3 text-secondary">Regla tarifaria</dt>
+           <dd class="col-sm-8 col-lg-9">{{ statement.applied_rate_rule }}</dd>
+-          <dt class="col-sm-4 col-lg-3 text-secondary">Subtotal</dt>
+-          <dd class="col-sm-8 col-lg-9">{{ statement.subtotal }} {{ statement.currency }}</dd>
++          <dt class="col-sm-4 col-lg-3 text-secondary">Tarifa total</dt>
++          <dd class="col-sm-8 col-lg-9">{{ statement.tariff_total }} {{ statement.currency }}</dd>
++          <dt class="col-sm-4 col-lg-3 text-secondary">Descuento consultorio</dt>
++          <dd class="col-sm-8 col-lg-9">{{ statement.room_discount_percentage }}%</dd>
++          <dt class="col-sm-4 col-lg-3 text-secondary">Descuento médico arrendatario</dt>
++          <dd class="col-sm-8 col-lg-9">{{ statement.tenant_discount_percentage }}%</dd>
++          <dt class="col-sm-4 col-lg-3 text-secondary">Descuento aplicado</dt>
++          <dd class="col-sm-8 col-lg-9">{{ statement.discounts }} {{ statement.currency }}</dd>
++          <dt class="col-sm-4 col-lg-3 text-secondary">Tarifa final</dt>
++          <dd class="col-sm-8 col-lg-9">{{ statement.tariff_final }} {{ statement.currency }}</dd>
+           <dt class="col-sm-4 col-lg-3 text-secondary">Total médico</dt>
+           <dd class="col-sm-8 col-lg-9">{{ statement.total_doctor }} {{ statement.currency }}</dd>
+           <dt class="col-sm-4 col-lg-3 text-secondary">Comisión plataforma</dt>
+diff --git a/templates/scheduling/reservation_form.html b/templates/scheduling/reservation_form.html
+index bdf4998..5194875 100644
+--- a/templates/scheduling/reservation_form.html
++++ b/templates/scheduling/reservation_form.html
+@@ -24,6 +24,7 @@
+       {% if form.schedule_message %}
+         <div class="alert alert-warning" role="alert">{{ form.schedule_message }}</div>
+       {% endif %}
++      <div id="reservation-discount-message" class="alert alert-info {% if not form.discount_message %}d-none{% endif %}" role="alert">{{ form.discount_message }}</div>
+ 
+       <div class="row g-3">
+         <div class="col-md-6">
+@@ -63,6 +64,18 @@
+           <label class="form-label" for="{{ form.total_rate_display.id_for_label }}">{{ form.total_rate_display.label }}</label>
+           {{ form.total_rate_display }}
+         </div>
++        <div class="col-md-4">
++          <label class="form-label" for="{{ form.room_discount_display.id_for_label }}">{{ form.room_discount_display.label }}</label>
++          {{ form.room_discount_display }}
++        </div>
++        <div class="col-md-4">
++          <label class="form-label" for="{{ form.tenant_discount_display.id_for_label }}">{{ form.tenant_discount_display.label }}</label>
++          {{ form.tenant_discount_display }}
++        </div>
++        <div class="col-md-4">
++          <label class="form-label" for="{{ form.final_rate_display.id_for_label }}">{{ form.final_rate_display.label }}</label>
++          {{ form.final_rate_display }}
++        </div>
+         {% if form.schedule_mode == "por_bloque" %}
+           <div class="col-md-6">
+             <label class="form-label" for="{{ form.block_slot.id_for_label }}">{{ form.block_slot.label }}</label>
+@@ -126,6 +139,10 @@
+         const typeField = document.getElementById("id_price_type_display");
+         const rateField = document.getElementById("id_rate_amount_display");
+         const totalField = document.getElementById("id_total_rate_display");
++        const roomDiscountField = document.getElementById("id_room_discount_display");
++        const tenantDiscountField = document.getElementById("id_tenant_discount_display");
++        const finalField = document.getElementById("id_final_rate_display");
++        const discountMessage = document.getElementById("reservation-discount-message");
+         const originalEndOptions = endField
+           ? Array.from(endField.options).map((option) => ({
+               value: option.value,
+@@ -136,9 +153,21 @@
+           const parts = value.split(":").map(Number);
+           return parts[0] * 60 + parts[1];
+         };
++        const discountLabel = (hasDiscount, percentage) => {
++          return hasDiscount ? `${percentage}%` : "Sin descuento activo";
++        };
++        const setDiscountMessage = (message) => {
++          if (!discountMessage) return;
++          discountMessage.textContent = message || "";
++          discountMessage.classList.toggle("d-none", !message);
++        };
+         const setPricing = (option, total) => {
+           if (!option) {
+             if (totalField) totalField.value = "Horario no disponible";
++            if (roomDiscountField) roomDiscountField.value = "Sin descuento activo";
++            if (tenantDiscountField) tenantDiscountField.value = "Sin descuento activo";
++            if (finalField) finalField.value = "Horario no disponible";
++            setDiscountMessage("");
+             return;
+           }
+           if (typeField) typeField.value = option.price_type_label;
+@@ -146,7 +175,26 @@
+             const suffix = option.price_type === "por_hora" ? "/h" : " por bloque";
+             rateField.value = `${option.base_rate} ${option.currency}${suffix}`;
+           }
+-          if (totalField) totalField.value = `${total || option.subtotal} ${option.currency}`;
++          const totalValue = Number(total || option.subtotal);
++          const appliedDiscount = Number(option.applied_discount_percentage || 0);
++          const finalValue = option.price_type === "por_hora"
++            ? totalValue * (1 - appliedDiscount / 100)
++            : Number(option.tariff_final || totalValue);
++          if (totalField) totalField.value = `${totalValue.toFixed(2)} ${option.currency}`;
++          if (roomDiscountField) {
++            roomDiscountField.value = discountLabel(
++              option.has_room_discount,
++              option.room_discount_percentage
++            );
++          }
++          if (tenantDiscountField) {
++            tenantDiscountField.value = discountLabel(
++              option.has_tenant_discount,
++              option.tenant_discount_percentage
++            );
++          }
++          if (finalField) finalField.value = `${finalValue.toFixed(2)} ${option.currency}`;
++          setDiscountMessage(option.discount_message || "");
+         };
+         const updateBlockPricing = () => {
+           if (!blockField) return;
+diff --git a/tests/test_finance.py b/tests/test_finance.py
+index 0b0343e..a85f1af 100644
+--- a/tests/test_finance.py
++++ b/tests/test_finance.py
+@@ -7,8 +7,18 @@ from django.contrib.auth import get_user_model
+ from django.core.exceptions import ValidationError
+ 
+ from apps.astrotrace.models import TraceEvent
+-from apps.catalog.models import Clinic, ConsultingRoom, OwnerProfile
+-from apps.finance.models import PriceType, RateRule
++from apps.catalog.models import (
++    Clinic,
++    ConsultingRoom,
++    OwnerProfile,
++    TenantDoctorProfile,
++)
++from apps.finance.models import (
++    PriceType,
++    RateRule,
++    RoomRateDiscount,
++    TenantDoctorDiscount,
++)
+ from apps.finance.services.pricing_engine import (
+     PricingConfigurationError,
+     calculate_block_price,
+@@ -389,3 +399,90 @@ def test_rate_rule_create_view_accepts_multiple_weekdays(client: Any) -> None:
+         Weekday.WEDNESDAY,
+         Weekday.THURSDAY,
+     ]
++
++
++@pytest.mark.django_db
++def test_discount_percentage_validation() -> None:
++    room = create_room("Consultorio Descuento Validación")
++    rule = create_rate_rule(room)
++    doctor = TenantDoctorProfile.objects.create(
++        user=create_user("doctor-descuento-validacion@example.com")
++    )
++
++    room_discount = RoomRateDiscount.objects.create(
++        room=room,
++        rate_rule=rule,
++        percentage=Decimal("10.5"),
++        start_date=date(2026, 6, 29),
++    )
++
++    assert room_discount.is_active is True
++    with pytest.raises(ValidationError):
++        RoomRateDiscount.objects.create(
++            room=room,
++            rate_rule=rule,
++            percentage=Decimal("99.1"),
++            start_date=date(2026, 6, 29),
++        )
++    with pytest.raises(ValidationError):
++        TenantDoctorDiscount.objects.create(
++            tenant_doctor=doctor,
++            percentage=Decimal("-0.1"),
++            start_date=date(2026, 6, 29),
++        )
++
++
++@pytest.mark.django_db
++def test_discount_screens_generate_trace_events(client: Any) -> None:
++    user = create_user("discount-crud@example.com")
++    room = create_room("Consultorio Descuento CRUD")
++    rule = create_rate_rule(room)
++    doctor = TenantDoctorProfile.objects.create(
++        user=create_user("doctor-descuento-crud@example.com")
++    )
++    client.force_login(user)
++
++    room_create_response = client.post(
++        "/descuentos-consultorio/nuevo/",
++        {
++            "clinic": str(room.clinic.pk),
++            "room": str(room.pk),
++            "rate_rule": str(rule.pk),
++            "percentage": "10.0",
++            "start_date": "2026-06-29",
++            "end_date": "",
++        },
++    )
++    room_discount = RoomRateDiscount.objects.get(room=room, rate_rule=rule)
++    room_toggle_response = client.post(
++        f"/descuentos-consultorio/{room_discount.pk}/activar-desactivar/"
++    )
++
++    tenant_create_response = client.post(
++        "/descuentos-arrendatario/nuevo/",
++        {
++            "tenant_doctor": str(doctor.pk),
++            "percentage": "15.0",
++            "start_date": "2026-06-29",
++            "end_date": "",
++        },
++    )
++    tenant_discount = TenantDoctorDiscount.objects.get(tenant_doctor=doctor)
++    tenant_toggle_response = client.post(
++        f"/descuentos-arrendatario/{tenant_discount.pk}/activar-desactivar/"
++    )
++
++    assert room_create_response.status_code == 302
++    assert room_toggle_response.status_code == 302
++    assert tenant_create_response.status_code == 302
++    assert tenant_toggle_response.status_code == 302
++    assert TraceEvent.objects.filter(event_type="room_rate_discount.created").exists()
++    assert TraceEvent.objects.filter(
++        event_type="room_rate_discount.deactivated"
++    ).exists()
++    assert TraceEvent.objects.filter(
++        event_type="tenant_doctor_discount.created"
++    ).exists()
++    assert TraceEvent.objects.filter(
++        event_type="tenant_doctor_discount.deactivated"
++    ).exists()
+diff --git a/tests/test_reservations.py b/tests/test_reservations.py
+index a017d75..b261a43 100644
+--- a/tests/test_reservations.py
++++ b/tests/test_reservations.py
+@@ -16,7 +16,14 @@ from apps.catalog.models import (
+     TenantDoctorProfile,
+     TenantDoctorStatus,
+ )
+-from apps.finance.models import PriceType, RateRule, Statement, StatementStatus
++from apps.finance.models import (
++    PriceType,
++    RateRule,
++    RoomRateDiscount,
++    Statement,
++    StatementStatus,
++    TenantDoctorDiscount,
++)
+ from apps.finance.services.statement_engine import calculate_statement_hash
+ from apps.scheduling.models import (
+     AvailabilityException,
+@@ -290,7 +297,7 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
+     create_rate(room)
+     client.force_login(user)
+ 
+-    response = client.get(f"/calendario/?week=2026-08-10&room={room.pk}")
++    response = client.get(f"/calendario/?week=2026-08-17&room={room.pk}")
+ 
+     assert response.status_code == 200
+     assert "Solicitar reservación" in response.content.decode()
+@@ -351,8 +358,8 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
+     client.force_login(user)
+ 
+     response = client.get(
+-        f"/calendario/vista-rapida/?week=2026-08-10"
+-        f"&room={room.pk}&selected_date=2026-08-10"
++        f"/calendario/vista-rapida/?week=2026-08-17"
++        f"&room={room.pk}&selected_date=2026-08-17"
+     )
+ 
+     content = response.content.decode()
+@@ -432,15 +439,15 @@ def test_quick_calendar_shows_reserved_day_when_no_free_blocks(client: Any) -> N
+     create_reservation(
+         room=room,
+         tenant_doctor=doctor,
+-        reservation_date=date(2026, 8, 10),
++        reservation_date=date(2026, 8, 17),
+         start_time=time(8, 0),
+         end_time=time(13, 0),
+     )
+     client.force_login(user)
+ 
+     response = client.get(
+-        f"/calendario/vista-rapida/?week=2026-08-10"
+-        f"&room={room.pk}&selected_date=2026-08-10"
++        f"/calendario/vista-rapida/?week=2026-08-17"
++        f"&room={room.pk}&selected_date=2026-08-17"
+     )
+ 
+     content = response.content.decode()
+@@ -529,6 +536,45 @@ def test_reservation_request_prefills_context_and_pricing(client: Any) -> None:
+     assert f'value="{doctor.pk}" selected' in content
+ 
+ 
++@pytest.mark.django_db
++def test_reservation_request_shows_best_discount_and_final_rate(
++    client: Any,
++) -> None:
++    user = create_user("solicitud-descuento@example.com")
++    room = create_room("Consultorio Descuento UI")
++    doctor = create_tenant_doctor("doctor-descuento-ui@example.com")
++    create_availability(room)
++    rule = create_rate(room)
++    RoomRateDiscount.objects.create(
++        room=room,
++        rate_rule=rule,
++        percentage=Decimal("10.0"),
++        start_date=date(2026, 6, 29),
++    )
++    TenantDoctorDiscount.objects.create(
++        tenant_doctor=doctor,
++        percentage=Decimal("20.0"),
++        start_date=date(2026, 6, 29),
++    )
++    client.force_login(user)
++
++    response = client.get(
++        "/reservaciones/solicitar/"
++        f"?room={room.pk}&tenant_doctor={doctor.pk}"
++        "&date=2026-08-10&start_time=08:00&end_time=13:00"
++    )
++
++    content = response.content.decode()
++    assert response.status_code == 200
++    assert "Descuento consultorio" in content
++    assert "Descuento médico arrendatario" in content
++    assert "10.0%" in content
++    assert "20.0%" in content
++    assert "Tarifa final" in content
++    assert "300.00 MXN" in content
++    assert "Se aplica únicamente el mejor descuento" in content
++
++
+ @pytest.mark.django_db
+ def test_reservation_request_hourly_time_dropdowns_keep_one_hour_margin(
+     client: Any,
+@@ -684,6 +730,50 @@ def test_create_reservation_from_ui(client: Any) -> None:
+     assert Statement.objects.filter(reservation__notes="Solicitud desde UI").exists()
+ 
+ 
++@pytest.mark.django_db
++def test_create_reservation_applies_best_discount_to_statement_and_reservation() -> (
++    None
++):
++    room = create_room("Consultorio Descuento Guardado")
++    doctor = create_tenant_doctor("doctor-descuento-guardado@example.com")
++    create_availability(room)
++    rule = create_rate(room)
++    RoomRateDiscount.objects.create(
++        room=room,
++        rate_rule=rule,
++        percentage=Decimal("10.0"),
++        start_date=date(2026, 6, 29),
++    )
++    TenantDoctorDiscount.objects.create(
++        tenant_doctor=doctor,
++        percentage=Decimal("20.0"),
++        start_date=date(2026, 6, 29),
++    )
++
++    reservation = create_reservation(
++        room=room,
++        tenant_doctor=doctor,
++        reservation_date=date(2026, 6, 29),
++        start_time=time(8, 0),
++        end_time=time(13, 0),
++    )
++
++    statement = reservation.statements.get()
++    reservation.refresh_from_db()
++    assert statement.tariff_total == Decimal("375.00")
++    assert statement.room_discount_percentage == Decimal("10.0")
++    assert statement.tenant_discount_percentage == Decimal("20.0")
++    assert statement.discounts == Decimal("75.00")
++    assert statement.tariff_final == Decimal("300.00")
++    assert statement.total_doctor == Decimal("300.00")
++    assert statement.platform_commission == Decimal("30.00")
++    assert statement.owner_net == Decimal("270.00")
++    assert reservation.tariff_total == Decimal("375.00")
++    assert reservation.tariff_final == Decimal("300.00")
++    assert reservation.room_discount_percentage == Decimal("10.0")
++    assert reservation.tenant_discount_percentage == Decimal("20.0")
++
++
+ @pytest.mark.django_db
+ def test_create_reservation_from_ui_sends_confirmation_email(
+     client: Any,
+diff --git a/tests/test_user_management.py b/tests/test_user_management.py
+index 9442348..00270cf 100644
+--- a/tests/test_user_management.py
++++ b/tests/test_user_management.py
+@@ -4,6 +4,7 @@ import pytest
+ from django.contrib.auth import get_user_model
+ from django.urls import reverse
+ 
++from apps.astrotrace.models import TraceEvent
+ from apps.catalog.models import Clinic, ConsultingRoom, OwnerProfile
+ from apps.identity.models import UserRole
+ 
+@@ -142,6 +143,45 @@ def test_forced_password_change_flow(client: Any, settings: Any) -> None:
+     assert user.check_password("Tr3s-Colinas-Azules-2026!")
+ 
+ 
++@pytest.mark.django_db
++def test_profile_view_changes_password_and_records_trace(
++    client: Any,
++    settings: Any,
++) -> None:
++    settings.AUTH_PASSWORD_VALIDATORS = []
++    user = create_user(
++        "perfil@example.com",
++        UserRole.ADMIN,
++        password="Actual-12345",
++    )
++    client.force_login(user)
++
++    response = client.get(reverse("profile"))
++    content = response.content.decode()
++
++    assert response.status_code == 200
++    assert "Usuaria Prueba" in content
++    assert "perfil@example.com" in content
++    assert "Administrador de negocio" in content
++
++    response = client.post(
++        reverse("profile"),
++        {
++            "old_password": "Actual-12345",
++            "new_password1": "Nueva-12345",
++            "new_password2": "Nueva-12345",
++        },
++    )
++
++    user.refresh_from_db()
++    assert response.status_code == 302
++    assert response.url == reverse("profile")
++    assert user.check_password("Nueva-12345")
++    assert TraceEvent.objects.filter(
++        event_type="identity.profile.password_changed"
++    ).exists()
++
++
+ @pytest.mark.django_db
+ def test_owner_can_create_assistant_assigned_to_self(client: Any) -> None:
+     owner_user = create_user("owner-manager@example.com", UserRole.OWNER)

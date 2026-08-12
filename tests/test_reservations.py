@@ -16,7 +16,14 @@ from apps.catalog.models import (
     TenantDoctorProfile,
     TenantDoctorStatus,
 )
-from apps.finance.models import PriceType, RateRule, Statement, StatementStatus
+from apps.finance.models import (
+    PriceType,
+    RateRule,
+    RoomRateDiscount,
+    Statement,
+    StatementStatus,
+    TenantDoctorDiscount,
+)
 from apps.finance.services.statement_engine import calculate_statement_hash
 from apps.scheduling.models import (
     AvailabilityException,
@@ -290,7 +297,7 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
     create_rate(room)
     client.force_login(user)
 
-    response = client.get(f"/calendario/?week=2026-08-10&room={room.pk}")
+    response = client.get(f"/calendario/?week=2026-08-17&room={room.pk}")
 
     assert response.status_code == 200
     assert "Solicitar reservación" in response.content.decode()
@@ -351,8 +358,8 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
     client.force_login(user)
 
     response = client.get(
-        f"/calendario/vista-rapida/?week=2026-08-10"
-        f"&room={room.pk}&selected_date=2026-08-10"
+        f"/calendario/vista-rapida/?week=2026-08-17"
+        f"&room={room.pk}&selected_date=2026-08-17"
     )
 
     content = response.content.decode()
@@ -432,15 +439,15 @@ def test_quick_calendar_shows_reserved_day_when_no_free_blocks(client: Any) -> N
     create_reservation(
         room=room,
         tenant_doctor=doctor,
-        reservation_date=date(2026, 8, 10),
+        reservation_date=date(2026, 8, 17),
         start_time=time(8, 0),
         end_time=time(13, 0),
     )
     client.force_login(user)
 
     response = client.get(
-        f"/calendario/vista-rapida/?week=2026-08-10"
-        f"&room={room.pk}&selected_date=2026-08-10"
+        f"/calendario/vista-rapida/?week=2026-08-17"
+        f"&room={room.pk}&selected_date=2026-08-17"
     )
 
     content = response.content.decode()
@@ -527,6 +534,45 @@ def test_reservation_request_prefills_context_and_pricing(client: Any) -> None:
     assert "375.00 MXN" in content
     assert f'value="{room.pk}" selected' in content
     assert f'value="{doctor.pk}" selected' in content
+
+
+@pytest.mark.django_db
+def test_reservation_request_shows_best_discount_and_final_rate(
+    client: Any,
+) -> None:
+    user = create_user("solicitud-descuento@example.com")
+    room = create_room("Consultorio Descuento UI")
+    doctor = create_tenant_doctor("doctor-descuento-ui@example.com")
+    create_availability(room)
+    rule = create_rate(room)
+    RoomRateDiscount.objects.create(
+        room=room,
+        rate_rule=rule,
+        percentage=Decimal("10.0"),
+        start_date=date(2026, 6, 29),
+    )
+    TenantDoctorDiscount.objects.create(
+        tenant_doctor=doctor,
+        percentage=Decimal("20.0"),
+        start_date=date(2026, 6, 29),
+    )
+    client.force_login(user)
+
+    response = client.get(
+        "/reservaciones/solicitar/"
+        f"?room={room.pk}&tenant_doctor={doctor.pk}"
+        "&date=2026-08-10&start_time=08:00&end_time=13:00"
+    )
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "Descuento consultorio" in content
+    assert "Descuento médico arrendatario" in content
+    assert "10.0%" in content
+    assert "20.0%" in content
+    assert "Tarifa final" in content
+    assert "300.00 MXN" in content
+    assert "Se aplica únicamente el mejor descuento" in content
 
 
 @pytest.mark.django_db
@@ -682,6 +728,50 @@ def test_create_reservation_from_ui(client: Any) -> None:
 
     assert response.status_code == 302
     assert Statement.objects.filter(reservation__notes="Solicitud desde UI").exists()
+
+
+@pytest.mark.django_db
+def test_create_reservation_applies_best_discount_to_statement_and_reservation() -> (
+    None
+):
+    room = create_room("Consultorio Descuento Guardado")
+    doctor = create_tenant_doctor("doctor-descuento-guardado@example.com")
+    create_availability(room)
+    rule = create_rate(room)
+    RoomRateDiscount.objects.create(
+        room=room,
+        rate_rule=rule,
+        percentage=Decimal("10.0"),
+        start_date=date(2026, 6, 29),
+    )
+    TenantDoctorDiscount.objects.create(
+        tenant_doctor=doctor,
+        percentage=Decimal("20.0"),
+        start_date=date(2026, 6, 29),
+    )
+
+    reservation = create_reservation(
+        room=room,
+        tenant_doctor=doctor,
+        reservation_date=date(2026, 6, 29),
+        start_time=time(8, 0),
+        end_time=time(13, 0),
+    )
+
+    statement = reservation.statements.get()
+    reservation.refresh_from_db()
+    assert statement.tariff_total == Decimal("375.00")
+    assert statement.room_discount_percentage == Decimal("10.0")
+    assert statement.tenant_discount_percentage == Decimal("20.0")
+    assert statement.discounts == Decimal("75.00")
+    assert statement.tariff_final == Decimal("300.00")
+    assert statement.total_doctor == Decimal("300.00")
+    assert statement.platform_commission == Decimal("30.00")
+    assert statement.owner_net == Decimal("270.00")
+    assert reservation.tariff_total == Decimal("375.00")
+    assert reservation.tariff_final == Decimal("300.00")
+    assert reservation.room_discount_percentage == Decimal("10.0")
+    assert reservation.tenant_discount_percentage == Decimal("20.0")
 
 
 @pytest.mark.django_db

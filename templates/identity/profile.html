@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="profile-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#profile-content" hx-select="#profile-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Cuenta</p>
+        <h1 class="h4 mb-0">Perfil</h1>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Datos del usuario</h2>
+      <dl class="row mb-0">
+        <dt class="col-sm-4 col-lg-3 text-secondary">Nombre</dt>
+        <dd class="col-sm-8 col-lg-9">{{ profile_user.full_name|default:"Sin nombre" }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Correo</dt>
+        <dd class="col-sm-8 col-lg-9">{{ profile_user.email }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Rol</dt>
+        <dd class="col-sm-8 col-lg-9">{{ profile_user.get_role_display }}</dd>
+      </dl>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Cambiar contraseña</h2>
+      <form method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+          <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
+        {% endif %}
+        <div class="row g-3">
+          {% for field in form %}
+            <div class="col-md-6">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <div class="form-text">{{ field.help_text }}</div>
+              {% endif %}
+              {% for error in field.errors %}
+                <div class="invalid-feedback d-block">{{ error }}</div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="d-flex justify-content-end mt-4">
+          <button class="btn btn-primary" type="submit">
+            <i class="bi bi-shield-lock me-1"></i>
+            Actualizar contraseña
+          </button>
+        </div>
+      </form>
+    </div>
+  </section>
+{% endblock %}

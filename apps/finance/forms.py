@@ -1,5 +1,6 @@
 """Forms for finance screens."""
 
+from decimal import Decimal
 from typing import Any
 
 from django import forms
@@ -18,7 +19,14 @@ from apps.core.form_utils import (
     style_form_fields,
 )
 from apps.core.permissions import scope_queryset_for_user
-from apps.finance.models import Payment, PaymentStatus, RateRule, SettlementStatus
+from apps.finance.models import (
+    Payment,
+    PaymentStatus,
+    RateRule,
+    RoomRateDiscount,
+    SettlementStatus,
+    TenantDoctorDiscount,
+)
 from apps.scheduling.models import Weekday
 
 
@@ -62,6 +70,18 @@ def _room_queryset(data: Any = None) -> QuerySet[Any]:
     if owner_pk:
         queryset = queryset.filter(owner_id=owner_pk)
     return queryset.order_by("clinic__name", "owner__display_name", "name")
+
+
+def _rate_rule_queryset(data: Any = None) -> QuerySet[RateRule]:
+    queryset = RateRule.objects.filter(is_deleted=False).select_related(
+        "room",
+        "room__clinic",
+        "room__owner",
+    )
+    room_pk = selected_model_pk(data, "room")
+    if room_pk:
+        queryset = queryset.filter(room_id=room_pk)
+    return queryset.order_by("room__clinic__name", "room__name", "name")
 
 
 class OperationalFinanceFilterForm(forms.Form):
@@ -222,6 +242,89 @@ class RateRuleFilterForm(OperationalFinanceFilterForm):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+
+
+class RoomRateDiscountForm(BootstrapModelForm):
+    clinic = forms.ModelChoiceField(
+        label="Clínica",
+        queryset=Clinic.objects.none(),
+        required=False,
+    )
+
+    class Meta:
+        model = RoomRateDiscount
+        fields = (
+            "clinic",
+            "room",
+            "rate_rule",
+            "percentage",
+            "start_date",
+            "end_date",
+        )
+        labels = {
+            "room": "Consultorio",
+            "rate_rule": "Regla tarifaria",
+            "percentage": "Porcentaje de descuento",
+            "start_date": "Fecha inicio de vigencia",
+            "end_date": "Fecha fin de vigencia",
+        }
+        widgets = {
+            "start_date": monday_date_input(),
+            "end_date": monday_date_input(),
+        }
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        source_data = self.data if self.is_bound else self.filter_data
+        clinic_queryset = _clinic_queryset()
+        room_queryset = _room_queryset(source_data)
+        rate_rule_queryset = _rate_rule_queryset(source_data)
+        if self.user is not None:
+            clinic_queryset = scope_queryset_for_user(clinic_queryset, self.user)
+            room_queryset = scope_queryset_for_user(room_queryset, self.user)
+            rate_rule_queryset = scope_queryset_for_user(
+                rate_rule_queryset,
+                self.user,
+            )
+        set_model_queryset(self.fields["clinic"], clinic_queryset)
+        set_model_queryset(self.fields["room"], room_queryset)
+        set_model_queryset(self.fields["rate_rule"], rate_rule_queryset)
+        self.fields["percentage"].min_value = Decimal("0.0")
+        self.fields["percentage"].max_value = Decimal("99.0")
+
+
+class TenantDoctorDiscountForm(BootstrapModelForm):
+    class Meta:
+        model = TenantDoctorDiscount
+        fields = (
+            "tenant_doctor",
+            "percentage",
+            "start_date",
+            "end_date",
+        )
+        labels = {
+            "tenant_doctor": "Médico arrendatario",
+            "percentage": "Porcentaje de descuento",
+            "start_date": "Fecha inicio de vigencia",
+            "end_date": "Fecha fin de vigencia",
+        }
+        widgets = {
+            "start_date": monday_date_input(),
+            "end_date": monday_date_input(),
+        }
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        tenant_queryset = (
+            TenantDoctorProfile.objects.filter(is_deleted=False)
+            .select_related("user")
+            .order_by("display_name", "user__email")
+        )
+        if self.user is not None:
+            tenant_queryset = scope_queryset_for_user(tenant_queryset, self.user)
+        set_model_queryset(self.fields["tenant_doctor"], tenant_queryset)
+        self.fields["percentage"].min_value = Decimal("0.0")
+        self.fields["percentage"].max_value = Decimal("99.0")
 
 
 class PaymentRegistrationForm(BootstrapModelForm):

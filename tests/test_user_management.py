@@ -4,6 +4,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 
+from apps.astrotrace.models import TraceEvent
 from apps.catalog.models import Clinic, ConsultingRoom, OwnerProfile
 from apps.identity.models import UserRole
 
@@ -140,6 +141,45 @@ def test_forced_password_change_flow(client: Any, settings: Any) -> None:
     assert response.url == reverse("dashboard")
     assert user.must_change_password is False
     assert user.check_password("Tr3s-Colinas-Azules-2026!")
+
+
+@pytest.mark.django_db
+def test_profile_view_changes_password_and_records_trace(
+    client: Any,
+    settings: Any,
+) -> None:
+    settings.AUTH_PASSWORD_VALIDATORS = []
+    user = create_user(
+        "perfil@example.com",
+        UserRole.ADMIN,
+        password="Actual-12345",
+    )
+    client.force_login(user)
+
+    response = client.get(reverse("profile"))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Usuaria Prueba" in content
+    assert "perfil@example.com" in content
+    assert "Administrador de negocio" in content
+
+    response = client.post(
+        reverse("profile"),
+        {
+            "old_password": "Actual-12345",
+            "new_password1": "Nueva-12345",
+            "new_password2": "Nueva-12345",
+        },
+    )
+
+    user.refresh_from_db()
+    assert response.status_code == 302
+    assert response.url == reverse("profile")
+    assert user.check_password("Nueva-12345")
+    assert TraceEvent.objects.filter(
+        event_type="identity.profile.password_changed"
+    ).exists()
 
 
 @pytest.mark.django_db

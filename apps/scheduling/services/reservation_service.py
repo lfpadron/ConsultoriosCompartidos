@@ -52,6 +52,7 @@ def create_reservation(
     reservation.save()
 
     statement = generate_statement_for_reservation(reservation)
+    _sync_reservation_financial_fields(reservation, statement)
     record_event(
         event_type="reservation.requested",
         object_label=str(reservation),
@@ -72,6 +73,24 @@ def create_reservation(
     )
     _send_reservation_confirmation_email(reservation)
     return reservation
+
+
+def _sync_reservation_financial_fields(
+    reservation: Reservation, statement: Any
+) -> None:
+    reservation.room_discount_percentage = statement.room_discount_percentage
+    reservation.tenant_discount_percentage = statement.tenant_discount_percentage
+    reservation.tariff_total = statement.tariff_total
+    reservation.tariff_final = statement.tariff_final
+    reservation.save(
+        update_fields=[
+            "room_discount_percentage",
+            "tenant_discount_percentage",
+            "tariff_total",
+            "tariff_final",
+            "updated_at",
+        ]
+    )
 
 
 @transaction.atomic

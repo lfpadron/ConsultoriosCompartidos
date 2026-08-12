@@ -18,6 +18,36 @@ urlpatterns = [
         views.RateRuleDeactivateView.as_view(),
         name="rate_deactivate",
     ),
+    path(
+        "descuentos-consultorio/",
+        views.RoomRateDiscountListView.as_view(),
+        name="room_rate_discounts",
+    ),
+    path(
+        "descuentos-consultorio/nuevo/",
+        views.RoomRateDiscountCreateView.as_view(),
+        name="room_rate_discount_create",
+    ),
+    path(
+        "descuentos-consultorio/<uuid:pk>/activar-desactivar/",
+        views.RoomRateDiscountToggleView.as_view(),
+        name="room_rate_discount_toggle",
+    ),
+    path(
+        "descuentos-arrendatario/",
+        views.TenantDoctorDiscountListView.as_view(),
+        name="tenant_doctor_discounts",
+    ),
+    path(
+        "descuentos-arrendatario/nuevo/",
+        views.TenantDoctorDiscountCreateView.as_view(),
+        name="tenant_doctor_discount_create",
+    ),
+    path(
+        "descuentos-arrendatario/<uuid:pk>/activar-desactivar/",
+        views.TenantDoctorDiscountToggleView.as_view(),
+        name="tenant_doctor_discount_toggle",
+    ),
     path("pagos/", views.PaymentListView.as_view(), name="payments"),
     path(
         "reservaciones/<uuid:reservation_pk>/pagos/nuevo/",

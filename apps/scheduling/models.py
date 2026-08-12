@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import date, time
+from decimal import Decimal
 from typing import Any
 
 from django.core.exceptions import ValidationError
@@ -250,6 +251,30 @@ class Reservation(BaseModel):
     )
     notes = models.TextField(_("notas"), blank=True)
     cancel_reason = models.TextField(_("motivo de cancelación"), blank=True)
+    room_discount_percentage = models.DecimalField(
+        _("descuento consultorio %"),
+        max_digits=4,
+        decimal_places=1,
+        default=Decimal("0.0"),
+    )
+    tenant_discount_percentage = models.DecimalField(
+        _("descuento médico arrendatario %"),
+        max_digits=4,
+        decimal_places=1,
+        default=Decimal("0.0"),
+    )
+    tariff_total = models.DecimalField(
+        _("tarifa total"),
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    tariff_final = models.DecimalField(
+        _("tarifa final"),
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
     requested_at = models.DateTimeField(_("solicitada en"), default=timezone.now)
     confirmed_at = models.DateTimeField(_("confirmada en"), blank=True, null=True)
     cancelled_at = models.DateTimeField(_("cancelada en"), blank=True, null=True)

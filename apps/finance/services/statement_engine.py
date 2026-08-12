@@ -9,6 +9,7 @@ from django.conf import settings
 from django.db import transaction
 
 from apps.finance.models import Statement, StatementStatus
+from apps.finance.services.discount_service import calculate_discount_quote
 from apps.finance.services.pricing_engine import BlockPrice, calculate_block_price
 from apps.scheduling.models import Reservation
 
@@ -62,12 +63,18 @@ def replace_statement_if_needed(
         duration_hours=payload["duration_hours"],
         subtotal=payload["subtotal"],
         discounts=payload["discounts"],
+        room_discount_percentage=payload["room_discount_percentage"],
+        tenant_discount_percentage=payload["tenant_discount_percentage"],
+        tariff_total=payload["tariff_total"],
+        tariff_final=payload["tariff_final"],
         taxes=payload["taxes"],
         total_doctor=payload["total_doctor"],
         platform_commission=payload["platform_commission"],
         commission_taxes=payload["commission_taxes"],
         owner_net=payload["owner_net"],
         applied_rate_rule=pricing.applied_rule,
+        applied_room_discount_id=payload["applied_room_discount_id"],
+        applied_tenant_discount_id=payload["applied_tenant_discount_id"],
         calculation_explanation=payload["calculation_explanation"],
         calculation_hash=calculation_hash,
     )
@@ -96,14 +103,29 @@ def _build_statement_payload(
         raise StatementGenerationError(msg)
 
     subtotal = _money(pricing.subtotal)
-    discounts = ZERO
+    discount_quote = calculate_discount_quote(
+        room=reservation.room,
+        tenant_doctor=reservation.tenant_doctor,
+        rate_rule=pricing.applied_rule,
+        reservation_date=reservation.date,
+        tariff_total=subtotal,
+    )
+    discounts = discount_quote.discount_amount
     taxes = ZERO
-    total_doctor = _money(subtotal - discounts + taxes)
+    total_doctor = _money(discount_quote.tariff_final + taxes)
     platform_commission = _money(
-        subtotal * Decimal(str(settings.PLATFORM_COMMISSION_RATE))
+        discount_quote.tariff_final * Decimal(str(settings.PLATFORM_COMMISSION_RATE))
     )
     commission_taxes = ZERO
-    owner_net = _money(subtotal - platform_commission - commission_taxes)
+    owner_net = _money(
+        discount_quote.tariff_final - platform_commission - commission_taxes
+    )
+    explanation = pricing.explanation
+    if discount_quote.applied_percentage > ZERO:
+        explanation = (
+            f"{pricing.explanation}. Descuento aplicado: "
+            f"{discount_quote.applied_percentage}%."
+        )
 
     return {
         "reservation_id": str(reservation.pk),
@@ -117,12 +139,26 @@ def _build_statement_payload(
         "currency": pricing.currency,
         "subtotal": subtotal,
         "discounts": discounts,
+        "room_discount_percentage": discount_quote.room_discount_percentage,
+        "tenant_discount_percentage": discount_quote.tenant_discount_percentage,
+        "tariff_total": discount_quote.tariff_total,
+        "tariff_final": discount_quote.tariff_final,
+        "applied_room_discount_id": (
+            str(discount_quote.room_discount.pk)
+            if discount_quote.room_discount
+            else None
+        ),
+        "applied_tenant_discount_id": (
+            str(discount_quote.tenant_discount.pk)
+            if discount_quote.tenant_discount
+            else None
+        ),
         "taxes": taxes,
         "total_doctor": total_doctor,
         "platform_commission": platform_commission,
         "commission_taxes": commission_taxes,
         "owner_net": owner_net,
-        "calculation_explanation": pricing.explanation,
+        "calculation_explanation": explanation,
     }
 
 

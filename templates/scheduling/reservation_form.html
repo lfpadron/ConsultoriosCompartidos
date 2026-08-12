@@ -24,6 +24,7 @@
       {% if form.schedule_message %}
         <div class="alert alert-warning" role="alert">{{ form.schedule_message }}</div>
       {% endif %}
+      <div id="reservation-discount-message" class="alert alert-info {% if not form.discount_message %}d-none{% endif %}" role="alert">{{ form.discount_message }}</div>
 
       <div class="row g-3">
         <div class="col-md-6">
@@ -62,6 +63,18 @@
         <div class="col-md-4">
           <label class="form-label" for="{{ form.total_rate_display.id_for_label }}">{{ form.total_rate_display.label }}</label>
           {{ form.total_rate_display }}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label" for="{{ form.room_discount_display.id_for_label }}">{{ form.room_discount_display.label }}</label>
+          {{ form.room_discount_display }}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label" for="{{ form.tenant_discount_display.id_for_label }}">{{ form.tenant_discount_display.label }}</label>
+          {{ form.tenant_discount_display }}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label" for="{{ form.final_rate_display.id_for_label }}">{{ form.final_rate_display.label }}</label>
+          {{ form.final_rate_display }}
         </div>
         {% if form.schedule_mode == "por_bloque" %}
           <div class="col-md-6">
@@ -126,6 +139,10 @@
         const typeField = document.getElementById("id_price_type_display");
         const rateField = document.getElementById("id_rate_amount_display");
         const totalField = document.getElementById("id_total_rate_display");
+        const roomDiscountField = document.getElementById("id_room_discount_display");
+        const tenantDiscountField = document.getElementById("id_tenant_discount_display");
+        const finalField = document.getElementById("id_final_rate_display");
+        const discountMessage = document.getElementById("reservation-discount-message");
         const originalEndOptions = endField
           ? Array.from(endField.options).map((option) => ({
               value: option.value,
@@ -136,9 +153,21 @@
           const parts = value.split(":").map(Number);
           return parts[0] * 60 + parts[1];
         };
+        const discountLabel = (hasDiscount, percentage) => {
+          return hasDiscount ? `${percentage}%` : "Sin descuento activo";
+        };
+        const setDiscountMessage = (message) => {
+          if (!discountMessage) return;
+          discountMessage.textContent = message || "";
+          discountMessage.classList.toggle("d-none", !message);
+        };
         const setPricing = (option, total) => {
           if (!option) {
             if (totalField) totalField.value = "Horario no disponible";
+            if (roomDiscountField) roomDiscountField.value = "Sin descuento activo";
+            if (tenantDiscountField) tenantDiscountField.value = "Sin descuento activo";
+            if (finalField) finalField.value = "Horario no disponible";
+            setDiscountMessage("");
             return;
           }
           if (typeField) typeField.value = option.price_type_label;
@@ -146,7 +175,26 @@
             const suffix = option.price_type === "por_hora" ? "/h" : " por bloque";
             rateField.value = `${option.base_rate} ${option.currency}${suffix}`;
           }
-          if (totalField) totalField.value = `${total || option.subtotal} ${option.currency}`;
+          const totalValue = Number(total || option.subtotal);
+          const appliedDiscount = Number(option.applied_discount_percentage || 0);
+          const finalValue = option.price_type === "por_hora"
+            ? totalValue * (1 - appliedDiscount / 100)
+            : Number(option.tariff_final || totalValue);
+          if (totalField) totalField.value = `${totalValue.toFixed(2)} ${option.currency}`;
+          if (roomDiscountField) {
+            roomDiscountField.value = discountLabel(
+              option.has_room_discount,
+              option.room_discount_percentage
+            );
+          }
+          if (tenantDiscountField) {
+            tenantDiscountField.value = discountLabel(
+              option.has_tenant_discount,
+              option.tenant_discount_percentage
+            );
+          }
+          if (finalField) finalField.value = `${finalValue.toFixed(2)} ${option.currency}`;
+          setDiscountMessage(option.discount_message || "");
         };
         const updateBlockPricing = () => {
           if (!blockField) return;

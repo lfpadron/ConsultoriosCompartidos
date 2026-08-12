@@ -7,8 +7,18 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 
 from apps.astrotrace.models import TraceEvent
-from apps.catalog.models import Clinic, ConsultingRoom, OwnerProfile
-from apps.finance.models import PriceType, RateRule
+from apps.catalog.models import (
+    Clinic,
+    ConsultingRoom,
+    OwnerProfile,
+    TenantDoctorProfile,
+)
+from apps.finance.models import (
+    PriceType,
+    RateRule,
+    RoomRateDiscount,
+    TenantDoctorDiscount,
+)
 from apps.finance.services.pricing_engine import (
     PricingConfigurationError,
     calculate_block_price,
@@ -389,3 +399,90 @@ def test_rate_rule_create_view_accepts_multiple_weekdays(client: Any) -> None:
         Weekday.WEDNESDAY,
         Weekday.THURSDAY,
     ]
+
+
+@pytest.mark.django_db
+def test_discount_percentage_validation() -> None:
+    room = create_room("Consultorio Descuento Validación")
+    rule = create_rate_rule(room)
+    doctor = TenantDoctorProfile.objects.create(
+        user=create_user("doctor-descuento-validacion@example.com")
+    )
+
+    room_discount = RoomRateDiscount.objects.create(
+        room=room,
+        rate_rule=rule,
+        percentage=Decimal("10.5"),
+        start_date=date(2026, 6, 29),
+    )
+
+    assert room_discount.is_active is True
+    with pytest.raises(ValidationError):
+        RoomRateDiscount.objects.create(
+            room=room,
+            rate_rule=rule,
+            percentage=Decimal("99.1"),
+            start_date=date(2026, 6, 29),
+        )
+    with pytest.raises(ValidationError):
+        TenantDoctorDiscount.objects.create(
+            tenant_doctor=doctor,
+            percentage=Decimal("-0.1"),
+            start_date=date(2026, 6, 29),
+        )
+
+
+@pytest.mark.django_db
+def test_discount_screens_generate_trace_events(client: Any) -> None:
+    user = create_user("discount-crud@example.com")
+    room = create_room("Consultorio Descuento CRUD")
+    rule = create_rate_rule(room)
+    doctor = TenantDoctorProfile.objects.create(
+        user=create_user("doctor-descuento-crud@example.com")
+    )
+    client.force_login(user)
+
+    room_create_response = client.post(
+        "/descuentos-consultorio/nuevo/",
+        {
+            "clinic": str(room.clinic.pk),
+            "room": str(room.pk),
+            "rate_rule": str(rule.pk),
+            "percentage": "10.0",
+            "start_date": "2026-06-29",
+            "end_date": "",
+        },
+    )
+    room_discount = RoomRateDiscount.objects.get(room=room, rate_rule=rule)
+    room_toggle_response = client.post(
+        f"/descuentos-consultorio/{room_discount.pk}/activar-desactivar/"
+    )
+
+    tenant_create_response = client.post(
+        "/descuentos-arrendatario/nuevo/",
+        {
+            "tenant_doctor": str(doctor.pk),
+            "percentage": "15.0",
+            "start_date": "2026-06-29",
+            "end_date": "",
+        },
+    )
+    tenant_discount = TenantDoctorDiscount.objects.get(tenant_doctor=doctor)
+    tenant_toggle_response = client.post(
+        f"/descuentos-arrendatario/{tenant_discount.pk}/activar-desactivar/"
+    )
+
+    assert room_create_response.status_code == 302
+    assert room_toggle_response.status_code == 302
+    assert tenant_create_response.status_code == 302
+    assert tenant_toggle_response.status_code == 302
+    assert TraceEvent.objects.filter(event_type="room_rate_discount.created").exists()
+    assert TraceEvent.objects.filter(
+        event_type="room_rate_discount.deactivated"
+    ).exists()
+    assert TraceEvent.objects.filter(
+        event_type="tenant_doctor_discount.created"
+    ).exists()
+    assert TraceEvent.objects.filter(
+        event_type="tenant_doctor_discount.deactivated"
+    ).exists()

@@ -1,5 +1,6 @@
 """Finance views for rate rules and manual payments."""
 
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, cast
 
@@ -24,11 +25,19 @@ from apps.finance.forms import (
     PaymentRejectForm,
     RateRuleFilterForm,
     RateRuleForm,
+    RoomRateDiscountForm,
     SettlementFilterForm,
     SettlementGenerateForm,
     SettlementPaidForm,
+    TenantDoctorDiscountForm,
 )
-from apps.finance.models import Payment, RateRule, Settlement
+from apps.finance.models import (
+    Payment,
+    RateRule,
+    RoomRateDiscount,
+    Settlement,
+    TenantDoctorDiscount,
+)
 from apps.finance.services.payment_service import (
     cancel_payment,
     get_payment_summary_for_reservation,
@@ -309,6 +318,189 @@ class RateRuleCreateView(RateRuleFormView):
 
 class RateRuleUpdateView(RateRuleFormView):
     pass
+
+
+@dataclass(frozen=True)
+class DiscountResource:
+    model: type[Model]
+    form_class: type[ModelForm]
+    page_title: str
+    singular_label: str
+    create_url_name: str
+    list_url_name: str
+    toggle_url_name: str
+    create_event_type: str
+    activate_event_type: str
+    deactivate_event_type: str
+    list_columns: tuple[tuple[str, str], ...]
+    select_related: tuple[str, ...]
+
+
+ROOM_RATE_DISCOUNT = DiscountResource(
+    model=RoomRateDiscount,
+    form_class=RoomRateDiscountForm,
+    page_title="Descuentos por consultorio",
+    singular_label="descuento por consultorio",
+    create_url_name="room_rate_discount_create",
+    list_url_name="room_rate_discounts",
+    toggle_url_name="room_rate_discount_toggle",
+    create_event_type="room_rate_discount.created",
+    activate_event_type="room_rate_discount.activated",
+    deactivate_event_type="room_rate_discount.deactivated",
+    list_columns=(
+        ("Consultorio", "room"),
+        ("Regla tarifaria", "rate_rule"),
+        ("Porcentaje", "percentage"),
+        ("Vigencia", "validity"),
+        ("Estado", "is_active"),
+    ),
+    select_related=("room", "room__clinic", "room__owner", "rate_rule"),
+)
+
+TENANT_DOCTOR_DISCOUNT = DiscountResource(
+    model=TenantDoctorDiscount,
+    form_class=TenantDoctorDiscountForm,
+    page_title="Descuentos por médico arrendatario",
+    singular_label="descuento por médico arrendatario",
+    create_url_name="tenant_doctor_discount_create",
+    list_url_name="tenant_doctor_discounts",
+    toggle_url_name="tenant_doctor_discount_toggle",
+    create_event_type="tenant_doctor_discount.created",
+    activate_event_type="tenant_doctor_discount.activated",
+    deactivate_event_type="tenant_doctor_discount.deactivated",
+    list_columns=(
+        ("Médico arrendatario", "tenant_doctor"),
+        ("Porcentaje", "percentage"),
+        ("Vigencia", "validity"),
+        ("Estado", "is_active"),
+    ),
+    select_related=("tenant_doctor", "tenant_doctor__user"),
+)
+
+
+class DiscountBaseMixin(LoginRequiredMixin):
+    resource: DiscountResource
+
+    def get_queryset(self) -> QuerySet[Any]:
+        queryset = self.resource.model._default_manager.filter(is_deleted=False)
+        if self.resource.select_related:
+            queryset = queryset.select_related(*self.resource.select_related)
+        return scope_queryset_for_user(queryset, self.request.user)
+
+
+class DiscountListView(DiscountBaseMixin, ListView):
+    template_name = "finance/discount_list.html"
+    context_object_name = "objects"
+    paginate_by = 25
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = self.resource.page_title
+        context["resource"] = self.resource
+        context["rows"] = [
+            {
+                "object": item,
+                "cells": [
+                    resolve_discount_value(item, field_path)
+                    for _, field_path in self.resource.list_columns
+                ],
+            }
+            for item in context["objects"]
+        ]
+        return context
+
+
+class DiscountCreateView(DiscountBaseMixin, FormMixin, TemplateView):
+    template_name = "finance/discount_form.html"
+
+    def get_form_class(self) -> type[ModelForm]:
+        return self.resource.form_class
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        kwargs["filter_data"] = self.request.GET
+        kwargs["initial"] = {
+            **kwargs.get("initial", {}),
+            **_initial_from_query_data(self.request),
+        }
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = f"Alta de {self.resource.singular_label}"
+        context["resource"] = self.resource
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        if form.is_valid():
+            return self.form_valid(form)
+        return self.form_invalid(form)
+
+    def form_valid(self, form: ModelForm) -> HttpResponse:
+        instance = form.save(commit=False)
+        instance.created_by = cast(Any, self.request.user)
+        instance.updated_by = cast(Any, self.request.user)
+        instance.is_active = True
+        instance.save()
+        record_event(
+            event_type=self.resource.create_event_type,
+            object_label=str(instance),
+            actor=cast(Model, self.request.user),
+            payload=_discount_trace_payload(instance, action="create"),
+        )
+        messages.success(self.request, "Descuento guardado.")
+        return redirect(self.resource.list_url_name)
+
+
+class DiscountToggleView(DiscountBaseMixin, TemplateView):
+    http_method_names = ["post"]
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        instance = self.get_queryset().get(pk=self.kwargs["pk"])
+        instance.is_active = not instance.is_active
+        instance.updated_by = cast(Any, request.user)
+        instance.save(update_fields=["is_active", "updated_by", "updated_at"])
+        event_type = (
+            self.resource.activate_event_type
+            if instance.is_active
+            else self.resource.deactivate_event_type
+        )
+        action = "activate" if instance.is_active else "deactivate"
+        record_event(
+            event_type=event_type,
+            object_label=str(instance),
+            actor=cast(Model, request.user),
+            payload=_discount_trace_payload(instance, action=action),
+        )
+        state = "activado" if instance.is_active else "desactivado"
+        messages.success(request, f"Descuento {state}.")
+        return redirect(self.resource.list_url_name)
+
+
+class RoomRateDiscountListView(DiscountListView):
+    resource = ROOM_RATE_DISCOUNT
+
+
+class RoomRateDiscountCreateView(DiscountCreateView):
+    resource = ROOM_RATE_DISCOUNT
+
+
+class RoomRateDiscountToggleView(DiscountToggleView):
+    resource = ROOM_RATE_DISCOUNT
+
+
+class TenantDoctorDiscountListView(DiscountListView):
+    resource = TENANT_DOCTOR_DISCOUNT
+
+
+class TenantDoctorDiscountCreateView(DiscountCreateView):
+    resource = TENANT_DOCTOR_DISCOUNT
+
+
+class TenantDoctorDiscountToggleView(DiscountToggleView):
+    resource = TENANT_DOCTOR_DISCOUNT
 
 
 class PaymentListView(LoginRequiredMixin, ListView):
@@ -755,3 +947,46 @@ def _trace_payload(instance: RateRule) -> dict[str, str]:
         "currency": instance.currency,
         "priority": str(instance.priority),
     }
+
+
+def resolve_discount_value(instance: Model, field_path: str) -> str:
+    discount = cast(Any, instance)
+    if field_path == "percentage":
+        return f"{discount.percentage}%"
+    if field_path == "validity":
+        start_date = discount.start_date
+        end_date = discount.end_date
+        start_text = f"{start_date:%Y-%m-%d}" if start_date else "Sin inicio"
+        end_text = f"{end_date:%Y-%m-%d}" if end_date else "Sin fin"
+        return f"{start_text} a {end_text}"
+
+    value: Any = instance
+    for attr in field_path.split("."):
+        value = getattr(value, attr)
+        if callable(value):
+            value = value()
+
+    if isinstance(value, bool):
+        return "Activo" if value else "Inactivo"
+    if isinstance(value, date):
+        return f"{value:%Y-%m-%d}"
+    return str(value) if value not in ("", None) else "Sin datos"
+
+
+def _discount_trace_payload(instance: Model, *, action: str) -> dict[str, str]:
+    discount = cast(Any, instance)
+    payload = {
+        "model": instance._meta.label,
+        "id": str(instance.pk),
+        "level": "financiero",
+        "action": action,
+        "percentage": str(discount.percentage),
+        "start_date": discount.start_date.isoformat(),
+        "end_date": discount.end_date.isoformat() if discount.end_date else "",
+    }
+    if isinstance(instance, RoomRateDiscount):
+        payload["room"] = str(instance.room)
+        payload["rate_rule"] = str(instance.rate_rule)
+    if isinstance(instance, TenantDoctorDiscount):
+        payload["tenant_doctor"] = str(instance.tenant_doctor)
+    return payload

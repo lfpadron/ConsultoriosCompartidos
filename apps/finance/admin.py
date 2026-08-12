@@ -2,7 +2,14 @@
 
 from django.contrib import admin
 
-from apps.finance.models import Payment, RateRule, Settlement, Statement
+from apps.finance.models import (
+    Payment,
+    RateRule,
+    RoomRateDiscount,
+    Settlement,
+    Statement,
+    TenantDoctorDiscount,
+)
 
 
 @admin.register(RateRule)
@@ -20,6 +27,33 @@ class RateRuleAdmin(admin.ModelAdmin):
     search_fields = ("name", "room__name", "room__clinic__name")
 
 
+@admin.register(RoomRateDiscount)
+class RoomRateDiscountAdmin(admin.ModelAdmin):
+    list_display = (
+        "room",
+        "rate_rule",
+        "percentage",
+        "start_date",
+        "end_date",
+        "is_active",
+    )
+    list_filter = ("is_active", "room__clinic", "start_date")
+    search_fields = ("room__name", "room__clinic__name", "rate_rule__name")
+
+
+@admin.register(TenantDoctorDiscount)
+class TenantDoctorDiscountAdmin(admin.ModelAdmin):
+    list_display = (
+        "tenant_doctor",
+        "percentage",
+        "start_date",
+        "end_date",
+        "is_active",
+    )
+    list_filter = ("is_active", "start_date")
+    search_fields = ("tenant_doctor__display_name", "tenant_doctor__user__email")
+
+
 @admin.register(Statement)
 class StatementAdmin(admin.ModelAdmin):
     list_display = (
@@ -27,6 +61,8 @@ class StatementAdmin(admin.ModelAdmin):
         "version",
         "status",
         "subtotal",
+        "discounts",
+        "tariff_final",
         "total_doctor",
         "platform_commission",
         "owner_net",

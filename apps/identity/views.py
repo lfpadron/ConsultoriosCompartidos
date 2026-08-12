@@ -23,6 +23,7 @@ from apps.identity.forms import (
     ForcedPasswordChangeForm,
     ManagedUserFilterForm,
     ManagedUserForm,
+    ProfilePasswordChangeForm,
 )
 from apps.identity.models import CustomUser, UserRole
 from apps.identity.services import send_user_invitation
@@ -253,6 +254,34 @@ class ForcedPasswordChangeView(LoginRequiredMixin, FormView):
         )
         messages.success(self.request, "Contraseña actualizada.")
         return redirect("dashboard")
+
+
+class ProfileView(LoginRequiredMixin, FormView):
+    template_name = "identity/profile.html"
+    form_class = ProfilePasswordChangeForm
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Perfil"
+        context["profile_user"] = self.request.user
+        return context
+
+    def form_valid(self, form: ProfilePasswordChangeForm) -> HttpResponse:
+        user = form.save()
+        update_session_auth_hash(self.request, user)
+        record_event(
+            event_type="identity.profile.password_changed",
+            object_label=user.email,
+            actor=cast(Model, user),
+            payload={"user_id": str(user.pk), "role": user.role, "field": "password"},
+        )
+        messages.success(self.request, "Contraseña actualizada.")
+        return redirect("profile")
 
 
 def scope_users_for_manager(

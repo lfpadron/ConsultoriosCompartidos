@@ -121,8 +121,14 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
         "scheduling.AvailabilityRule",
         "scheduling.AvailabilityException",
         "finance.RateRule",
+        "finance.RoomRateDiscount",
     }:
         return queryset.filter(room__clinic__in=clinics)
+    if model_label == "finance.TenantDoctorDiscount":
+        return queryset.filter(
+            Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
+            | Q(tenant_doctor__reservations__room__clinic__in=clinics)
+        ).distinct()
     if model_label == "scheduling.Reservation":
         return queryset.filter(room__clinic__in=clinics)
     if model_label == "finance.Statement":
@@ -156,6 +162,13 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
         return queryset.filter(room__owner=owner)
     if model_label == "finance.Statement":
         return queryset.filter(reservation__room__owner=owner)
+    if model_label == "finance.RoomRateDiscount":
+        return queryset.filter(room__owner=owner)
+    if model_label == "finance.TenantDoctorDiscount":
+        return queryset.filter(
+            Q(tenant_doctor__assigned_rooms__owner=owner)
+            | Q(tenant_doctor__reservations__room__owner=owner)
+        ).distinct()
     if model_label == "finance.Settlement":
         return queryset.filter(owner=owner)
     if model_label == "vault.DocumentAsset":
@@ -183,6 +196,10 @@ def _scope_tenant_doctor_queryset(
         return queryset.filter(tenant_doctor=tenant_doctor)
     if model_label == "finance.Statement":
         return queryset.filter(reservation__tenant_doctor=tenant_doctor)
+    if model_label == "finance.RoomRateDiscount" and assigned_rooms.exists():
+        return queryset.filter(room__in=assigned_rooms)
+    if model_label == "finance.TenantDoctorDiscount":
+        return queryset.filter(tenant_doctor=tenant_doctor)
     if model_label == "finance.Payment":
         return queryset.filter(tenant_doctor=tenant_doctor)
     if model_label == "vault.DocumentAsset":
@@ -210,6 +227,13 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
         return queryset.filter(room__owner__in=owners)
     if model_label == "finance.Statement":
         return queryset.filter(reservation__room__owner__in=owners)
+    if model_label == "finance.RoomRateDiscount":
+        return queryset.filter(room__owner__in=owners)
+    if model_label == "finance.TenantDoctorDiscount":
+        return queryset.filter(
+            Q(tenant_doctor__assigned_rooms__owner__in=owners)
+            | Q(tenant_doctor__reservations__room__owner__in=owners)
+        ).distinct()
     if model_label == "finance.Payment":
         return queryset.filter(reservation__room__owner__in=owners)
     if model_label == "finance.Settlement":

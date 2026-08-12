@@ -22,6 +22,10 @@ from apps.core.form_utils import (
 )
 from apps.core.permissions import scope_queryset_for_user
 from apps.finance.models import PriceType
+from apps.finance.services.discount_service import (
+    DiscountQuote,
+    calculate_discount_quote,
+)
 from apps.finance.services.pricing_engine import (
     BlockPrice,
     PricingConfigurationError,
@@ -185,6 +189,12 @@ def _unique_time_choices(values: list[time], empty_label: str) -> list[tuple[str
 
 def _price_type_label(price_type: str | None) -> str:
     return dict(PriceType.choices).get(price_type, "Sin tarifa")
+
+
+def _discount_display(discount: Any | None, percentage: Decimal) -> str:
+    if discount is None:
+        return "Sin descuento activo"
+    return f"{percentage}%"
 
 
 class AvailabilityRuleForm(BootstrapModelForm):
@@ -512,6 +522,21 @@ class ReservationRequestForm(BootstrapModelForm):
         required=False,
         disabled=True,
     )
+    room_discount_display = forms.CharField(
+        label="Descuento consultorio",
+        required=False,
+        disabled=True,
+    )
+    tenant_discount_display = forms.CharField(
+        label="Descuento médico arrendatario",
+        required=False,
+        disabled=True,
+    )
+    final_rate_display = forms.CharField(
+        label="Tarifa final",
+        required=False,
+        disabled=True,
+    )
     block_slot = forms.ChoiceField(
         label="Bloque disponible",
         choices=(("", "Selecciona un bloque"),),
@@ -571,6 +596,7 @@ class ReservationRequestForm(BootstrapModelForm):
             tenant_profile = _tenant_doctor_profile_for_user(self.user)
             if tenant_profile and not selected_model_pk(source_data, "tenant_doctor"):
                 self.initial.setdefault("tenant_doctor", tenant_profile.pk)
+                source_data = self.data if self.is_bound else self.initial
 
         set_model_queryset(
             self.fields["room"],
@@ -581,6 +607,7 @@ class ReservationRequestForm(BootstrapModelForm):
             tenant_doctor_queryset,
         )
         self.selected_room = self._selected_room(source_data)
+        self.selected_tenant_doctor = self._selected_tenant_doctor(source_data)
         self.selected_date = _parse_date_value(source_data.get("date"))
         self.available_blocks = self._free_blocks(
             self.selected_room,
@@ -603,6 +630,7 @@ class ReservationRequestForm(BootstrapModelForm):
             else self._first_available_price_type()
         )
         self.schedule_message = self._schedule_message()
+        self.discount_message = ""
         self.pricing_options = self._pricing_options()
         self._configure_schedule_fields()
         self._configure_display_fields()
@@ -677,6 +705,23 @@ class ReservationRequestForm(BootstrapModelForm):
         return (
             ConsultingRoom.objects.filter(pk=room_pk, is_active=True, is_deleted=False)
             .select_related("clinic", "owner")
+            .first()
+        )
+
+    def _selected_tenant_doctor(
+        self,
+        source_data: Any,
+    ) -> TenantDoctorProfile | None:
+        tenant_doctor_pk = selected_model_pk(source_data, "tenant_doctor")
+        if tenant_doctor_pk is None:
+            return None
+        return (
+            TenantDoctorProfile.objects.filter(
+                pk=tenant_doctor_pk,
+                is_active=True,
+                is_deleted=False,
+            )
+            .select_related("user")
             .first()
         )
 
@@ -786,9 +831,25 @@ class ReservationRequestForm(BootstrapModelForm):
             return "No hay tarifa configurada para el horario seleccionado."
         return ""
 
+    def _discount_quote(self, pricing: BlockPrice) -> DiscountQuote | None:
+        if (
+            self.selected_room is None
+            or self.selected_date is None
+            or pricing.applied_rule is None
+            or pricing.subtotal is None
+        ):
+            return None
+        return calculate_discount_quote(
+            room=self.selected_room,
+            tenant_doctor=self.selected_tenant_doctor,
+            rate_rule=pricing.applied_rule,
+            reservation_date=self.selected_date,
+            tariff_total=pricing.subtotal,
+        )
+
     def _pricing_options(self) -> dict[str, Any]:
-        ranges: list[dict[str, str]] = []
-        block_slots: list[dict[str, str]] = []
+        ranges: list[dict[str, Any]] = []
+        block_slots: list[dict[str, Any]] = []
         if self.selected_room is None or self.selected_date is None:
             return {"ranges": ranges, "block_slots": block_slots}
 
@@ -804,6 +865,7 @@ class ReservationRequestForm(BootstrapModelForm):
                 continue
             if pricing.applied_rule is None or pricing.base_rate is None:
                 continue
+            discount_quote = self._discount_quote(pricing)
             option = {
                 "value": _slot_value(block.start_time, block.end_time),
                 "start": _time_value(block.start_time),
@@ -813,6 +875,38 @@ class ReservationRequestForm(BootstrapModelForm):
                 "base_rate": str(pricing.base_rate),
                 "subtotal": str(pricing.subtotal or Decimal("0.00")),
                 "currency": pricing.currency,
+                "has_room_discount": bool(
+                    discount_quote and discount_quote.room_discount
+                ),
+                "has_tenant_discount": bool(
+                    discount_quote and discount_quote.tenant_discount
+                ),
+                "room_discount_percentage": str(
+                    discount_quote.room_discount_percentage
+                    if discount_quote
+                    else Decimal("0.0")
+                ),
+                "tenant_discount_percentage": str(
+                    discount_quote.tenant_discount_percentage
+                    if discount_quote
+                    else Decimal("0.0")
+                ),
+                "applied_discount_percentage": str(
+                    discount_quote.applied_percentage
+                    if discount_quote
+                    else Decimal("0.0")
+                ),
+                "discount_amount": str(
+                    discount_quote.discount_amount
+                    if discount_quote
+                    else Decimal("0.00")
+                ),
+                "tariff_final": str(
+                    discount_quote.tariff_final
+                    if discount_quote
+                    else pricing.subtotal or Decimal("0.00")
+                ),
+                "discount_message": discount_quote.message if discount_quote else "",
             }
             ranges.append(option)
             if pricing.price_type == PriceType.BLOCK:
@@ -892,6 +986,7 @@ class ReservationRequestForm(BootstrapModelForm):
 
         pricing = self.selected_pricing
         if pricing and pricing.applied_rule and pricing.base_rate is not None:
+            discount_quote = self._discount_quote(pricing)
             suffix = "/h" if pricing.price_type == PriceType.HOURLY else " por bloque"
             self.fields["price_type_display"].initial = _price_type_label(
                 pricing.price_type
@@ -902,10 +997,36 @@ class ReservationRequestForm(BootstrapModelForm):
             self.fields["total_rate_display"].initial = (
                 f"{pricing.subtotal} {pricing.currency}"
             )
+            self.fields["room_discount_display"].initial = _discount_display(
+                discount_quote.room_discount if discount_quote else None,
+                (
+                    discount_quote.room_discount_percentage
+                    if discount_quote
+                    else Decimal("0.0")
+                ),
+            )
+            self.fields["tenant_discount_display"].initial = _discount_display(
+                discount_quote.tenant_discount if discount_quote else None,
+                (
+                    discount_quote.tenant_discount_percentage
+                    if discount_quote
+                    else Decimal("0.0")
+                ),
+            )
+            final_rate = (
+                discount_quote.tariff_final if discount_quote else pricing.subtotal
+            )
+            self.fields["final_rate_display"].initial = (
+                f"{final_rate} {pricing.currency}"
+            )
+            self.discount_message = discount_quote.message if discount_quote else ""
         else:
             self.fields["price_type_display"].initial = "Sin tarifa"
             self.fields["rate_amount_display"].initial = "Sin tarifa configurada"
             self.fields["total_rate_display"].initial = "Sin tarifa configurada"
+            self.fields["room_discount_display"].initial = "Sin descuento activo"
+            self.fields["tenant_discount_display"].initial = "Sin descuento activo"
+            self.fields["final_rate_display"].initial = "Sin tarifa configurada"
 
     @staticmethod
     def _interval_within_free_block(
