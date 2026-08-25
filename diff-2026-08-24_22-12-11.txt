@@ -1,0 +1,15 @@
+diff --git a/podman-compose.yml b/podman-compose.yml
+index 5b347fe..80627bb 100644
+--- a/podman-compose.yml
++++ b/podman-compose.yml
+@@ -82,8 +82,8 @@ services:
+   redis:
+     image: redis:7-alpine
+     restart: unless-stopped
+-    ports:
+-      - "6379:6379"
++    expose:
++      - "6379"
+     volumes:
+       - redis_data:/data
+ 
