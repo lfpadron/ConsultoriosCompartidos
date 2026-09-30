@@ -1,7 +1,7 @@
 """Reservation workflow services."""
 
 from dataclasses import dataclass
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
@@ -28,9 +28,14 @@ from apps.scheduling.models import (
     ReservationBatch,
     ReservationBatchStatus,
     ReservationBatchType,
+    ReservationDeadlinePolicy,
     ReservationStatus,
 )
 from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
+from apps.scheduling.services.deadline_service import (
+    calculate_payment_deadline,
+    persist_deadline_exception,
+)
 
 MAX_RECURRING_OCCURRENCES = 53
 
@@ -185,7 +190,10 @@ def create_reservation_batch(
     recurrence_end_date: date | None = None,
     notes: str = "",
     actor: Model | None = None,
+    requested_at: datetime | None = None,
+    deadline_exception_reason: str = "",
 ) -> ReservationBatch:
+    request_timestamp = requested_at or timezone.now()
     locked_room = (
         ConsultingRoom.objects.select_for_update()
         .select_related("clinic", "owner", "owner__user")
@@ -217,6 +225,14 @@ def create_reservation_batch(
     occurrence_dates = [
         occurrence.reservation_date for occurrence in preview.occurrences
     ]
+    deadline_quote = calculate_payment_deadline(
+        room=locked_room,
+        first_reservation_date=occurrence_dates[0],
+        first_start_time=start_time,
+        requested_at=request_timestamp,
+        actor=actor,
+        late_exception_reason=deadline_exception_reason,
+    )
     batch_type = (
         ReservationBatchType.RECURRING
         if len(occurrence_dates) > 1
@@ -237,12 +253,30 @@ def create_reservation_batch(
         cancellation_policy=cancellation_policy,
         cancellation_policy_snapshot=_cancellation_policy_snapshot(cancellation_policy),
         cancellation_terms_accepted_at=accepted_at,
+        payment_deadline_at=(
+            deadline_quote.deadline_at if deadline_quote is not None else None
+        ),
+        deadline_policy=(
+            deadline_quote.deadline_policy
+            if deadline_quote is not None
+            else ReservationDeadlinePolicy.PENDING_CONFIGURATION
+        ),
+        deadline_policy_snapshot=(
+            deadline_quote.snapshot if deadline_quote is not None else {}
+        ),
+        requested_at=request_timestamp,
         notes=notes,
     )
     if actor is not None:
         batch.created_by = cast(Any, actor)
         batch.updated_by = cast(Any, actor)
     batch.save()
+    if deadline_quote is not None:
+        persist_deadline_exception(
+            batch=batch,
+            quote=deadline_quote,
+            actor=actor,
+        )
 
     reservations: list[Reservation] = []
     for occurrence in preview.occurrences:
@@ -296,6 +330,8 @@ def create_reservation(
     end_time: time,
     notes: str = "",
     actor: Model | None = None,
+    requested_at: datetime | None = None,
+    deadline_exception_reason: str = "",
 ) -> Reservation:
     batch = create_reservation_batch(
         room=room,
@@ -305,6 +341,8 @@ def create_reservation(
         end_time=end_time,
         notes=notes,
         actor=actor,
+        requested_at=requested_at,
+        deadline_exception_reason=deadline_exception_reason,
     )
     return batch.reservations.get()
 
@@ -583,6 +621,12 @@ def _batch_payload(batch: ReservationBatch) -> dict[str, Any]:
         "tariff_final": str(batch.tariff_final),
         "currency": batch.currency,
         "deadline_policy": batch.deadline_policy,
+        "payment_deadline_at": (
+            batch.payment_deadline_at.isoformat()
+            if batch.payment_deadline_at is not None
+            else None
+        ),
+        "deadline_policy_snapshot": batch.deadline_policy_snapshot,
         "cancellation_policy_id": (
             str(batch.cancellation_policy_id) if batch.cancellation_policy_id else None
         ),

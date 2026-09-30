@@ -87,6 +87,12 @@ SCREEN_DEFINITIONS = (
         "cancellation_policies",
         "bi-calendar-x",
     ),
+    ScreenDefinition(
+        "payment_deadlines",
+        "Plazos de Pago",
+        "payment_deadlines",
+        "bi-hourglass-split",
+    ),
     ScreenDefinition("payments", "Pagos", "payments", "bi-credit-card"),
     ScreenDefinition("settlements", "Liquidaciones", "settlements", "bi-bank"),
     ScreenDefinition("documents", "Documentos", "documents", "bi-file-earmark-pdf"),
@@ -130,6 +136,7 @@ EXACT_ROUTE_SCREENS = {
     "owner_terms": "owner_terms",
     "room_fees": "room_fees",
     "cancellation_policies": "cancellation_policies",
+    "payment_deadlines": "payment_deadlines",
     "payments": "payments",
     "settlements": "settlements",
     "documents": "documents",
@@ -150,6 +157,8 @@ ROUTE_PREFIX_SCREENS = (
     ("room_fixed_fee_", "room_fees"),
     ("room_monthly_fee_", "room_fees"),
     ("cancellation_policy_", "cancellation_policies"),
+    ("reservation_payment_policy_", "payment_deadlines"),
+    ("payment_deadline_exception_", "payment_deadlines"),
     ("tenant_doctor_discount_", "tenant_doctor_discounts"),
     ("room_rate_discount_", "room_rate_discounts"),
     ("tenant_doctor_", "tenant_doctors"),
@@ -220,6 +229,9 @@ EDIT_ROUTE_NAMES = {
     "room_monthly_fee_toggle",
     "cancellation_policy_create",
     "cancellation_policy_toggle",
+    "reservation_payment_policy_create",
+    "reservation_payment_policy_toggle",
+    "payment_deadline_exception_create",
     "payment_register",
     "payment_validate",
     "payment_reject",
@@ -278,6 +290,7 @@ def default_access_for_role(role: str, screen_key: str) -> str:
         "owner_terms",
         "room_fees",
         "cancellation_policies",
+        "payment_deadlines",
     }:
         if role in {UserRole.SUPERADMIN, UserRole.ADMIN}:
             return ScreenAccessLevel.EDIT

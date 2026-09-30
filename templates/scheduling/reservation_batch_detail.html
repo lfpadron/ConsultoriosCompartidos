@@ -32,9 +32,35 @@
         <dd class="col-sm-8 col-lg-9">{{ reservation_batch.tariff_final }} {{ reservation_batch.currency }}</dd>
         <dt class="col-sm-4 col-lg-3 text-secondary">Política de cancelación</dt>
         <dd class="col-sm-8 col-lg-9">{{ reservation_batch.cancellation_policy|default:"Sin política activa" }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Fecha límite de pago</dt>
+        <dd class="col-sm-8 col-lg-9">
+          {% if reservation_batch.payment_deadline_at %}
+            {{ reservation_batch.payment_deadline_at|clinic_datetime:reservation_batch.room }}
+            <span class="text-secondary">({{ reservation_batch.room.clinic.timezone }})</span>
+          {% else %}
+            Pendiente de configurar
+          {% endif %}
+        </dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Regla de vencimiento</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.get_deadline_policy_display }}</dd>
+        {% if reservation_batch.deadline_exception %}
+          <dt class="col-sm-4 col-lg-3 text-secondary">Excepción autorizada</dt>
+          <dd class="col-sm-8 col-lg-9">
+            {{ reservation_batch.deadline_exception.get_exception_type_display }}:
+            {{ reservation_batch.deadline_exception.reason }}
+          </dd>
+        {% endif %}
         <dt class="col-sm-4 col-lg-3 text-secondary">Notas</dt>
         <dd class="col-sm-8 col-lg-9">{{ reservation_batch.notes|default:"Sin notas"|linebreaksbr }}</dd>
       </dl>
+      {% if can_apply_deadline_exception %}
+        <div class="d-flex justify-content-end mt-3">
+          <a class="btn btn-outline-warning" href="{% url 'payment_deadline_exception_create' reservation_batch.pk %}">
+            <i class="bi bi-clock-history me-1"></i>
+            Aplicar regla de horas
+          </a>
+        </div>
+      {% endif %}
     </div>
 
     <div class="status-panel p-3 p-lg-4">

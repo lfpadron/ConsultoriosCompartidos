@@ -5,8 +5,10 @@ from django.contrib import admin
 from apps.scheduling.models import (
     AvailabilityException,
     AvailabilityRule,
+    PaymentDeadlineException,
     Reservation,
     ReservationBatch,
+    ReservationPaymentPolicy,
     Weekday,
     rule_weekdays,
 )
@@ -80,3 +82,34 @@ class ReservationBatchAdmin(admin.ModelAdmin):
         "tenant_doctor__display_name",
         "tenant_doctor__user__email",
     )
+
+
+@admin.register(ReservationPaymentPolicy)
+class ReservationPaymentPolicyAdmin(admin.ModelAdmin):
+    list_display = (
+        "clinic",
+        "room",
+        "hours_before_start",
+        "advance_rule_enabled",
+        "automatic_cancellation",
+        "start_date",
+        "end_date",
+        "version",
+        "is_active",
+    )
+    list_filter = ("clinic", "advance_rule_enabled", "is_active")
+    search_fields = ("clinic__name", "room__name", "notes")
+
+
+@admin.register(PaymentDeadlineException)
+class PaymentDeadlineExceptionAdmin(admin.ModelAdmin):
+    list_display = (
+        "batch",
+        "exception_type",
+        "previous_deadline_at",
+        "replacement_deadline_at",
+        "authorized_by",
+        "applied_at",
+    )
+    list_filter = ("exception_type", "batch__room__clinic")
+    search_fields = ("batch__reference", "reason", "authorized_by__email")

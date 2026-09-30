@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <section id="deadline-exception-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#deadline-exception-content" hx-select="#deadline-exception-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Plazos de pago</p>
+        <h1 class="h4 mb-0">Excepción para {{ reservation_batch.reference }}</h1>
+      </div>
+      <a class="btn btn-outline-secondary" href="{% url 'reservation_batch_detail' reservation_batch.pk %}">
+        <i class="bi bi-arrow-left me-1"></i>
+        Volver al grupo
+      </a>
+    </div>
+
+    <div class="alert alert-warning" role="alert">
+      El vencimiento actual es
+      <strong>{{ reservation_batch.payment_deadline_at|clinic_datetime:reservation_batch.room }}</strong>.
+      Al confirmar, se sustituirá por la regla de horas congelada al crear la reservación.
+    </div>
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
+      {% endif %}
+      <div>
+        <label class="form-label" for="{{ form.reason.id_for_label }}">{{ form.reason.label }}</label>
+        {{ form.reason }}
+        {% for error in form.reason.errors %}
+          <div class="invalid-feedback d-block">{{ error }}</div>
+        {% endfor %}
+      </div>
+      <div class="d-flex justify-content-end gap-2 mt-4">
+        <a class="btn btn-outline-secondary" href="{% url 'reservation_batch_detail' reservation_batch.pk %}">
+          <i class="bi bi-x-lg me-1"></i>
+          Cancelar
+        </a>
+        <button class="btn btn-warning" type="submit">
+          <i class="bi bi-clock-history me-1"></i>
+          Aplicar excepción
+        </button>
+      </div>
+    </form>
+  </section>
+{% endblock %}

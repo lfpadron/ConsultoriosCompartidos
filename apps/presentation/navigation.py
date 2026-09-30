@@ -31,6 +31,7 @@ PAGE_TITLES = {
     "owner_terms": "Comisiones y pagos a propietarios",
     "room_fees": "Cuotas por consultorio",
     "cancellation_policies": "Políticas de cancelación",
+    "payment_deadlines": "Plazos de pago de reservaciones",
     "payments": "Pagos",
     "settlements": "Liquidaciones",
     "documents": "Documentos",

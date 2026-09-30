@@ -6,11 +6,13 @@ from datetime import date, time
 from decimal import Decimal
 from typing import Any
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+from apps.billing.models import VersionedConfiguration
 from apps.core.constants import DEFAULT_CURRENCY
 from apps.core.models import BaseModel
 
@@ -249,6 +251,78 @@ class ReservationDeadlinePolicy(models.TextChoices):
     HOURS_BEFORE = "hours_before", _("Horas antes")
     PREVIOUS_DAY = "previous_day", _("Día calendario anterior")
     EXCEPTION_HOURS = "exception_hours", _("Excepción: horas antes")
+    ADMIN_OVERRIDE = "admin_override", _("Excepción administrativa")
+
+
+class PaymentDeadlineExceptionType(models.TextChoices):
+    HOURS_RULE = "hours_rule", _("Aplicar regla de horas")
+    LATE_BOOKING = "late_booking", _("Reservación posterior al vencimiento")
+
+
+class ReservationPaymentPolicy(VersionedConfiguration):
+    clinic = models.ForeignKey(
+        "catalog.Clinic",
+        on_delete=models.PROTECT,
+        related_name="reservation_payment_policies",
+        verbose_name=_("clínica"),
+    )
+    room = models.ForeignKey(
+        "catalog.ConsultingRoom",
+        on_delete=models.PROTECT,
+        related_name="reservation_payment_policies",
+        verbose_name=_("consultorio específico"),
+        blank=True,
+        null=True,
+    )
+    hours_before_start = models.PositiveSmallIntegerField(
+        _("horas antes del inicio"),
+        default=4,
+    )
+    advance_rule_enabled = models.BooleanField(
+        _("usar regla del día anterior para reservaciones anticipadas"),
+        default=True,
+    )
+    automatic_cancellation = models.BooleanField(
+        _("cancelar automáticamente al vencer"),
+        default=True,
+    )
+
+    immutable_fields = VersionedConfiguration.immutable_fields + (
+        "clinic_id",
+        "room_id",
+        "hours_before_start",
+        "advance_rule_enabled",
+        "automatic_cancellation",
+    )
+
+    class Meta:
+        verbose_name = _("política de pago de reservación")
+        verbose_name_plural = _("políticas de pago de reservaciones")
+        ordering = ("clinic__name", "room__name", "-start_date", "-version")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("clinic", "room", "version"),
+                name="scheduling_payment_policy_unique_version",
+            )
+        ]
+
+    def __str__(self) -> str:
+        scope = self.room or self.clinic
+        return f"{scope} - {self.hours_before_start} horas v{self.version}"
+
+    def version_scope(self) -> dict[str, Any]:
+        return {"clinic_id": self.clinic_id, "room_id": self.room_id}
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        room = self.room
+        if room is not None and self.clinic_id and room.clinic_id != self.clinic_id:
+            errors["room"] = _("El consultorio debe pertenecer a la clínica elegida.")
+        if errors:
+            raise ValidationError(errors)
+        if self.clinic_id:
+            self.clean_active_overlap(clinic_id=self.clinic_id, room_id=self.room_id)
 
 
 def generate_reservation_batch_reference() -> str:
@@ -393,6 +467,86 @@ class ReservationBatch(BaseModel):
                 errors["cancellation_policy"] = _(
                     "La política no corresponde al consultorio seleccionado."
                 )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class PaymentDeadlineException(BaseModel):
+    batch = models.OneToOneField(
+        ReservationBatch,
+        on_delete=models.PROTECT,
+        related_name="deadline_exception",
+        verbose_name=_("grupo de reservaciones"),
+    )
+    exception_type = models.CharField(
+        _("tipo de excepción"),
+        max_length=24,
+        choices=PaymentDeadlineExceptionType.choices,
+        default=PaymentDeadlineExceptionType.HOURS_RULE,
+    )
+    reason = models.TextField(_("motivo"))
+    previous_deadline_at = models.DateTimeField(_("vencimiento anterior"))
+    replacement_deadline_at = models.DateTimeField(_("nuevo vencimiento"))
+    authorized_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="authorized_payment_deadline_exceptions",
+        verbose_name=_("autorizado por"),
+    )
+    applied_at = models.DateTimeField(_("aplicada en"), default=timezone.now)
+
+    immutable_fields = (
+        "batch_id",
+        "exception_type",
+        "reason",
+        "previous_deadline_at",
+        "replacement_deadline_at",
+        "authorized_by_id",
+        "applied_at",
+    )
+
+    class Meta:
+        verbose_name = _("excepción de vencimiento")
+        verbose_name_plural = _("excepciones de vencimiento")
+        ordering = ("-applied_at",)
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    replacement_deadline_at__gt=models.F("previous_deadline_at")
+                ),
+                name="scheduling_deadline_exception_extends_deadline",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.batch.reference} - {self.get_exception_type_display()}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if not self.reason.strip():
+            errors["reason"] = _("El motivo es obligatorio.")
+        if self.replacement_deadline_at <= self.previous_deadline_at:
+            errors["replacement_deadline_at"] = _(
+                "El nuevo vencimiento debe ser posterior al vencimiento anterior."
+            )
+        if not self._state.adding and self.pk:
+            previous = (
+                type(self)
+                .objects.filter(pk=self.pk)
+                .values(*self.immutable_fields)
+                .first()
+            )
+            if previous is not None:
+                for field_name in self.immutable_fields:
+                    if previous[field_name] != getattr(self, field_name):
+                        errors[field_name] = _(
+                            "La excepción es histórica y no puede modificarse."
+                        )
         if errors:
             raise ValidationError(errors)
 

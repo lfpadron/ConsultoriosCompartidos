@@ -66,11 +66,31 @@ urlpatterns = [
         views.QuickCalendarView.as_view(),
         name="calendar_quick",
     ),
+    path(
+        "configuracion/plazos-pago/",
+        views.ReservationPaymentPolicyListView.as_view(),
+        name="payment_deadlines",
+    ),
+    path(
+        "configuracion/plazos-pago/nueva/",
+        views.ReservationPaymentPolicyCreateView.as_view(),
+        name="reservation_payment_policy_create",
+    ),
+    path(
+        "configuracion/plazos-pago/<uuid:pk>/activar-desactivar/",
+        views.ReservationPaymentPolicyToggleView.as_view(),
+        name="reservation_payment_policy_toggle",
+    ),
     path("reservaciones/", views.ReservationListView.as_view(), name="reservations"),
     path(
         "reservaciones/solicitar/",
         views.ReservationRequestView.as_view(),
         name="reservation_request",
+    ),
+    path(
+        "reservaciones/grupos/<uuid:pk>/excepcion-vencimiento/",
+        views.PaymentDeadlineExceptionCreateView.as_view(),
+        name="payment_deadline_exception_create",
     ),
     path(
         "reservaciones/grupos/<uuid:pk>/",

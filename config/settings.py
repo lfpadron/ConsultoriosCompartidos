@@ -143,6 +143,12 @@ CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=REDIS_URL)
 CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://localhost:6379/1")
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
+CELERY_BEAT_SCHEDULE = {
+    "expire-overdue-reservation-batches": {
+        "task": "scheduling.expire_overdue_reservation_batches",
+        "schedule": 300.0,
+    },
+}
 
 MINIO_STORAGE_ENABLED = env.bool("MINIO_STORAGE_ENABLED", default=False)
 PLATFORM_COMMISSION_RATE = env.float("PLATFORM_COMMISSION_RATE", default=0.10)

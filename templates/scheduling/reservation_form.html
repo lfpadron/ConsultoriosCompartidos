@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 
+{% load clinic_time %}
+
 {% block content %}
   <section id="reservation-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#reservation-content" hx-select="#reservation-content" hx-swap="outerHTML" hx-push-url="true">
     <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
@@ -136,6 +138,18 @@
             <div class="invalid-feedback d-block">{{ error }}</div>
           {% endfor %}
         </div>
+        {% if form.deadline_exception_reason %}
+          <div class="col-12">
+            <label class="form-label" for="{{ form.deadline_exception_reason.id_for_label }}">{{ form.deadline_exception_reason.label }}</label>
+            {{ form.deadline_exception_reason }}
+            {% if form.deadline_exception_reason.help_text %}
+              <div class="form-text">{{ form.deadline_exception_reason.help_text }}</div>
+            {% endif %}
+            {% for error in form.deadline_exception_reason.errors %}
+              <div class="invalid-feedback d-block">{{ error }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
       </div>
 
       {% if batch_preview %}
@@ -158,6 +172,20 @@
             <div class="alert alert-success" role="status">
               Todas las fechas están disponibles. El grupo se volverá a validar al solicitarlo.
             </div>
+            {% if deadline_preview %}
+              <div class="alert alert-info" role="status">
+                <strong>Fecha límite para registrar el comprobante:</strong>
+                {{ deadline_preview.deadline_at|clinic_datetime:deadline_preview.policy.clinic }}.
+                {{ deadline_preview.policy.clinic.timezone }}.
+                {% if deadline_preview.exception_type %}
+                  Se aplicará la excepción administrativa indicada.
+                {% endif %}
+              </div>
+            {% else %}
+              <div class="alert alert-warning" role="status">
+                Esta clínica todavía no tiene una política de vencimiento activa.
+              </div>
+            {% endif %}
           {% endif %}
           <div class="table-responsive">
             <table class="table table-sm align-middle mb-0">

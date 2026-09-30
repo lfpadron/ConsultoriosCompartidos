@@ -21,7 +21,7 @@ from apps.core.form_utils import (
     selected_model_pk,
     style_form_fields,
 )
-from apps.core.permissions import scope_queryset_for_user
+from apps.core.permissions import can_edit_screen, scope_queryset_for_user
 from apps.finance.models import PriceType
 from apps.finance.services.discount_service import (
     DiscountQuote,
@@ -36,6 +36,7 @@ from apps.scheduling.models import (
     AvailabilityException,
     AvailabilityRule,
     Reservation,
+    ReservationPaymentPolicy,
     Weekday,
 )
 from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
@@ -506,6 +507,80 @@ class ReservationFilterForm(OperationalFilterForm):
     pass
 
 
+class ReservationPaymentPolicyForm(BootstrapModelForm):
+    class Meta:
+        model = ReservationPaymentPolicy
+        fields = (
+            "clinic",
+            "room",
+            "hours_before_start",
+            "advance_rule_enabled",
+            "automatic_cancellation",
+            "start_date",
+            "end_date",
+            "notes",
+        )
+        widgets = {
+            "start_date": monday_date_input(),
+            "end_date": monday_date_input(),
+            "notes": forms.Textarea(attrs={"rows": 3}),
+        }
+        help_texts = {
+            "room": (
+                "Déjalo vacío para usar esta política como predeterminada de la "
+                "clínica."
+            ),
+            "hours_before_start": (
+                "Se usa para reservaciones del mismo día o día anterior, y cuando "
+                "la regla anticipada está desactivada."
+            ),
+            "advance_rule_enabled": (
+                "Para reservaciones con dos o más días de anticipación, vence a "
+                "las 23:59:59 del día anterior."
+            ),
+            "automatic_cancellation": (
+                "Al vencer sin comprobante, cancela las ocurrencias pendientes."
+            ),
+            "end_date": "Déjala vacía para vigencia indefinida.",
+        }
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        source_data = self.data if self.is_bound else self.filter_data or self.initial
+        clinic_queryset = _clinic_queryset()
+        room_queryset = ConsultingRoom.objects.filter(is_deleted=False).select_related(
+            "clinic", "owner"
+        )
+        clinic_pk = selected_model_pk(source_data, "clinic")
+        if clinic_pk:
+            room_queryset = room_queryset.filter(clinic_id=clinic_pk)
+            self.initial.setdefault("clinic", clinic_pk)
+        if self.user is not None:
+            clinic_queryset = scope_queryset_for_user(clinic_queryset, self.user)
+            room_queryset = scope_queryset_for_user(room_queryset, self.user)
+        set_model_queryset(self.fields["clinic"], clinic_queryset)
+        set_model_queryset(
+            self.fields["room"],
+            room_queryset.order_by("clinic__name", "name"),
+        )
+        hours = self.fields.get("hours_before_start")
+        if isinstance(hours, forms.IntegerField):
+            hours.min_value = 0
+            hours.widget.attrs["min"] = "0"
+        style_form_fields(self.fields)
+
+
+class PaymentDeadlineExceptionForm(forms.Form):
+    reason = forms.CharField(
+        label="Motivo de la excepción",
+        widget=forms.Textarea(attrs={"rows": 3}),
+    )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        style_form_fields(self.fields)
+
+
 class ReservationRequestForm(BootstrapModelForm):
     BOOKING_TYPE_SINGLE = "single"
     BOOKING_TYPE_WEEKLY = "weekly"
@@ -525,6 +600,15 @@ class ReservationRequestForm(BootstrapModelForm):
         label="Repetir semanalmente hasta",
         required=False,
         widget=forms.DateInput(attrs={"type": "date"}),
+    )
+    deadline_exception_reason = forms.CharField(
+        label="Motivo de excepción administrativa",
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 2}),
+        help_text=(
+            "Sólo se usa cuando el plazo normal ya venció; el pago deberá "
+            "registrarse antes del inicio de la reservación."
+        ),
     )
     clinic_info = forms.CharField(
         label="Texto informativo de la clínica",
@@ -596,6 +680,11 @@ class ReservationRequestForm(BootstrapModelForm):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        if self.user is None or not can_edit_screen(
+            self.user,
+            "payment_deadlines",
+        ):
+            self.fields.pop("deadline_exception_reason", None)
         self.fields["room"].label = "Consultorio"
         self.fields["tenant_doctor"].label = "Médico arrendatario"
         self.fields["start_time"].label = "Hora de inicio"

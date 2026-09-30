@@ -1,0 +1,1089 @@
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index 7cec435..1e22978 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -254,6 +254,10 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
+         return queryset.filter(clinic__in=clinics)
+     if model_label == "billing.CancellationPenaltyRule":
+         return queryset.filter(policy__clinic__in=clinics)
++    if model_label == "scheduling.ReservationPaymentPolicy":
++        return queryset.filter(clinic__in=clinics)
++    if model_label == "scheduling.PaymentDeadlineException":
++        return queryset.filter(batch__room__clinic__in=clinics)
+     if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
+         return queryset.filter(room__clinic__in=clinics)
+     if model_label == "finance.Statement":
+@@ -318,6 +322,13 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
+                 policy__clinic__consulting_rooms__owner=owner,
+             )
+         ).distinct()
++    if model_label == "scheduling.ReservationPaymentPolicy":
++        return queryset.filter(
++            Q(room__owner=owner)
++            | Q(room__isnull=True, clinic__consulting_rooms__owner=owner)
++        ).distinct()
++    if model_label == "scheduling.PaymentDeadlineException":
++        return queryset.filter(batch__room__owner=owner)
+     if model_label == "finance.Settlement":
+         return queryset.filter(owner=owner)
+     if model_label == "vault.DocumentAsset":
+@@ -373,6 +384,13 @@ def _scope_tenant_doctor_queryset(
+                 policy__clinic__consulting_rooms__in=assigned_rooms,
+             )
+         ).distinct()
++    if model_label == "scheduling.ReservationPaymentPolicy" and assigned_rooms.exists():
++        return queryset.filter(
++            Q(room__in=assigned_rooms)
++            | Q(room__isnull=True, clinic__consulting_rooms__in=assigned_rooms)
++        ).distinct()
++    if model_label == "scheduling.PaymentDeadlineException":
++        return queryset.filter(batch__tenant_doctor=tenant_doctor)
+     if model_label == "finance.Payment":
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "vault.DocumentAsset":
+@@ -431,6 +449,13 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
+                 policy__clinic__consulting_rooms__owner__in=owners,
+             )
+         ).distinct()
++    if model_label == "scheduling.ReservationPaymentPolicy":
++        return queryset.filter(
++            Q(room__owner__in=owners)
++            | Q(room__isnull=True, clinic__consulting_rooms__owner__in=owners)
++        ).distinct()
++    if model_label == "scheduling.PaymentDeadlineException":
++        return queryset.filter(batch__room__owner__in=owners)
+     if model_label == "finance.Payment":
+         return queryset.filter(reservation__room__owner__in=owners)
+     if model_label == "finance.Settlement":
+diff --git a/apps/identity/screen_registry.py b/apps/identity/screen_registry.py
+index 0d0d6dc..f02a098 100644
+--- a/apps/identity/screen_registry.py
++++ b/apps/identity/screen_registry.py
+@@ -87,6 +87,12 @@ SCREEN_DEFINITIONS = (
+         "cancellation_policies",
+         "bi-calendar-x",
+     ),
++    ScreenDefinition(
++        "payment_deadlines",
++        "Plazos de Pago",
++        "payment_deadlines",
++        "bi-hourglass-split",
++    ),
+     ScreenDefinition("payments", "Pagos", "payments", "bi-credit-card"),
+     ScreenDefinition("settlements", "Liquidaciones", "settlements", "bi-bank"),
+     ScreenDefinition("documents", "Documentos", "documents", "bi-file-earmark-pdf"),
+@@ -130,6 +136,7 @@ EXACT_ROUTE_SCREENS = {
+     "owner_terms": "owner_terms",
+     "room_fees": "room_fees",
+     "cancellation_policies": "cancellation_policies",
++    "payment_deadlines": "payment_deadlines",
+     "payments": "payments",
+     "settlements": "settlements",
+     "documents": "documents",
+@@ -150,6 +157,8 @@ ROUTE_PREFIX_SCREENS = (
+     ("room_fixed_fee_", "room_fees"),
+     ("room_monthly_fee_", "room_fees"),
+     ("cancellation_policy_", "cancellation_policies"),
++    ("reservation_payment_policy_", "payment_deadlines"),
++    ("payment_deadline_exception_", "payment_deadlines"),
+     ("tenant_doctor_discount_", "tenant_doctor_discounts"),
+     ("room_rate_discount_", "room_rate_discounts"),
+     ("tenant_doctor_", "tenant_doctors"),
+@@ -220,6 +229,9 @@ EDIT_ROUTE_NAMES = {
+     "room_monthly_fee_toggle",
+     "cancellation_policy_create",
+     "cancellation_policy_toggle",
++    "reservation_payment_policy_create",
++    "reservation_payment_policy_toggle",
++    "payment_deadline_exception_create",
+     "payment_register",
+     "payment_validate",
+     "payment_reject",
+@@ -278,6 +290,7 @@ def default_access_for_role(role: str, screen_key: str) -> str:
+         "owner_terms",
+         "room_fees",
+         "cancellation_policies",
++        "payment_deadlines",
+     }:
+         if role in {UserRole.SUPERADMIN, UserRole.ADMIN}:
+             return ScreenAccessLevel.EDIT
+diff --git a/apps/presentation/navigation.py b/apps/presentation/navigation.py
+index 32b64aa..c9c141c 100644
+--- a/apps/presentation/navigation.py
++++ b/apps/presentation/navigation.py
+@@ -31,6 +31,7 @@ PAGE_TITLES = {
+     "owner_terms": "Comisiones y pagos a propietarios",
+     "room_fees": "Cuotas por consultorio",
+     "cancellation_policies": "Políticas de cancelación",
++    "payment_deadlines": "Plazos de pago de reservaciones",
+     "payments": "Pagos",
+     "settlements": "Liquidaciones",
+     "documents": "Documentos",
+diff --git a/apps/scheduling/admin.py b/apps/scheduling/admin.py
+index 4f47640..84fa5ca 100644
+--- a/apps/scheduling/admin.py
++++ b/apps/scheduling/admin.py
+@@ -5,8 +5,10 @@ from django.contrib import admin
+ from apps.scheduling.models import (
+     AvailabilityException,
+     AvailabilityRule,
++    PaymentDeadlineException,
+     Reservation,
+     ReservationBatch,
++    ReservationPaymentPolicy,
+     Weekday,
+     rule_weekdays,
+ )
+@@ -80,3 +82,34 @@ class ReservationBatchAdmin(admin.ModelAdmin):
+         "tenant_doctor__display_name",
+         "tenant_doctor__user__email",
+     )
++
++
++@admin.register(ReservationPaymentPolicy)
++class ReservationPaymentPolicyAdmin(admin.ModelAdmin):
++    list_display = (
++        "clinic",
++        "room",
++        "hours_before_start",
++        "advance_rule_enabled",
++        "automatic_cancellation",
++        "start_date",
++        "end_date",
++        "version",
++        "is_active",
++    )
++    list_filter = ("clinic", "advance_rule_enabled", "is_active")
++    search_fields = ("clinic__name", "room__name", "notes")
++
++
++@admin.register(PaymentDeadlineException)
++class PaymentDeadlineExceptionAdmin(admin.ModelAdmin):
++    list_display = (
++        "batch",
++        "exception_type",
++        "previous_deadline_at",
++        "replacement_deadline_at",
++        "authorized_by",
++        "applied_at",
++    )
++    list_filter = ("exception_type", "batch__room__clinic")
++    search_fields = ("batch__reference", "reason", "authorized_by__email")
+diff --git a/apps/scheduling/forms.py b/apps/scheduling/forms.py
+index 72bd26f..81c1735 100644
+--- a/apps/scheduling/forms.py
++++ b/apps/scheduling/forms.py
+@@ -21,7 +21,7 @@ from apps.core.form_utils import (
+     selected_model_pk,
+     style_form_fields,
+ )
+-from apps.core.permissions import scope_queryset_for_user
++from apps.core.permissions import can_edit_screen, scope_queryset_for_user
+ from apps.finance.models import PriceType
+ from apps.finance.services.discount_service import (
+     DiscountQuote,
+@@ -36,6 +36,7 @@ from apps.scheduling.models import (
+     AvailabilityException,
+     AvailabilityRule,
+     Reservation,
++    ReservationPaymentPolicy,
+     Weekday,
+ )
+ from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
+@@ -506,6 +507,80 @@ class ReservationFilterForm(OperationalFilterForm):
+     pass
+ 
+ 
++class ReservationPaymentPolicyForm(BootstrapModelForm):
++    class Meta:
++        model = ReservationPaymentPolicy
++        fields = (
++            "clinic",
++            "room",
++            "hours_before_start",
++            "advance_rule_enabled",
++            "automatic_cancellation",
++            "start_date",
++            "end_date",
++            "notes",
++        )
++        widgets = {
++            "start_date": monday_date_input(),
++            "end_date": monday_date_input(),
++            "notes": forms.Textarea(attrs={"rows": 3}),
++        }
++        help_texts = {
++            "room": (
++                "Déjalo vacío para usar esta política como predeterminada de la "
++                "clínica."
++            ),
++            "hours_before_start": (
++                "Se usa para reservaciones del mismo día o día anterior, y cuando "
++                "la regla anticipada está desactivada."
++            ),
++            "advance_rule_enabled": (
++                "Para reservaciones con dos o más días de anticipación, vence a "
++                "las 23:59:59 del día anterior."
++            ),
++            "automatic_cancellation": (
++                "Al vencer sin comprobante, cancela las ocurrencias pendientes."
++            ),
++            "end_date": "Déjala vacía para vigencia indefinida.",
++        }
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        super().__init__(*args, **kwargs)
++        source_data = self.data if self.is_bound else self.filter_data or self.initial
++        clinic_queryset = _clinic_queryset()
++        room_queryset = ConsultingRoom.objects.filter(is_deleted=False).select_related(
++            "clinic", "owner"
++        )
++        clinic_pk = selected_model_pk(source_data, "clinic")
++        if clinic_pk:
++            room_queryset = room_queryset.filter(clinic_id=clinic_pk)
++            self.initial.setdefault("clinic", clinic_pk)
++        if self.user is not None:
++            clinic_queryset = scope_queryset_for_user(clinic_queryset, self.user)
++            room_queryset = scope_queryset_for_user(room_queryset, self.user)
++        set_model_queryset(self.fields["clinic"], clinic_queryset)
++        set_model_queryset(
++            self.fields["room"],
++            room_queryset.order_by("clinic__name", "name"),
++        )
++        hours = self.fields.get("hours_before_start")
++        if isinstance(hours, forms.IntegerField):
++            hours.min_value = 0
++            hours.widget.attrs["min"] = "0"
++        style_form_fields(self.fields)
++
++
++class PaymentDeadlineExceptionForm(forms.Form):
++    reason = forms.CharField(
++        label="Motivo de la excepción",
++        widget=forms.Textarea(attrs={"rows": 3}),
++    )
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        super().__init__(*args, **kwargs)
++        style_form_fields(self.fields)
++
++
+ class ReservationRequestForm(BootstrapModelForm):
+     BOOKING_TYPE_SINGLE = "single"
+     BOOKING_TYPE_WEEKLY = "weekly"
+@@ -526,6 +601,15 @@ class ReservationRequestForm(BootstrapModelForm):
+         required=False,
+         widget=forms.DateInput(attrs={"type": "date"}),
+     )
++    deadline_exception_reason = forms.CharField(
++        label="Motivo de excepción administrativa",
++        required=False,
++        widget=forms.Textarea(attrs={"rows": 2}),
++        help_text=(
++            "Sólo se usa cuando el plazo normal ya venció; el pago deberá "
++            "registrarse antes del inicio de la reservación."
++        ),
++    )
+     clinic_info = forms.CharField(
+         label="Texto informativo de la clínica",
+         required=False,
+@@ -596,6 +680,11 @@ class ReservationRequestForm(BootstrapModelForm):
+ 
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         super().__init__(*args, **kwargs)
++        if self.user is None or not can_edit_screen(
++            self.user,
++            "payment_deadlines",
++        ):
++            self.fields.pop("deadline_exception_reason", None)
+         self.fields["room"].label = "Consultorio"
+         self.fields["tenant_doctor"].label = "Médico arrendatario"
+         self.fields["start_time"].label = "Hora de inicio"
+diff --git a/apps/scheduling/models.py b/apps/scheduling/models.py
+index 3f44bcb..cd27523 100644
+--- a/apps/scheduling/models.py
++++ b/apps/scheduling/models.py
+@@ -6,11 +6,13 @@ from datetime import date, time
+ from decimal import Decimal
+ from typing import Any
+ 
++from django.conf import settings
+ from django.core.exceptions import ValidationError
+ from django.db import models
+ from django.utils import timezone
+ from django.utils.translation import gettext_lazy as _
+ 
++from apps.billing.models import VersionedConfiguration
+ from apps.core.constants import DEFAULT_CURRENCY
+ from apps.core.models import BaseModel
+ 
+@@ -249,6 +251,78 @@ class ReservationDeadlinePolicy(models.TextChoices):
+     HOURS_BEFORE = "hours_before", _("Horas antes")
+     PREVIOUS_DAY = "previous_day", _("Día calendario anterior")
+     EXCEPTION_HOURS = "exception_hours", _("Excepción: horas antes")
++    ADMIN_OVERRIDE = "admin_override", _("Excepción administrativa")
++
++
++class PaymentDeadlineExceptionType(models.TextChoices):
++    HOURS_RULE = "hours_rule", _("Aplicar regla de horas")
++    LATE_BOOKING = "late_booking", _("Reservación posterior al vencimiento")
++
++
++class ReservationPaymentPolicy(VersionedConfiguration):
++    clinic = models.ForeignKey(
++        "catalog.Clinic",
++        on_delete=models.PROTECT,
++        related_name="reservation_payment_policies",
++        verbose_name=_("clínica"),
++    )
++    room = models.ForeignKey(
++        "catalog.ConsultingRoom",
++        on_delete=models.PROTECT,
++        related_name="reservation_payment_policies",
++        verbose_name=_("consultorio específico"),
++        blank=True,
++        null=True,
++    )
++    hours_before_start = models.PositiveSmallIntegerField(
++        _("horas antes del inicio"),
++        default=4,
++    )
++    advance_rule_enabled = models.BooleanField(
++        _("usar regla del día anterior para reservaciones anticipadas"),
++        default=True,
++    )
++    automatic_cancellation = models.BooleanField(
++        _("cancelar automáticamente al vencer"),
++        default=True,
++    )
++
++    immutable_fields = VersionedConfiguration.immutable_fields + (
++        "clinic_id",
++        "room_id",
++        "hours_before_start",
++        "advance_rule_enabled",
++        "automatic_cancellation",
++    )
++
++    class Meta:
++        verbose_name = _("política de pago de reservación")
++        verbose_name_plural = _("políticas de pago de reservaciones")
++        ordering = ("clinic__name", "room__name", "-start_date", "-version")
++        constraints = [
++            models.UniqueConstraint(
++                fields=("clinic", "room", "version"),
++                name="scheduling_payment_policy_unique_version",
++            )
++        ]
++
++    def __str__(self) -> str:
++        scope = self.room or self.clinic
++        return f"{scope} - {self.hours_before_start} horas v{self.version}"
++
++    def version_scope(self) -> dict[str, Any]:
++        return {"clinic_id": self.clinic_id, "room_id": self.room_id}
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        room = self.room
++        if room is not None and self.clinic_id and room.clinic_id != self.clinic_id:
++            errors["room"] = _("El consultorio debe pertenecer a la clínica elegida.")
++        if errors:
++            raise ValidationError(errors)
++        if self.clinic_id:
++            self.clean_active_overlap(clinic_id=self.clinic_id, room_id=self.room_id)
+ 
+ 
+ def generate_reservation_batch_reference() -> str:
+@@ -401,6 +475,86 @@ class ReservationBatch(BaseModel):
+         super().save(*args, **kwargs)
+ 
+ 
++class PaymentDeadlineException(BaseModel):
++    batch = models.OneToOneField(
++        ReservationBatch,
++        on_delete=models.PROTECT,
++        related_name="deadline_exception",
++        verbose_name=_("grupo de reservaciones"),
++    )
++    exception_type = models.CharField(
++        _("tipo de excepción"),
++        max_length=24,
++        choices=PaymentDeadlineExceptionType.choices,
++        default=PaymentDeadlineExceptionType.HOURS_RULE,
++    )
++    reason = models.TextField(_("motivo"))
++    previous_deadline_at = models.DateTimeField(_("vencimiento anterior"))
++    replacement_deadline_at = models.DateTimeField(_("nuevo vencimiento"))
++    authorized_by = models.ForeignKey(
++        settings.AUTH_USER_MODEL,
++        on_delete=models.PROTECT,
++        related_name="authorized_payment_deadline_exceptions",
++        verbose_name=_("autorizado por"),
++    )
++    applied_at = models.DateTimeField(_("aplicada en"), default=timezone.now)
++
++    immutable_fields = (
++        "batch_id",
++        "exception_type",
++        "reason",
++        "previous_deadline_at",
++        "replacement_deadline_at",
++        "authorized_by_id",
++        "applied_at",
++    )
++
++    class Meta:
++        verbose_name = _("excepción de vencimiento")
++        verbose_name_plural = _("excepciones de vencimiento")
++        ordering = ("-applied_at",)
++        constraints = [
++            models.CheckConstraint(
++                condition=models.Q(
++                    replacement_deadline_at__gt=models.F("previous_deadline_at")
++                ),
++                name="scheduling_deadline_exception_extends_deadline",
++            )
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.batch.reference} - {self.get_exception_type_display()}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if not self.reason.strip():
++            errors["reason"] = _("El motivo es obligatorio.")
++        if self.replacement_deadline_at <= self.previous_deadline_at:
++            errors["replacement_deadline_at"] = _(
++                "El nuevo vencimiento debe ser posterior al vencimiento anterior."
++            )
++        if not self._state.adding and self.pk:
++            previous = (
++                type(self)
++                .objects.filter(pk=self.pk)
++                .values(*self.immutable_fields)
++                .first()
++            )
++            if previous is not None:
++                for field_name in self.immutable_fields:
++                    if previous[field_name] != getattr(self, field_name):
++                        errors[field_name] = _(
++                            "La excepción es histórica y no puede modificarse."
++                        )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
+ class Reservation(BaseModel):
+     batch = models.ForeignKey(
+         ReservationBatch,
+diff --git a/apps/scheduling/services/reservation_service.py b/apps/scheduling/services/reservation_service.py
+index 015f67e..f221105 100644
+--- a/apps/scheduling/services/reservation_service.py
++++ b/apps/scheduling/services/reservation_service.py
+@@ -1,7 +1,7 @@
+ """Reservation workflow services."""
+ 
+ from dataclasses import dataclass
+-from datetime import date, time, timedelta
++from datetime import date, datetime, time, timedelta
+ from decimal import Decimal
+ from typing import Any, cast
+ 
+@@ -28,9 +28,14 @@ from apps.scheduling.models import (
+     ReservationBatch,
+     ReservationBatchStatus,
+     ReservationBatchType,
++    ReservationDeadlinePolicy,
+     ReservationStatus,
+ )
+ from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
++from apps.scheduling.services.deadline_service import (
++    calculate_payment_deadline,
++    persist_deadline_exception,
++)
+ 
+ MAX_RECURRING_OCCURRENCES = 53
+ 
+@@ -185,7 +190,10 @@ def create_reservation_batch(
+     recurrence_end_date: date | None = None,
+     notes: str = "",
+     actor: Model | None = None,
++    requested_at: datetime | None = None,
++    deadline_exception_reason: str = "",
+ ) -> ReservationBatch:
++    request_timestamp = requested_at or timezone.now()
+     locked_room = (
+         ConsultingRoom.objects.select_for_update()
+         .select_related("clinic", "owner", "owner__user")
+@@ -217,6 +225,14 @@ def create_reservation_batch(
+     occurrence_dates = [
+         occurrence.reservation_date for occurrence in preview.occurrences
+     ]
++    deadline_quote = calculate_payment_deadline(
++        room=locked_room,
++        first_reservation_date=occurrence_dates[0],
++        first_start_time=start_time,
++        requested_at=request_timestamp,
++        actor=actor,
++        late_exception_reason=deadline_exception_reason,
++    )
+     batch_type = (
+         ReservationBatchType.RECURRING
+         if len(occurrence_dates) > 1
+@@ -237,12 +253,30 @@ def create_reservation_batch(
+         cancellation_policy=cancellation_policy,
+         cancellation_policy_snapshot=_cancellation_policy_snapshot(cancellation_policy),
+         cancellation_terms_accepted_at=accepted_at,
++        payment_deadline_at=(
++            deadline_quote.deadline_at if deadline_quote is not None else None
++        ),
++        deadline_policy=(
++            deadline_quote.deadline_policy
++            if deadline_quote is not None
++            else ReservationDeadlinePolicy.PENDING_CONFIGURATION
++        ),
++        deadline_policy_snapshot=(
++            deadline_quote.snapshot if deadline_quote is not None else {}
++        ),
++        requested_at=request_timestamp,
+         notes=notes,
+     )
+     if actor is not None:
+         batch.created_by = cast(Any, actor)
+         batch.updated_by = cast(Any, actor)
+     batch.save()
++    if deadline_quote is not None:
++        persist_deadline_exception(
++            batch=batch,
++            quote=deadline_quote,
++            actor=actor,
++        )
+ 
+     reservations: list[Reservation] = []
+     for occurrence in preview.occurrences:
+@@ -296,6 +330,8 @@ def create_reservation(
+     end_time: time,
+     notes: str = "",
+     actor: Model | None = None,
++    requested_at: datetime | None = None,
++    deadline_exception_reason: str = "",
+ ) -> Reservation:
+     batch = create_reservation_batch(
+         room=room,
+@@ -305,6 +341,8 @@ def create_reservation(
+         end_time=end_time,
+         notes=notes,
+         actor=actor,
++        requested_at=requested_at,
++        deadline_exception_reason=deadline_exception_reason,
+     )
+     return batch.reservations.get()
+ 
+@@ -583,6 +621,12 @@ def _batch_payload(batch: ReservationBatch) -> dict[str, Any]:
+         "tariff_final": str(batch.tariff_final),
+         "currency": batch.currency,
+         "deadline_policy": batch.deadline_policy,
++        "payment_deadline_at": (
++            batch.payment_deadline_at.isoformat()
++            if batch.payment_deadline_at is not None
++            else None
++        ),
++        "deadline_policy_snapshot": batch.deadline_policy_snapshot,
+         "cancellation_policy_id": (
+             str(batch.cancellation_policy_id) if batch.cancellation_policy_id else None
+         ),
+diff --git a/apps/scheduling/urls.py b/apps/scheduling/urls.py
+index 8b09992..50ce74a 100644
+--- a/apps/scheduling/urls.py
++++ b/apps/scheduling/urls.py
+@@ -66,12 +66,32 @@ urlpatterns = [
+         views.QuickCalendarView.as_view(),
+         name="calendar_quick",
+     ),
++    path(
++        "configuracion/plazos-pago/",
++        views.ReservationPaymentPolicyListView.as_view(),
++        name="payment_deadlines",
++    ),
++    path(
++        "configuracion/plazos-pago/nueva/",
++        views.ReservationPaymentPolicyCreateView.as_view(),
++        name="reservation_payment_policy_create",
++    ),
++    path(
++        "configuracion/plazos-pago/<uuid:pk>/activar-desactivar/",
++        views.ReservationPaymentPolicyToggleView.as_view(),
++        name="reservation_payment_policy_toggle",
++    ),
+     path("reservaciones/", views.ReservationListView.as_view(), name="reservations"),
+     path(
+         "reservaciones/solicitar/",
+         views.ReservationRequestView.as_view(),
+         name="reservation_request",
+     ),
++    path(
++        "reservaciones/grupos/<uuid:pk>/excepcion-vencimiento/",
++        views.PaymentDeadlineExceptionCreateView.as_view(),
++        name="payment_deadline_exception_create",
++    ),
+     path(
+         "reservaciones/grupos/<uuid:pk>/",
+         views.ReservationBatchDetailView.as_view(),
+diff --git a/apps/scheduling/views.py b/apps/scheduling/views.py
+index 9527292..69702eb 100644
+--- a/apps/scheduling/views.py
++++ b/apps/scheduling/views.py
+@@ -13,16 +13,17 @@ from django.db import transaction
+ from django.db.models import Count, Model, Q, QuerySet
+ from django.forms import ModelForm
+ from django.http import HttpRequest, HttpResponse
+-from django.shortcuts import redirect
++from django.shortcuts import get_object_or_404, redirect
+ from django.urls import reverse
+ from django.utils import timezone
++from django.views import View
+ from django.views.generic import DetailView, ListView, TemplateView
+-from django.views.generic.edit import FormMixin
++from django.views.generic.edit import FormMixin, FormView
+ 
+ from apps.astrotrace.services import record_event
+ from apps.catalog.models import ConsultingRoom
+ from apps.core.form_utils import django_weekday_values
+-from apps.core.permissions import scope_queryset_for_user
++from apps.core.permissions import can_edit_screen, scope_queryset_for_user
+ from apps.core.templatetags.clinic_time import format_time_for_clinic
+ from apps.finance.models import RateRule, StatementStatus
+ from apps.finance.services.payment_service import get_payment_summary_for_reservation
+@@ -41,8 +42,10 @@ from apps.scheduling.forms import (
+     AvailabilityTariffBlockForm,
+     AvailabilityTariffFilterForm,
+     OperationalFilterForm,
++    PaymentDeadlineExceptionForm,
+     ReservationCancelForm,
+     ReservationFilterForm,
++    ReservationPaymentPolicyForm,
+     ReservationRequestForm,
+     WeeklyCalendarFilterForm,
+ )
+@@ -51,6 +54,9 @@ from apps.scheduling.models import (
+     AvailabilityRule,
+     Reservation,
+     ReservationBatch,
++    ReservationBatchStatus,
++    ReservationDeadlinePolicy,
++    ReservationPaymentPolicy,
+     Weekday,
+     rule_weekdays,
+ )
+@@ -61,6 +67,10 @@ from apps.scheduling.services import (
+     generate_availability_blocks,
+     get_week_start,
+ )
++from apps.scheduling.services.deadline_service import (
++    apply_hours_deadline_exception,
++    calculate_payment_deadline,
++)
+ from apps.scheduling.services.reservation_service import (
+     cancel_reservation,
+     confirm_reservation,
+@@ -1016,6 +1026,136 @@ class ReservationListView(LoginRequiredMixin, ListView):
+         return context
+ 
+ 
++class ReservationPaymentPolicyListView(LoginRequiredMixin, TemplateView):
++    template_name = "billing/configuration_list.html"
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        policies = scope_queryset_for_user(
++            ReservationPaymentPolicy.objects.filter(is_deleted=False).select_related(
++                "clinic", "room"
++            ),
++            self.request.user,
++        )
++        context.update(
++            {
++                "page_title": "Políticas de vencimiento",
++                "sections": [
++                    {
++                        "title": "Historial de políticas de pago",
++                        "create_url": "reservation_payment_policy_create",
++                        "columns": (
++                            "Alcance",
++                            "Horas",
++                            "Regla anticipada",
++                            "Cancelación automática",
++                            "Vigencia",
++                            "Versión",
++                            "Estado",
++                        ),
++                        "rows": [
++                            {
++                                "object": policy,
++                                "toggle_url": "reservation_payment_policy_toggle",
++                                "cells": (
++                                    policy.room or policy.clinic,
++                                    policy.hours_before_start,
++                                    (
++                                        "Día anterior"
++                                        if policy.advance_rule_enabled
++                                        else "Horas antes"
++                                    ),
++                                    "Sí" if policy.automatic_cancellation else "No",
++                                    (
++                                        f"{policy.start_date:%d/%m/%Y} a "
++                                        + (
++                                            f"{policy.end_date:%d/%m/%Y}"
++                                            if policy.end_date
++                                            else "Sin fin"
++                                        )
++                                    ),
++                                    policy.version,
++                                    "Activo" if policy.is_active else "Inactivo",
++                                ),
++                            }
++                            for policy in policies
++                        ],
++                        "empty_message": ("Sin políticas de vencimiento registradas."),
++                    }
++                ],
++            }
++        )
++        return context
++
++
++class ReservationPaymentPolicyCreateView(LoginRequiredMixin, FormView):
++    template_name = "billing/configuration_form.html"
++    form_class = ReservationPaymentPolicyForm
++
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["user"] = self.request.user
++        kwargs["filter_data"] = self.request.GET
++        return kwargs
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context.update(
++            {
++                "page_title": "Nueva política de vencimiento",
++                "cancel_url_name": "payment_deadlines",
++            }
++        )
++        return context
++
++    def form_valid(self, form: ReservationPaymentPolicyForm) -> HttpResponse:
++        policy = form.save(commit=False)
++        actor = cast(Model, self.request.user)
++        policy.created_by = cast(Any, self.request.user)
++        policy.updated_by = cast(Any, self.request.user)
++        try:
++            with transaction.atomic():
++                policy.save()
++                record_event(
++                    event_type="reservation_payment_policy.created",
++                    object_label=str(policy),
++                    actor=actor,
++                    payload=_payment_policy_payload(policy, action="created"),
++                )
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        messages.success(self.request, "Política de vencimiento registrada.")
++        return redirect("payment_deadlines")
++
++
++class ReservationPaymentPolicyToggleView(LoginRequiredMixin, View):
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        queryset = scope_queryset_for_user(
++            ReservationPaymentPolicy.objects.filter(is_deleted=False),
++            request.user,
++        )
++        policy = get_object_or_404(queryset, pk=kwargs["pk"])
++        policy.is_active = not policy.is_active
++        policy.updated_by = cast(Any, request.user)
++        action = "activated" if policy.is_active else "deactivated"
++        try:
++            with transaction.atomic():
++                policy.save()
++                record_event(
++                    event_type=f"reservation_payment_policy.{action}",
++                    object_label=str(policy),
++                    actor=cast(Model, request.user),
++                    payload=_payment_policy_payload(policy, action=action),
++                )
++        except ValidationError as exc:
++            messages.error(request, "; ".join(exc.messages))
++        else:
++            verb = "activada" if policy.is_active else "desactivada"
++            messages.success(request, f"Política {verb}.")
++        return redirect("payment_deadlines")
++
++
+ class ReservationDetailView(LoginRequiredMixin, DetailView):
+     template_name = "scheduling/reservation_detail.html"
+     context_object_name = "reservation"
+@@ -1061,6 +1201,7 @@ class ReservationBatchDetailView(LoginRequiredMixin, DetailView):
+             "tenant_doctor",
+             "tenant_doctor__user",
+             "cancellation_policy",
++            "deadline_exception",
+         )
+         return scope_queryset_for_user(queryset, self.request.user)
+ 
+@@ -1072,8 +1213,64 @@ class ReservationBatchDetailView(LoginRequiredMixin, DetailView):
+             "room",
+             "tenant_doctor",
+         ).order_by("date", "start_time")
++        context["can_manage_payment_deadline"] = can_edit_screen(
++            self.request.user,
++            "payment_deadlines",
++        )
++        context["can_apply_deadline_exception"] = (
++            context["can_manage_payment_deadline"]
++            and reservation_batch.deadline_policy
++            == ReservationDeadlinePolicy.PREVIOUS_DAY
++            and not hasattr(reservation_batch, "deadline_exception")
++            and reservation_batch.payment_proof_submitted_at is None
++            and reservation_batch.status
++            in {
++                ReservationBatchStatus.REQUESTED,
++                ReservationBatchStatus.PARTIALLY_CANCELLED,
++            }
++        )
++        return context
++
++
++class PaymentDeadlineExceptionCreateView(LoginRequiredMixin, FormView):
++    template_name = "scheduling/payment_deadline_exception_form.html"
++    form_class = PaymentDeadlineExceptionForm
++
++    def get_batch(self) -> ReservationBatch:
++        queryset = scope_queryset_for_user(
++            ReservationBatch.objects.filter(is_deleted=False).select_related(
++                "room",
++                "room__clinic",
++                "tenant_doctor",
++            ),
++            self.request.user,
++        )
++        return get_object_or_404(queryset, pk=self.kwargs["pk"])
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context.update(
++            {
++                "page_title": "Excepción de vencimiento",
++                "reservation_batch": self.get_batch(),
++            }
++        )
+         return context
+ 
++    def form_valid(self, form: PaymentDeadlineExceptionForm) -> HttpResponse:
++        batch = self.get_batch()
++        try:
++            apply_hours_deadline_exception(
++                batch=batch,
++                reason=form.cleaned_data["reason"],
++                actor=cast(Model, self.request.user),
++            )
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        messages.success(self.request, "Excepción de vencimiento aplicada.")
++        return redirect("reservation_batch_detail", pk=batch.pk)
++
+ 
+ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+     template_name = "scheduling/reservation_form.html"
+@@ -1104,6 +1301,7 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+         context["back_url"] = self._back_url()
+         context["reservation_pricing_options"] = form.pricing_options
+         context.setdefault("batch_preview", None)
++        context.setdefault("deadline_preview", None)
+         return context
+ 
+     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+@@ -1124,11 +1322,26 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+                 end_time=form.cleaned_data["end_time"],
+                 recurrence_end_date=form.cleaned_data["recurrence_end_date"],
+             )
++            deadline_preview = calculate_payment_deadline(
++                room=form.cleaned_data["room"],
++                first_reservation_date=form.cleaned_data["date"],
++                first_start_time=form.cleaned_data["start_time"],
++                requested_at=timezone.now(),
++                actor=cast(Model, self.request.user),
++                late_exception_reason=form.cleaned_data.get(
++                    "deadline_exception_reason",
++                    "",
++                ),
++            )
+         except ValidationError as exc:
+             form.add_error(None, exc)
+             return self.form_invalid(form)
+         return self.render_to_response(
+-            self.get_context_data(form=form, batch_preview=batch_preview)
++            self.get_context_data(
++                form=form,
++                batch_preview=batch_preview,
++                deadline_preview=deadline_preview,
++            )
+         )
+ 
+     def form_valid(self, form: ReservationRequestForm) -> HttpResponse:
+@@ -1142,6 +1355,10 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+                 recurrence_end_date=form.cleaned_data["recurrence_end_date"],
+                 notes=form.cleaned_data["notes"],
+                 actor=cast(Model, self.request.user),
++                deadline_exception_reason=form.cleaned_data.get(
++                    "deadline_exception_reason",
++                    "",
++                ),
+             )
+         except StatementGenerationError as exc:
+             form.add_error(None, str(exc))
+@@ -1176,6 +1393,27 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+         return reverse("calendar_week")
+ 
+ 
++def _payment_policy_payload(
++    policy: ReservationPaymentPolicy,
++    *,
++    action: str,
++) -> dict[str, Any]:
++    return {
++        "model": policy._meta.label,
++        "id": str(policy.pk),
++        "action": action,
++        "clinic_id": str(policy.clinic_id),
++        "room_id": str(policy.room_id) if policy.room_id else None,
++        "hours_before_start": policy.hours_before_start,
++        "advance_rule_enabled": policy.advance_rule_enabled,
++        "automatic_cancellation": policy.automatic_cancellation,
++        "version": policy.version,
++        "start_date": policy.start_date.isoformat(),
++        "end_date": policy.end_date.isoformat() if policy.end_date else None,
++        "is_active": policy.is_active,
++    }
++
++
+ class ReservationCancelView(LoginRequiredMixin, FormMixin, TemplateView):
+     template_name = "scheduling/reservation_cancel.html"
+     form_class = ReservationCancelForm
+diff --git a/config/settings.py b/config/settings.py
+index c9a4198..0eba433 100644
+--- a/config/settings.py
++++ b/config/settings.py
+@@ -143,6 +143,12 @@ CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=REDIS_URL)
+ CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://localhost:6379/1")
+ CELERY_TIMEZONE = TIME_ZONE
+ CELERY_TASK_TRACK_STARTED = True
++CELERY_BEAT_SCHEDULE = {
++    "expire-overdue-reservation-batches": {
++        "task": "scheduling.expire_overdue_reservation_batches",
++        "schedule": 300.0,
++    },
++}
+ 
+ MINIO_STORAGE_ENABLED = env.bool("MINIO_STORAGE_ENABLED", default=False)
+ PLATFORM_COMMISSION_RATE = env.float("PLATFORM_COMMISSION_RATE", default=0.10)
+diff --git a/templates/scheduling/reservation_batch_detail.html b/templates/scheduling/reservation_batch_detail.html
+index d63cc78..cf246fc 100644
+--- a/templates/scheduling/reservation_batch_detail.html
++++ b/templates/scheduling/reservation_batch_detail.html
+@@ -32,9 +32,35 @@
+         <dd class="col-sm-8 col-lg-9">{{ reservation_batch.tariff_final }} {{ reservation_batch.currency }}</dd>
+         <dt class="col-sm-4 col-lg-3 text-secondary">Política de cancelación</dt>
+         <dd class="col-sm-8 col-lg-9">{{ reservation_batch.cancellation_policy|default:"Sin política activa" }}</dd>
++        <dt class="col-sm-4 col-lg-3 text-secondary">Fecha límite de pago</dt>
++        <dd class="col-sm-8 col-lg-9">
++          {% if reservation_batch.payment_deadline_at %}
++            {{ reservation_batch.payment_deadline_at|clinic_datetime:reservation_batch.room }}
++            <span class="text-secondary">({{ reservation_batch.room.clinic.timezone }})</span>
++          {% else %}
++            Pendiente de configurar
++          {% endif %}
++        </dd>
++        <dt class="col-sm-4 col-lg-3 text-secondary">Regla de vencimiento</dt>
++        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.get_deadline_policy_display }}</dd>
++        {% if reservation_batch.deadline_exception %}
++          <dt class="col-sm-4 col-lg-3 text-secondary">Excepción autorizada</dt>
++          <dd class="col-sm-8 col-lg-9">
++            {{ reservation_batch.deadline_exception.get_exception_type_display }}:
++            {{ reservation_batch.deadline_exception.reason }}
++          </dd>
++        {% endif %}
+         <dt class="col-sm-4 col-lg-3 text-secondary">Notas</dt>
+         <dd class="col-sm-8 col-lg-9">{{ reservation_batch.notes|default:"Sin notas"|linebreaksbr }}</dd>
+       </dl>
++      {% if can_apply_deadline_exception %}
++        <div class="d-flex justify-content-end mt-3">
++          <a class="btn btn-outline-warning" href="{% url 'payment_deadline_exception_create' reservation_batch.pk %}">
++            <i class="bi bi-clock-history me-1"></i>
++            Aplicar regla de horas
++          </a>
++        </div>
++      {% endif %}
+     </div>
+ 
+     <div class="status-panel p-3 p-lg-4">
+diff --git a/templates/scheduling/reservation_form.html b/templates/scheduling/reservation_form.html
+index 23d776d..e5bd91b 100644
+--- a/templates/scheduling/reservation_form.html
++++ b/templates/scheduling/reservation_form.html
+@@ -1,5 +1,7 @@
+ {% extends "base.html" %}
+ 
++{% load clinic_time %}
++
+ {% block content %}
+   <section id="reservation-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#reservation-content" hx-select="#reservation-content" hx-swap="outerHTML" hx-push-url="true">
+     <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+@@ -136,6 +138,18 @@
+             <div class="invalid-feedback d-block">{{ error }}</div>
+           {% endfor %}
+         </div>
++        {% if form.deadline_exception_reason %}
++          <div class="col-12">
++            <label class="form-label" for="{{ form.deadline_exception_reason.id_for_label }}">{{ form.deadline_exception_reason.label }}</label>
++            {{ form.deadline_exception_reason }}
++            {% if form.deadline_exception_reason.help_text %}
++              <div class="form-text">{{ form.deadline_exception_reason.help_text }}</div>
++            {% endif %}
++            {% for error in form.deadline_exception_reason.errors %}
++              <div class="invalid-feedback d-block">{{ error }}</div>
++            {% endfor %}
++          </div>
++        {% endif %}
+       </div>
+ 
+       {% if batch_preview %}
+@@ -158,6 +172,20 @@
+             <div class="alert alert-success" role="status">
+               Todas las fechas están disponibles. El grupo se volverá a validar al solicitarlo.
+             </div>
++            {% if deadline_preview %}
++              <div class="alert alert-info" role="status">
++                <strong>Fecha límite para registrar el comprobante:</strong>
++                {{ deadline_preview.deadline_at|clinic_datetime:deadline_preview.policy.clinic }}.
++                {{ deadline_preview.policy.clinic.timezone }}.
++                {% if deadline_preview.exception_type %}
++                  Se aplicará la excepción administrativa indicada.
++                {% endif %}
++              </div>
++            {% else %}
++              <div class="alert alert-warning" role="status">
++                Esta clínica todavía no tiene una política de vencimiento activa.
++              </div>
++            {% endif %}
+           {% endif %}
+           <div class="table-responsive">
+             <table class="table table-sm align-middle mb-0">

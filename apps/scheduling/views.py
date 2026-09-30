@@ -13,16 +13,17 @@ from django.db import transaction
 from django.db.models import Count, Model, Q, QuerySet
 from django.forms import ModelForm
 from django.http import HttpRequest, HttpResponse
-from django.shortcuts import redirect
+from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils import timezone
+from django.views import View
 from django.views.generic import DetailView, ListView, TemplateView
-from django.views.generic.edit import FormMixin
+from django.views.generic.edit import FormMixin, FormView
 
 from apps.astrotrace.services import record_event
 from apps.catalog.models import ConsultingRoom
 from apps.core.form_utils import django_weekday_values
-from apps.core.permissions import scope_queryset_for_user
+from apps.core.permissions import can_edit_screen, scope_queryset_for_user
 from apps.core.templatetags.clinic_time import format_time_for_clinic
 from apps.finance.models import RateRule, StatementStatus
 from apps.finance.services.payment_service import get_payment_summary_for_reservation
@@ -41,8 +42,10 @@ from apps.scheduling.forms import (
     AvailabilityTariffBlockForm,
     AvailabilityTariffFilterForm,
     OperationalFilterForm,
+    PaymentDeadlineExceptionForm,
     ReservationCancelForm,
     ReservationFilterForm,
+    ReservationPaymentPolicyForm,
     ReservationRequestForm,
     WeeklyCalendarFilterForm,
 )
@@ -51,6 +54,9 @@ from apps.scheduling.models import (
     AvailabilityRule,
     Reservation,
     ReservationBatch,
+    ReservationBatchStatus,
+    ReservationDeadlinePolicy,
+    ReservationPaymentPolicy,
     Weekday,
     rule_weekdays,
 )
@@ -60,6 +66,10 @@ from apps.scheduling.services import (
     BLOCK_STATUS_RESERVED_FUTURE,
     generate_availability_blocks,
     get_week_start,
+)
+from apps.scheduling.services.deadline_service import (
+    apply_hours_deadline_exception,
+    calculate_payment_deadline,
 )
 from apps.scheduling.services.reservation_service import (
     cancel_reservation,
@@ -1016,6 +1026,136 @@ class ReservationListView(LoginRequiredMixin, ListView):
         return context
 
 
+class ReservationPaymentPolicyListView(LoginRequiredMixin, TemplateView):
+    template_name = "billing/configuration_list.html"
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        policies = scope_queryset_for_user(
+            ReservationPaymentPolicy.objects.filter(is_deleted=False).select_related(
+                "clinic", "room"
+            ),
+            self.request.user,
+        )
+        context.update(
+            {
+                "page_title": "Políticas de vencimiento",
+                "sections": [
+                    {
+                        "title": "Historial de políticas de pago",
+                        "create_url": "reservation_payment_policy_create",
+                        "columns": (
+                            "Alcance",
+                            "Horas",
+                            "Regla anticipada",
+                            "Cancelación automática",
+                            "Vigencia",
+                            "Versión",
+                            "Estado",
+                        ),
+                        "rows": [
+                            {
+                                "object": policy,
+                                "toggle_url": "reservation_payment_policy_toggle",
+                                "cells": (
+                                    policy.room or policy.clinic,
+                                    policy.hours_before_start,
+                                    (
+                                        "Día anterior"
+                                        if policy.advance_rule_enabled
+                                        else "Horas antes"
+                                    ),
+                                    "Sí" if policy.automatic_cancellation else "No",
+                                    (
+                                        f"{policy.start_date:%d/%m/%Y} a "
+                                        + (
+                                            f"{policy.end_date:%d/%m/%Y}"
+                                            if policy.end_date
+                                            else "Sin fin"
+                                        )
+                                    ),
+                                    policy.version,
+                                    "Activo" if policy.is_active else "Inactivo",
+                                ),
+                            }
+                            for policy in policies
+                        ],
+                        "empty_message": ("Sin políticas de vencimiento registradas."),
+                    }
+                ],
+            }
+        )
+        return context
+
+
+class ReservationPaymentPolicyCreateView(LoginRequiredMixin, FormView):
+    template_name = "billing/configuration_form.html"
+    form_class = ReservationPaymentPolicyForm
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        kwargs["filter_data"] = self.request.GET
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context.update(
+            {
+                "page_title": "Nueva política de vencimiento",
+                "cancel_url_name": "payment_deadlines",
+            }
+        )
+        return context
+
+    def form_valid(self, form: ReservationPaymentPolicyForm) -> HttpResponse:
+        policy = form.save(commit=False)
+        actor = cast(Model, self.request.user)
+        policy.created_by = cast(Any, self.request.user)
+        policy.updated_by = cast(Any, self.request.user)
+        try:
+            with transaction.atomic():
+                policy.save()
+                record_event(
+                    event_type="reservation_payment_policy.created",
+                    object_label=str(policy),
+                    actor=actor,
+                    payload=_payment_policy_payload(policy, action="created"),
+                )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Política de vencimiento registrada.")
+        return redirect("payment_deadlines")
+
+
+class ReservationPaymentPolicyToggleView(LoginRequiredMixin, View):
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        queryset = scope_queryset_for_user(
+            ReservationPaymentPolicy.objects.filter(is_deleted=False),
+            request.user,
+        )
+        policy = get_object_or_404(queryset, pk=kwargs["pk"])
+        policy.is_active = not policy.is_active
+        policy.updated_by = cast(Any, request.user)
+        action = "activated" if policy.is_active else "deactivated"
+        try:
+            with transaction.atomic():
+                policy.save()
+                record_event(
+                    event_type=f"reservation_payment_policy.{action}",
+                    object_label=str(policy),
+                    actor=cast(Model, request.user),
+                    payload=_payment_policy_payload(policy, action=action),
+                )
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+        else:
+            verb = "activada" if policy.is_active else "desactivada"
+            messages.success(request, f"Política {verb}.")
+        return redirect("payment_deadlines")
+
+
 class ReservationDetailView(LoginRequiredMixin, DetailView):
     template_name = "scheduling/reservation_detail.html"
     context_object_name = "reservation"
@@ -1061,6 +1201,7 @@ class ReservationBatchDetailView(LoginRequiredMixin, DetailView):
             "tenant_doctor",
             "tenant_doctor__user",
             "cancellation_policy",
+            "deadline_exception",
         )
         return scope_queryset_for_user(queryset, self.request.user)
 
@@ -1072,7 +1213,63 @@ class ReservationBatchDetailView(LoginRequiredMixin, DetailView):
             "room",
             "tenant_doctor",
         ).order_by("date", "start_time")
+        context["can_manage_payment_deadline"] = can_edit_screen(
+            self.request.user,
+            "payment_deadlines",
+        )
+        context["can_apply_deadline_exception"] = (
+            context["can_manage_payment_deadline"]
+            and reservation_batch.deadline_policy
+            == ReservationDeadlinePolicy.PREVIOUS_DAY
+            and not hasattr(reservation_batch, "deadline_exception")
+            and reservation_batch.payment_proof_submitted_at is None
+            and reservation_batch.status
+            in {
+                ReservationBatchStatus.REQUESTED,
+                ReservationBatchStatus.PARTIALLY_CANCELLED,
+            }
+        )
         return context
+
+
+class PaymentDeadlineExceptionCreateView(LoginRequiredMixin, FormView):
+    template_name = "scheduling/payment_deadline_exception_form.html"
+    form_class = PaymentDeadlineExceptionForm
+
+    def get_batch(self) -> ReservationBatch:
+        queryset = scope_queryset_for_user(
+            ReservationBatch.objects.filter(is_deleted=False).select_related(
+                "room",
+                "room__clinic",
+                "tenant_doctor",
+            ),
+            self.request.user,
+        )
+        return get_object_or_404(queryset, pk=self.kwargs["pk"])
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context.update(
+            {
+                "page_title": "Excepción de vencimiento",
+                "reservation_batch": self.get_batch(),
+            }
+        )
+        return context
+
+    def form_valid(self, form: PaymentDeadlineExceptionForm) -> HttpResponse:
+        batch = self.get_batch()
+        try:
+            apply_hours_deadline_exception(
+                batch=batch,
+                reason=form.cleaned_data["reason"],
+                actor=cast(Model, self.request.user),
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(self.request, "Excepción de vencimiento aplicada.")
+        return redirect("reservation_batch_detail", pk=batch.pk)
 
 
 class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
@@ -1104,6 +1301,7 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
         context["back_url"] = self._back_url()
         context["reservation_pricing_options"] = form.pricing_options
         context.setdefault("batch_preview", None)
+        context.setdefault("deadline_preview", None)
         return context
 
     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
@@ -1124,11 +1322,26 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
                 end_time=form.cleaned_data["end_time"],
                 recurrence_end_date=form.cleaned_data["recurrence_end_date"],
             )
+            deadline_preview = calculate_payment_deadline(
+                room=form.cleaned_data["room"],
+                first_reservation_date=form.cleaned_data["date"],
+                first_start_time=form.cleaned_data["start_time"],
+                requested_at=timezone.now(),
+                actor=cast(Model, self.request.user),
+                late_exception_reason=form.cleaned_data.get(
+                    "deadline_exception_reason",
+                    "",
+                ),
+            )
         except ValidationError as exc:
             form.add_error(None, exc)
             return self.form_invalid(form)
         return self.render_to_response(
-            self.get_context_data(form=form, batch_preview=batch_preview)
+            self.get_context_data(
+                form=form,
+                batch_preview=batch_preview,
+                deadline_preview=deadline_preview,
+            )
         )
 
     def form_valid(self, form: ReservationRequestForm) -> HttpResponse:
@@ -1142,6 +1355,10 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
                 recurrence_end_date=form.cleaned_data["recurrence_end_date"],
                 notes=form.cleaned_data["notes"],
                 actor=cast(Model, self.request.user),
+                deadline_exception_reason=form.cleaned_data.get(
+                    "deadline_exception_reason",
+                    "",
+                ),
             )
         except StatementGenerationError as exc:
             form.add_error(None, str(exc))
@@ -1174,6 +1391,27 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
         if self._source() == "quick":
             return reverse("calendar_quick")
         return reverse("calendar_week")
+
+
+def _payment_policy_payload(
+    policy: ReservationPaymentPolicy,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    return {
+        "model": policy._meta.label,
+        "id": str(policy.pk),
+        "action": action,
+        "clinic_id": str(policy.clinic_id),
+        "room_id": str(policy.room_id) if policy.room_id else None,
+        "hours_before_start": policy.hours_before_start,
+        "advance_rule_enabled": policy.advance_rule_enabled,
+        "automatic_cancellation": policy.automatic_cancellation,
+        "version": policy.version,
+        "start_date": policy.start_date.isoformat(),
+        "end_date": policy.end_date.isoformat() if policy.end_date else None,
+        "is_active": policy.is_active,
+    }
 
 
 class ReservationCancelView(LoginRequiredMixin, FormMixin, TemplateView):
