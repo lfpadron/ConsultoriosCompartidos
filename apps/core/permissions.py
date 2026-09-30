@@ -236,6 +236,26 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
             Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
             | Q(tenant_doctor__reservations__room__clinic__in=clinics)
         ).distinct()
+    if model_label in {
+        "billing.OwnerSubscription",
+        "billing.OwnerCommissionRule",
+        "billing.OwnerPayoutSchedule",
+    }:
+        return queryset.filter(owner__consulting_rooms__clinic__in=clinics).distinct()
+    if model_label == "billing.TenantSubscription":
+        return queryset.filter(
+            Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
+            | Q(tenant_doctor__reservations__room__clinic__in=clinics)
+        ).distinct()
+    if model_label in {
+        "billing.RoomFixedFeeRule",
+        "billing.RoomMonthlyFee",
+    }:
+        return queryset.filter(room__clinic__in=clinics)
+    if model_label == "billing.CancellationPolicy":
+        return queryset.filter(clinic__in=clinics)
+    if model_label == "billing.CancellationPenaltyRule":
+        return queryset.filter(policy__clinic__in=clinics)
     if model_label == "scheduling.Reservation":
         return queryset.filter(room__clinic__in=clinics)
     if model_label == "finance.Statement":
@@ -276,6 +296,30 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
             Q(tenant_doctor__assigned_rooms__owner=owner)
             | Q(tenant_doctor__reservations__room__owner=owner)
         ).distinct()
+    if model_label in {
+        "billing.OwnerSubscription",
+        "billing.OwnerCommissionRule",
+        "billing.OwnerPayoutSchedule",
+    }:
+        return queryset.filter(owner=owner)
+    if model_label in {
+        "billing.RoomFixedFeeRule",
+        "billing.RoomMonthlyFee",
+    }:
+        return queryset.filter(room__owner=owner)
+    if model_label == "billing.CancellationPolicy":
+        return queryset.filter(
+            Q(room__owner=owner)
+            | Q(room__isnull=True, clinic__consulting_rooms__owner=owner)
+        ).distinct()
+    if model_label == "billing.CancellationPenaltyRule":
+        return queryset.filter(
+            Q(policy__room__owner=owner)
+            | Q(
+                policy__room__isnull=True,
+                policy__clinic__consulting_rooms__owner=owner,
+            )
+        ).distinct()
     if model_label == "finance.Settlement":
         return queryset.filter(owner=owner)
     if model_label == "vault.DocumentAsset":
@@ -307,6 +351,26 @@ def _scope_tenant_doctor_queryset(
         return queryset.filter(room__in=assigned_rooms)
     if model_label == "finance.TenantDoctorDiscount":
         return queryset.filter(tenant_doctor=tenant_doctor)
+    if model_label == "billing.TenantSubscription":
+        return queryset.filter(tenant_doctor=tenant_doctor)
+    if model_label in {
+        "billing.RoomFixedFeeRule",
+        "billing.RoomMonthlyFee",
+    } and assigned_rooms.exists():
+        return queryset.filter(room__in=assigned_rooms)
+    if model_label == "billing.CancellationPolicy" and assigned_rooms.exists():
+        return queryset.filter(
+            Q(room__in=assigned_rooms)
+            | Q(room__isnull=True, clinic__consulting_rooms__in=assigned_rooms)
+        ).distinct()
+    if model_label == "billing.CancellationPenaltyRule" and assigned_rooms.exists():
+        return queryset.filter(
+            Q(policy__room__in=assigned_rooms)
+            | Q(
+                policy__room__isnull=True,
+                policy__clinic__consulting_rooms__in=assigned_rooms,
+            )
+        ).distinct()
     if model_label == "finance.Payment":
         return queryset.filter(tenant_doctor=tenant_doctor)
     if model_label == "vault.DocumentAsset":
@@ -340,6 +404,30 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
         return queryset.filter(
             Q(tenant_doctor__assigned_rooms__owner__in=owners)
             | Q(tenant_doctor__reservations__room__owner__in=owners)
+        ).distinct()
+    if model_label in {
+        "billing.OwnerSubscription",
+        "billing.OwnerCommissionRule",
+        "billing.OwnerPayoutSchedule",
+    }:
+        return queryset.filter(owner__in=owners)
+    if model_label in {
+        "billing.RoomFixedFeeRule",
+        "billing.RoomMonthlyFee",
+    }:
+        return queryset.filter(room__owner__in=owners)
+    if model_label == "billing.CancellationPolicy":
+        return queryset.filter(
+            Q(room__owner__in=owners)
+            | Q(room__isnull=True, clinic__consulting_rooms__owner__in=owners)
+        ).distinct()
+    if model_label == "billing.CancellationPenaltyRule":
+        return queryset.filter(
+            Q(policy__room__owner__in=owners)
+            | Q(
+                policy__room__isnull=True,
+                policy__clinic__consulting_rooms__owner__in=owners,
+            )
         ).distinct()
     if model_label == "finance.Payment":
         return queryset.filter(reservation__room__owner__in=owners)

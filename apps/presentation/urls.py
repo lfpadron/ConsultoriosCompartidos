@@ -10,6 +10,7 @@ urlpatterns = [
     path("", include("apps.catalog.urls")),
     path("", include("apps.scheduling.urls")),
     path("", include("apps.finance.urls")),
+    path("", include("apps.billing.urls")),
     path("", include("apps.vault.urls")),
     path("", include("apps.astrotrace.urls")),
     path("", include("apps.integration.urls")),

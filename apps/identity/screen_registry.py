@@ -57,6 +57,36 @@ SCREEN_DEFINITIONS = (
         "tenant_doctor_discounts",
         "bi-tags",
     ),
+    ScreenDefinition(
+        "owner_subscriptions",
+        "Suscripciones Propietarios",
+        "owner_subscriptions",
+        "bi-person-check",
+    ),
+    ScreenDefinition(
+        "tenant_subscriptions",
+        "Suscripciones Arrendatarios",
+        "tenant_subscriptions",
+        "bi-person-vcard-fill",
+    ),
+    ScreenDefinition(
+        "owner_terms",
+        "Comisiones y Pagos",
+        "owner_terms",
+        "bi-cash-coin",
+    ),
+    ScreenDefinition(
+        "room_fees",
+        "Cuotas Consultorios",
+        "room_fees",
+        "bi-building-gear",
+    ),
+    ScreenDefinition(
+        "cancellation_policies",
+        "Políticas Cancelación",
+        "cancellation_policies",
+        "bi-calendar-x",
+    ),
     ScreenDefinition("payments", "Pagos", "payments", "bi-credit-card"),
     ScreenDefinition("settlements", "Liquidaciones", "settlements", "bi-bank"),
     ScreenDefinition("documents", "Documentos", "documents", "bi-file-earmark-pdf"),
@@ -95,6 +125,11 @@ EXACT_ROUTE_SCREENS = {
     "statements": "statements",
     "room_rate_discounts": "room_rate_discounts",
     "tenant_doctor_discounts": "tenant_doctor_discounts",
+    "owner_subscriptions": "owner_subscriptions",
+    "tenant_subscriptions": "tenant_subscriptions",
+    "owner_terms": "owner_terms",
+    "room_fees": "room_fees",
+    "cancellation_policies": "cancellation_policies",
     "payments": "payments",
     "settlements": "settlements",
     "documents": "documents",
@@ -108,6 +143,13 @@ EXACT_ROUTE_SCREENS = {
 }
 
 ROUTE_PREFIX_SCREENS = (
+    ("owner_subscription_", "owner_subscriptions"),
+    ("tenant_subscription_", "tenant_subscriptions"),
+    ("owner_commission_", "owner_terms"),
+    ("owner_payout_", "owner_terms"),
+    ("room_fixed_fee_", "room_fees"),
+    ("room_monthly_fee_", "room_fees"),
+    ("cancellation_policy_", "cancellation_policies"),
     ("tenant_doctor_discount_", "tenant_doctor_discounts"),
     ("room_rate_discount_", "room_rate_discounts"),
     ("tenant_doctor_", "tenant_doctors"),
@@ -164,6 +206,20 @@ EDIT_ROUTE_NAMES = {
     "room_rate_discount_toggle",
     "tenant_doctor_discount_create",
     "tenant_doctor_discount_toggle",
+    "owner_subscription_create",
+    "owner_subscription_toggle",
+    "tenant_subscription_create",
+    "tenant_subscription_toggle",
+    "owner_commission_create",
+    "owner_commission_toggle",
+    "owner_payout_create",
+    "owner_payout_toggle",
+    "room_fixed_fee_create",
+    "room_fixed_fee_toggle",
+    "room_monthly_fee_create",
+    "room_monthly_fee_toggle",
+    "cancellation_policy_create",
+    "cancellation_policy_toggle",
     "payment_register",
     "payment_validate",
     "payment_reject",
@@ -215,6 +271,18 @@ def default_access_for_role(role: str, screen_key: str) -> str:
         UserRole.ADMIN,
         UserRole.OWNER,
     }:
+        return ScreenAccessLevel.NONE
+    if screen_key in {
+        "owner_subscriptions",
+        "tenant_subscriptions",
+        "owner_terms",
+        "room_fees",
+        "cancellation_policies",
+    }:
+        if role in {UserRole.SUPERADMIN, UserRole.ADMIN}:
+            return ScreenAccessLevel.EDIT
+        if role == UserRole.AUDITOR:
+            return ScreenAccessLevel.READ
         return ScreenAccessLevel.NONE
     if role == UserRole.AUDITOR:
         return ScreenAccessLevel.READ

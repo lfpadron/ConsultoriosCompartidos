@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     "apps.catalog",
     "apps.scheduling",
     "apps.finance",
+    "apps.billing",
     "apps.vault",
     "apps.astrotrace",
     "apps.integration",

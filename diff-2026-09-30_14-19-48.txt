@@ -1,0 +1,659 @@
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index ac5b33d..a5a78ad 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -236,6 +236,26 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
+             Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
+             | Q(tenant_doctor__reservations__room__clinic__in=clinics)
+         ).distinct()
++    if model_label in {
++        "billing.OwnerSubscription",
++        "billing.OwnerCommissionRule",
++        "billing.OwnerPayoutSchedule",
++    }:
++        return queryset.filter(owner__consulting_rooms__clinic__in=clinics).distinct()
++    if model_label == "billing.TenantSubscription":
++        return queryset.filter(
++            Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
++            | Q(tenant_doctor__reservations__room__clinic__in=clinics)
++        ).distinct()
++    if model_label in {
++        "billing.RoomFixedFeeRule",
++        "billing.RoomMonthlyFee",
++    }:
++        return queryset.filter(room__clinic__in=clinics)
++    if model_label == "billing.CancellationPolicy":
++        return queryset.filter(clinic__in=clinics)
++    if model_label == "billing.CancellationPenaltyRule":
++        return queryset.filter(policy__clinic__in=clinics)
+     if model_label == "scheduling.Reservation":
+         return queryset.filter(room__clinic__in=clinics)
+     if model_label == "finance.Statement":
+@@ -276,6 +296,30 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
+             Q(tenant_doctor__assigned_rooms__owner=owner)
+             | Q(tenant_doctor__reservations__room__owner=owner)
+         ).distinct()
++    if model_label in {
++        "billing.OwnerSubscription",
++        "billing.OwnerCommissionRule",
++        "billing.OwnerPayoutSchedule",
++    }:
++        return queryset.filter(owner=owner)
++    if model_label in {
++        "billing.RoomFixedFeeRule",
++        "billing.RoomMonthlyFee",
++    }:
++        return queryset.filter(room__owner=owner)
++    if model_label == "billing.CancellationPolicy":
++        return queryset.filter(
++            Q(room__owner=owner)
++            | Q(room__isnull=True, clinic__consulting_rooms__owner=owner)
++        ).distinct()
++    if model_label == "billing.CancellationPenaltyRule":
++        return queryset.filter(
++            Q(policy__room__owner=owner)
++            | Q(
++                policy__room__isnull=True,
++                policy__clinic__consulting_rooms__owner=owner,
++            )
++        ).distinct()
+     if model_label == "finance.Settlement":
+         return queryset.filter(owner=owner)
+     if model_label == "vault.DocumentAsset":
+@@ -307,6 +351,26 @@ def _scope_tenant_doctor_queryset(
+         return queryset.filter(room__in=assigned_rooms)
+     if model_label == "finance.TenantDoctorDiscount":
+         return queryset.filter(tenant_doctor=tenant_doctor)
++    if model_label == "billing.TenantSubscription":
++        return queryset.filter(tenant_doctor=tenant_doctor)
++    if model_label in {
++        "billing.RoomFixedFeeRule",
++        "billing.RoomMonthlyFee",
++    } and assigned_rooms.exists():
++        return queryset.filter(room__in=assigned_rooms)
++    if model_label == "billing.CancellationPolicy" and assigned_rooms.exists():
++        return queryset.filter(
++            Q(room__in=assigned_rooms)
++            | Q(room__isnull=True, clinic__consulting_rooms__in=assigned_rooms)
++        ).distinct()
++    if model_label == "billing.CancellationPenaltyRule" and assigned_rooms.exists():
++        return queryset.filter(
++            Q(policy__room__in=assigned_rooms)
++            | Q(
++                policy__room__isnull=True,
++                policy__clinic__consulting_rooms__in=assigned_rooms,
++            )
++        ).distinct()
+     if model_label == "finance.Payment":
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "vault.DocumentAsset":
+@@ -341,6 +405,30 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
+             Q(tenant_doctor__assigned_rooms__owner__in=owners)
+             | Q(tenant_doctor__reservations__room__owner__in=owners)
+         ).distinct()
++    if model_label in {
++        "billing.OwnerSubscription",
++        "billing.OwnerCommissionRule",
++        "billing.OwnerPayoutSchedule",
++    }:
++        return queryset.filter(owner__in=owners)
++    if model_label in {
++        "billing.RoomFixedFeeRule",
++        "billing.RoomMonthlyFee",
++    }:
++        return queryset.filter(room__owner__in=owners)
++    if model_label == "billing.CancellationPolicy":
++        return queryset.filter(
++            Q(room__owner__in=owners)
++            | Q(room__isnull=True, clinic__consulting_rooms__owner__in=owners)
++        ).distinct()
++    if model_label == "billing.CancellationPenaltyRule":
++        return queryset.filter(
++            Q(policy__room__owner__in=owners)
++            | Q(
++                policy__room__isnull=True,
++                policy__clinic__consulting_rooms__owner__in=owners,
++            )
++        ).distinct()
+     if model_label == "finance.Payment":
+         return queryset.filter(reservation__room__owner__in=owners)
+     if model_label == "finance.Settlement":
+diff --git a/apps/identity/screen_registry.py b/apps/identity/screen_registry.py
+index 011611d..0d0d6dc 100644
+--- a/apps/identity/screen_registry.py
++++ b/apps/identity/screen_registry.py
+@@ -57,6 +57,36 @@ SCREEN_DEFINITIONS = (
+         "tenant_doctor_discounts",
+         "bi-tags",
+     ),
++    ScreenDefinition(
++        "owner_subscriptions",
++        "Suscripciones Propietarios",
++        "owner_subscriptions",
++        "bi-person-check",
++    ),
++    ScreenDefinition(
++        "tenant_subscriptions",
++        "Suscripciones Arrendatarios",
++        "tenant_subscriptions",
++        "bi-person-vcard-fill",
++    ),
++    ScreenDefinition(
++        "owner_terms",
++        "Comisiones y Pagos",
++        "owner_terms",
++        "bi-cash-coin",
++    ),
++    ScreenDefinition(
++        "room_fees",
++        "Cuotas Consultorios",
++        "room_fees",
++        "bi-building-gear",
++    ),
++    ScreenDefinition(
++        "cancellation_policies",
++        "Políticas Cancelación",
++        "cancellation_policies",
++        "bi-calendar-x",
++    ),
+     ScreenDefinition("payments", "Pagos", "payments", "bi-credit-card"),
+     ScreenDefinition("settlements", "Liquidaciones", "settlements", "bi-bank"),
+     ScreenDefinition("documents", "Documentos", "documents", "bi-file-earmark-pdf"),
+@@ -95,6 +125,11 @@ EXACT_ROUTE_SCREENS = {
+     "statements": "statements",
+     "room_rate_discounts": "room_rate_discounts",
+     "tenant_doctor_discounts": "tenant_doctor_discounts",
++    "owner_subscriptions": "owner_subscriptions",
++    "tenant_subscriptions": "tenant_subscriptions",
++    "owner_terms": "owner_terms",
++    "room_fees": "room_fees",
++    "cancellation_policies": "cancellation_policies",
+     "payments": "payments",
+     "settlements": "settlements",
+     "documents": "documents",
+@@ -108,6 +143,13 @@ EXACT_ROUTE_SCREENS = {
+ }
+ 
+ ROUTE_PREFIX_SCREENS = (
++    ("owner_subscription_", "owner_subscriptions"),
++    ("tenant_subscription_", "tenant_subscriptions"),
++    ("owner_commission_", "owner_terms"),
++    ("owner_payout_", "owner_terms"),
++    ("room_fixed_fee_", "room_fees"),
++    ("room_monthly_fee_", "room_fees"),
++    ("cancellation_policy_", "cancellation_policies"),
+     ("tenant_doctor_discount_", "tenant_doctor_discounts"),
+     ("room_rate_discount_", "room_rate_discounts"),
+     ("tenant_doctor_", "tenant_doctors"),
+@@ -164,6 +206,20 @@ EDIT_ROUTE_NAMES = {
+     "room_rate_discount_toggle",
+     "tenant_doctor_discount_create",
+     "tenant_doctor_discount_toggle",
++    "owner_subscription_create",
++    "owner_subscription_toggle",
++    "tenant_subscription_create",
++    "tenant_subscription_toggle",
++    "owner_commission_create",
++    "owner_commission_toggle",
++    "owner_payout_create",
++    "owner_payout_toggle",
++    "room_fixed_fee_create",
++    "room_fixed_fee_toggle",
++    "room_monthly_fee_create",
++    "room_monthly_fee_toggle",
++    "cancellation_policy_create",
++    "cancellation_policy_toggle",
+     "payment_register",
+     "payment_validate",
+     "payment_reject",
+@@ -216,6 +272,18 @@ def default_access_for_role(role: str, screen_key: str) -> str:
+         UserRole.OWNER,
+     }:
+         return ScreenAccessLevel.NONE
++    if screen_key in {
++        "owner_subscriptions",
++        "tenant_subscriptions",
++        "owner_terms",
++        "room_fees",
++        "cancellation_policies",
++    }:
++        if role in {UserRole.SUPERADMIN, UserRole.ADMIN}:
++            return ScreenAccessLevel.EDIT
++        if role == UserRole.AUDITOR:
++            return ScreenAccessLevel.READ
++        return ScreenAccessLevel.NONE
+     if role == UserRole.AUDITOR:
+         return ScreenAccessLevel.READ
+     if role == UserRole.RECEPTIONIST and screen_key in {
+diff --git a/apps/presentation/navigation.py b/apps/presentation/navigation.py
+index 1d2f111..32b64aa 100644
+--- a/apps/presentation/navigation.py
++++ b/apps/presentation/navigation.py
+@@ -26,6 +26,11 @@ PAGE_TITLES = {
+     "statements": "Estados de Cuenta",
+     "room_rate_discounts": "Descuentos por consultorio",
+     "tenant_doctor_discounts": "Descuentos por médico arrendatario",
++    "owner_subscriptions": "Suscripciones de propietarios",
++    "tenant_subscriptions": "Suscripciones de médicos arrendatarios",
++    "owner_terms": "Comisiones y pagos a propietarios",
++    "room_fees": "Cuotas por consultorio",
++    "cancellation_policies": "Políticas de cancelación",
+     "payments": "Pagos",
+     "settlements": "Liquidaciones",
+     "documents": "Documentos",
+diff --git a/apps/presentation/urls.py b/apps/presentation/urls.py
+index 0c3446d..e550527 100644
+--- a/apps/presentation/urls.py
++++ b/apps/presentation/urls.py
+@@ -10,6 +10,7 @@ urlpatterns = [
+     path("", include("apps.catalog.urls")),
+     path("", include("apps.scheduling.urls")),
+     path("", include("apps.finance.urls")),
++    path("", include("apps.billing.urls")),
+     path("", include("apps.vault.urls")),
+     path("", include("apps.astrotrace.urls")),
+     path("", include("apps.integration.urls")),
+diff --git a/config/settings.py b/config/settings.py
+index 40806c0..c9a4198 100644
+--- a/config/settings.py
++++ b/config/settings.py
+@@ -58,6 +58,7 @@ INSTALLED_APPS = [
+     "apps.catalog",
+     "apps.scheduling",
+     "apps.finance",
++    "apps.billing",
+     "apps.vault",
+     "apps.astrotrace",
+     "apps.integration",
+diff --git a/subir_droplet.bat b/subir_droplet.bat
+index 37c8500..57e90df 100644
+--- a/subir_droplet.bat
++++ b/subir_droplet.bat
+@@ -1,25 +1,17 @@
+ @echo off
+ setlocal
+ 
+-set "SCRIPT_DIR=%~dp0"
+-set "PS_SCRIPT=%SCRIPT_DIR%subir_droplet.ps1"
++cd /d "%~dp0"
+ 
+-if not exist "%PS_SCRIPT%" (
+-    echo No encontre el script PowerShell:
+-    echo   "%PS_SCRIPT%"
+-    exit /b 1
+-)
++powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0subir_droplet.ps1" %*
++set "EXITCODE=%ERRORLEVEL%"
+ 
+-if "%~1"=="" (
+-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -UseDefaults -RemoteDir "/opt/consultorios"
++echo.
++if "%EXITCODE%"=="0" (
++    echo Proceso terminado correctamente.
+ ) else (
+-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
+-)
+-set "EXIT_CODE=%ERRORLEVEL%"
+-
+-if not "%EXIT_CODE%"=="0" (
+-    echo.
+-    echo El despliegue fallo con codigo %EXIT_CODE%.
++    echo El proceso fallo con codigo %EXITCODE%.
+ )
+-
+-exit /b %EXIT_CODE%
++echo.
++pause
++exit /b %EXITCODE%
+diff --git a/subir_droplet.ps1 b/subir_droplet.ps1
+index 79ea487..4efa6a7 100644
+--- a/subir_droplet.ps1
++++ b/subir_droplet.ps1
+@@ -2,16 +2,14 @@ param(
+     [string]$Server = "143.198.166.39",
+     [string]$User = "root",
+     [string]$RemoteDir = "/opt/consultorios",
++    [string]$ProjectDir = "",
+     [string]$KeyPath = "",
+-    [string]$ComposeFile = "podman-compose.yml",
+-    [string]$SiteUrl = "https://tu-consultorio.com.mx/",
++    [string]$RepositoryUrl = "https://github.com/lfpadron/ConsultoriosCompartidos.git",
+     [switch]$UseDefaults,
+-    [switch]$SkipPull,
+-    [switch]$SkipMigrate,
+-    [switch]$SkipCollectStatic,
+-    [switch]$SkipRestartWeb,
+-    [switch]$SkipNginxReload,
+-    [switch]$RunTests,
++    [switch]$SkipExtract,
++    [switch]$ExtractOnly,
++    [switch]$SkipDeploy,
++    [switch]$KeepArchive,
+     [switch]$Help
+ )
+ 
+@@ -22,16 +20,17 @@ function Show-Help {
+     Write-Host "Uso:"
+     Write-Host "  .\subir_droplet.ps1"
+     Write-Host "  .\subir_droplet.ps1 -UseDefaults"
+-    Write-Host "  .\subir_droplet.ps1 -Server 143.198.166.39 -User root -RemoteDir /opt/consultorios"
++    Write-Host "  .\subir_droplet.ps1 -Server 143.198.166.39 -User root"
+     Write-Host ""
+     Write-Host "Opciones utiles:"
+-    Write-Host "  -UseDefaults        No pregunta valores; usa los parametros/defaults."
+-    Write-Host "  -RunTests           Ejecuta pytest local antes de desplegar."
+-    Write-Host "  -SkipPull           No ejecuta git pull en el droplet."
+-    Write-Host "  -SkipMigrate        No ejecuta manage.py migrate."
+-    Write-Host "  -SkipCollectStatic  No ejecuta collectstatic."
+-    Write-Host "  -SkipRestartWeb     No reinicia el contenedor web."
+-    Write-Host "  -SkipNginxReload    No recarga nginx."
++    Write-Host "  -UseDefaults   No pregunta valores; usa los parametros/defaults."
++    Write-Host "  -SkipExtract   Solo sube el paquete a /tmp; no lo extrae."
++    Write-Host "  -ExtractOnly   Usa el paquete que ya existe en /tmp."
++    Write-Host "  -SkipDeploy    Extrae archivos, pero no reconstruye ni migra."
++    Write-Host "  -KeepArchive   Conserva el archivo .tar.gz local."
++    Write-Host ""
++    Write-Host "Requisito remoto:"
++    Write-Host "  Debe existir $RemoteDir/.env con valores de produccion."
+ }
+ 
+ function Read-Default {
+@@ -77,124 +76,224 @@ function Quote-Sh {
+     return "'" + ($Value -replace "'", "'\''") + "'"
+ }
+ 
++function Test-RepositoryOrigin {
++    param(
++        [string]$Directory,
++        [string]$ExpectedUrl
++    )
++
++    if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
++        Write-Warning "No encontre git; omito la validacion del repositorio local."
++        return
++    }
++
++    $gitDirectory = Join-Path $Directory ".git"
++    if (-not (Test-Path -LiteralPath $gitDirectory)) {
++        Write-Warning "La carpeta local no contiene .git; omito la validacion del origen."
++        return
++    }
++
++    $origin = (& git -C $Directory config --get remote.origin.url 2>$null | Select-Object -First 1)
++    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($origin)) {
++        Write-Warning "No pude leer remote.origin.url."
++        return
++    }
++
++    $originText = $origin.Trim()
++    if ($originText -ne $ExpectedUrl) {
++        Write-Warning "El origen local es '$originText'; se esperaba '$ExpectedUrl'."
++    }
++
++    $changes = & git -C $Directory status --short
++    if ($LASTEXITCODE -eq 0 -and $changes) {
++        Write-Warning "Hay cambios locales sin confirmar; se incluiran en el despliegue."
++    }
++}
++
+ if ($Help) {
+     Show-Help
+     exit 0
+ }
+ 
+ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
++if ([string]::IsNullOrWhiteSpace($ProjectDir)) {
++    $ProjectDir = $ScriptDir
++}
+ if ([string]::IsNullOrWhiteSpace($KeyPath)) {
+-    $defaultKeyPath = Join-Path $ScriptDir "key_consultorios_dev"
+-    if (Test-Path -LiteralPath $defaultKeyPath -PathType Leaf) {
+-        $KeyPath = $defaultKeyPath
+-    }
++    $KeyPath = Join-Path $ScriptDir "key_consultorios_dev"
+ }
+ 
+ if (-not $UseDefaults) {
+     Write-Host ""
+-    Write-Host "Despliegue interactivo al droplet de Consultorios Compartidos"
++    Write-Host "Despliegue interactivo de Consultorios Compartidos"
+     Write-Host "Puedes presionar Enter para aceptar cada valor."
+     Write-Host ""
+     $Server = Read-Default "IP o dominio del droplet" $Server
+     $User = Read-Default "Usuario SSH" $User
+-    $RemoteDir = Read-Default "Carpeta del proyecto en el droplet" $RemoteDir
++    $RemoteDir = Read-Default "Carpeta destino remota" $RemoteDir
++    $ProjectDir = Read-Default "Carpeta local del proyecto" $ProjectDir
+     $KeyPath = Read-Default "Llave privada SSH" $KeyPath
+-    $ComposeFile = Read-Default "Archivo compose" $ComposeFile
+-    $SiteUrl = Read-Default "URL publica para smoke test" $SiteUrl
+-}
+-
+-if ([string]::IsNullOrWhiteSpace($RemoteDir)) {
+-    $RemoteDir = "/opt/consultorios"
+-}
+-else {
+-    $RemoteDir = $RemoteDir.TrimEnd("/")
+-}
+-
+-if (-not [string]::IsNullOrWhiteSpace($KeyPath)) {
+-    $KeyPath = [System.IO.Path]::GetFullPath($KeyPath)
+ }
+ 
++$ProjectDir = [System.IO.Path]::GetFullPath($ProjectDir)
++$KeyPath = [System.IO.Path]::GetFullPath($KeyPath)
+ $Remote = "$User@$Server"
++$RemoteArchive = "/tmp/consultorios-compartidos-deploy.tar.gz"
++$Timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
++$LocalArchive = Join-Path ([System.IO.Path]::GetTempPath()) "consultorios-compartidos-deploy-$Timestamp.tar.gz"
++$createdArchive = $false
++$sshOptions = @(
++    "-i", $KeyPath,
++    "-o", "IdentitiesOnly=yes",
++    "-o", "StrictHostKeyChecking=accept-new",
++    "-o", "ConnectTimeout=15"
++)
+ 
+ try {
+     Test-Command "ssh"
++    Test-Command "scp"
++    Test-Command "tar"
+ 
+-    if (-not [string]::IsNullOrWhiteSpace($KeyPath) -and -not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
++    if (-not (Test-Path -LiteralPath $ProjectDir -PathType Container)) {
++        throw "No existe la carpeta local del proyecto: $ProjectDir"
++    }
++    if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
+         throw "No existe la llave privada SSH: $KeyPath"
+     }
+-
+-    Write-Host ""
+-    Write-Host "Resumen:"
+-    Write-Host "  Remoto:  ${Remote}:$RemoteDir"
+-    Write-Host "  Compose: $ComposeFile"
+-    if (-not [string]::IsNullOrWhiteSpace($KeyPath)) {
+-        Write-Host "  Llave:   $KeyPath"
++    if (-not (Test-Path -LiteralPath (Join-Path $ProjectDir "podman-compose.yml") -PathType Leaf)) {
++        throw "No existe podman-compose.yml en: $ProjectDir"
+     }
+-    else {
+-        Write-Host "  Llave:   SSH usara su configuracion por defecto"
++    if (-not (Test-Path -LiteralPath (Join-Path $ProjectDir "Dockerfile") -PathType Leaf)) {
++        throw "No existe Dockerfile en: $ProjectDir"
+     }
+-    Write-Host "  URL:     $SiteUrl"
+-
+-    if ($RunTests) {
+-        Invoke-Native "Ejecutando pruebas locales" "uv" @("run", "pytest")
++    if ($SkipExtract -and $ExtractOnly) {
++        throw "No puedes usar -SkipExtract y -ExtractOnly al mismo tiempo."
+     }
+ 
+-    $remoteDirQ = Quote-Sh $RemoteDir
+-    $composeFileQ = Quote-Sh $ComposeFile
+-    $remoteDeploySteps = @(
+-        "set -e",
+-        "cd $remoteDirQ",
+-        "if [ ! -s $composeFileQ ]; then echo '$ComposeFile no existe o esta vacio en $RemoteDir' >&2; exit 1; fi",
+-        "if [ ! -s .env ]; then echo '.env no existe o esta vacio en $RemoteDir' >&2; exit 1; fi",
+-        "systemctl enable docker >/dev/null 2>&1 || true",
+-        "systemctl start docker >/dev/null 2>&1 || true"
+-    )
++    Test-RepositoryOrigin -Directory $ProjectDir -ExpectedUrl $RepositoryUrl
+ 
+-    if (-not $SkipPull) {
+-        $remoteDeploySteps += "git pull"
++    Write-Host ""
++    Write-Host "Resumen:"
++    Write-Host "  Repositorio: $RepositoryUrl"
++    Write-Host "  Local:       $ProjectDir"
++    Write-Host "  Remoto:      ${Remote}:$RemoteDir"
++    Write-Host "  Llave:       $KeyPath"
++    Write-Host ""
++    Write-Host "Nota: si la llave tiene passphrase, SSH la pedira durante scp y ssh."
++
++    if (-not $ExtractOnly) {
++        $keyName = Split-Path -Leaf $KeyPath
++        $excludePatterns = @(
++            ".git",
++            ".env",
++            ".env.local",
++            ".env.production",
++            ".env.staging",
++            ".venv",
++            ".mypy_cache",
++            ".pytest_cache",
++            ".ruff_cache",
++            "__pycache__",
++            "*.pyc",
++            "*.sqlite3",
++            "db.sqlite3",
++            "media",
++            "staticfiles",
++            "tmp",
++            "diff-*.txt",
++            "*.pem",
++            "*.key",
++            $keyName,
++            "$keyName.pub"
++        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
++
++        $tarArgs = @("-czf", $LocalArchive)
++        foreach ($pattern in $excludePatterns) {
++            $tarArgs += @("--exclude", $pattern)
++        }
++        $tarArgs += @("-C", $ProjectDir, ".")
++
++        Invoke-Native "Empaquetando codigo local" "tar" $tarArgs
++        $createdArchive = $true
++
++        Invoke-Native "Subiendo paquete a ${Remote}:$RemoteArchive" "scp" @(
++            $sshOptions
++            $LocalArchive
++            "${Remote}:$RemoteArchive"
++        )
+     }
+-
+-    $remoteDeploySteps += "docker compose -f $composeFileQ up -d --build"
+-
+-    if (-not $SkipMigrate) {
+-        $remoteDeploySteps += "docker compose -f $composeFileQ exec -T web uv run python manage.py migrate"
++    else {
++        Write-Host ""
++        Write-Host "Modo ExtractOnly: usare el paquete remoto $RemoteArchive."
+     }
+ 
+-    if (-not $SkipCollectStatic) {
+-        $remoteDeploySteps += "docker compose -f $composeFileQ exec -T web uv run python manage.py collectstatic --noinput"
+-    }
++    if (-not $SkipExtract) {
++        $remoteDirQ = Quote-Sh $RemoteDir
++        $remoteArchiveQ = Quote-Sh $RemoteArchive
++        $remoteCommand = "set -e; mkdir -p $remoteDirQ; tar -xzf $remoteArchiveQ -C $remoteDirQ; rm -f $remoteArchiveQ; printf 'Archivos en destino: '; find $remoteDirQ -mindepth 1 -maxdepth 1 | wc -l"
+ 
+-    if (-not $SkipRestartWeb) {
+-        $remoteDeploySteps += "docker compose -f $composeFileQ restart web"
+-        $remoteDeploySteps += "docker compose -f $composeFileQ up -d web"
+-        $remoteDeploySteps += "sleep 8"
++        Invoke-Native "Extrayendo paquete en $RemoteDir" "ssh" @(
++            $sshOptions
++            $Remote
++            $remoteCommand
++        )
+     }
+-
+-    if (-not $SkipNginxReload) {
+-        $remoteDeploySteps += "systemctl reload nginx"
++    else {
++        Write-Host ""
++        Write-Host "SkipExtract activo: el paquete quedo en ${Remote}:$RemoteArchive"
+     }
+ 
+-    $remoteDeploySteps += "docker compose -f $composeFileQ ps"
+-    $remoteDeploySteps += "curl -fsSIL --max-time 10 http://127.0.0.1:8000/ >/dev/null || echo 'Aviso: Django no respondio localmente despues del despliegue; si el navegador muestra 502 revisa logs de web.' >&2"
+-    $remoteDeploySteps += "curl -fsSIL --max-time 15 $(Quote-Sh $SiteUrl) >/dev/null || echo 'Aviso: la URL publica no respondio correctamente; revisa nginx/DNS si el navegador falla.' >&2"
+-
+-    $remoteDeployCommand = $remoteDeploySteps -join "; "
+-    $sshArgs = @()
+-    if (-not [string]::IsNullOrWhiteSpace($KeyPath)) {
+-        $sshArgs += @("-i", $KeyPath)
++    if (-not $SkipExtract -and -not $SkipDeploy) {
++        $remoteDirQ = Quote-Sh $RemoteDir
++        $remoteDeploySteps = @(
++            "set -e",
++            "cd $remoteDirQ",
++            "if [ ! -s podman-compose.yml ]; then echo 'podman-compose.yml no existe o esta vacio en $RemoteDir' >&2; exit 1; fi",
++            "if [ ! -s .env ]; then echo '.env no existe o esta vacio en $RemoteDir' >&2; exit 1; fi",
++            "command -v docker >/dev/null 2>&1 || { echo 'Docker no esta instalado' >&2; exit 1; }",
++            "docker compose version >/dev/null",
++            "export COMPOSE_BAKE=false",
++            "docker compose -f podman-compose.yml config --quiet",
++            "docker compose -f podman-compose.yml build web celery celery-beat",
++            "docker compose -f podman-compose.yml up -d postgres redis minio",
++            'attempt=0; until docker compose -f podman-compose.yml exec -T postgres sh -c ''pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'' >/dev/null 2>&1; do attempt=$((attempt+1)); if [ $attempt -ge 30 ]; then echo ''PostgreSQL no quedo listo a tiempo'' >&2; docker compose -f podman-compose.yml logs --tail=120 postgres; exit 1; fi; sleep 2; done',
++            "docker compose -f podman-compose.yml run --rm web uv run python manage.py migrate --noinput",
++            "docker compose -f podman-compose.yml run --rm web uv run python manage.py collectstatic --noinput",
++            "docker compose -f podman-compose.yml up -d --force-recreate web celery celery-beat",
++            "docker compose -f podman-compose.yml exec -T web uv run python manage.py check",
++            "if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx; then systemctl reload nginx; fi",
++            'if [ -n "$(docker compose -f podman-compose.yml port redis 6379 2>/dev/null || true)" ]; then echo ''Redis esta publicado en el host; corrige podman-compose.yml'' >&2; exit 1; fi',
++            'if command -v ss >/dev/null 2>&1 && ss -lntH | awk ''{print $4}'' | grep -Eq ''^(0\.0\.0\.0:6379|\*:6379|:::6379|\[::\]:6379)$''; then echo ''Redis escucha publicamente en 6379. Revisa Redis del host y el firewall.'' >&2; exit 1; fi',
++            'if command -v curl >/dev/null 2>&1; then attempt=0; until curl -fsS http://127.0.0.1:8000/login/ >/dev/null; do attempt=$((attempt+1)); if [ $attempt -ge 30 ]; then echo ''La aplicacion no respondio en http://127.0.0.1:8000/login/'' >&2; docker compose -f podman-compose.yml logs --tail=120 web; exit 1; fi; sleep 2; done; fi',
++            "docker compose -f podman-compose.yml ps"
++        )
++        $remoteDeployCommand = $remoteDeploySteps -join "; "
++
++        Invoke-Native "Reconstruyendo contenedores y aplicando migraciones" "ssh" @(
++            $sshOptions
++            $Remote
++            $remoteDeployCommand
++        )
++    }
++    elseif ($SkipDeploy) {
++        Write-Host ""
++        Write-Host "SkipDeploy activo: no se reconstruyeron contenedores ni se aplicaron migraciones."
+     }
+-    $sshArgs += @("-o", "StrictHostKeyChecking=accept-new", $Remote, $remoteDeployCommand)
+-
+-    Invoke-Native "Desplegando en $RemoteDir" "ssh" $sshArgs
+ 
+     Write-Host ""
+     Write-Host "Despliegue completado correctamente."
+-    if (-not [string]::IsNullOrWhiteSpace($SiteUrl)) {
+-        Write-Host "URL publica: $SiteUrl"
+-    }
++    Write-Host "Aplicacion: http://${Server}:8000/"
+ }
+ catch {
+     Write-Host ""
+     Write-Host "Fallo el despliegue: $($_.Exception.Message)" -ForegroundColor Red
+     exit 1
+ }
++finally {
++    if ($createdArchive -and -not $KeepArchive -and (Test-Path -LiteralPath $LocalArchive)) {
++        Remove-Item -LiteralPath $LocalArchive -Force
++    }
++    elseif ($createdArchive -and $KeepArchive) {
++        Write-Host "Paquete local conservado: $LocalArchive"
++    }
++}

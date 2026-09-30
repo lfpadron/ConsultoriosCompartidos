@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="billing-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#billing-content" hx-select="#billing-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Configuración comercial</p>
+        <h1 class="h4 mb-0">{{ page_title }}</h1>
+      </div>
+      <a class="btn btn-outline-secondary" href="{% url 'cancellation_policies' %}">
+        <i class="bi bi-arrow-left me-1"></i>
+        Volver
+      </a>
+    </div>
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
+      {% endif %}
+
+      <div class="row g-3">
+        {% for field in form %}
+          <div class="{% if field.name == 'notes' %}col-12{% else %}col-md-6{% endif %}">
+            <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {% if field.name == "clinic" %}
+              <div class="input-group">
+                {{ field }}
+                <button class="btn btn-outline-secondary" type="submit" formmethod="get">
+                  <i class="bi bi-funnel"></i>
+                  <span class="visually-hidden">Filtrar consultorios</span>
+                </button>
+              </div>
+            {% else %}
+              {{ field }}
+            {% endif %}
+            {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+            {% for error in field.errors %}
+              <div class="invalid-feedback d-block">{{ error }}</div>
+            {% endfor %}
+          </div>
+        {% endfor %}
+      </div>
+
+      <hr class="my-4">
+      <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
+        <h2 class="h6 mb-0">Tabla de penalizaciones</h2>
+        <button class="btn btn-outline-primary btn-sm" type="button" id="add-penalty-row">
+          <i class="bi bi-plus-lg me-1"></i>
+          Agregar regla
+        </button>
+      </div>
+
+      {{ penalty_formset.management_form }}
+      {% if penalty_formset.non_form_errors %}
+        <div class="alert alert-danger" role="alert">{{ penalty_formset.non_form_errors }}</div>
+      {% endif %}
+      <div id="penalty-rows" class="d-flex flex-column gap-3">
+        {% for penalty_form in penalty_formset %}
+          <div class="row g-3 align-items-end penalty-row">
+            <div class="col-md-5">
+              <label class="form-label" for="{{ penalty_form.days_before.id_for_label }}">{{ penalty_form.days_before.label }}</label>
+              {{ penalty_form.days_before }}
+              {% for error in penalty_form.days_before.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+            </div>
+            <div class="col-md-5">
+              <label class="form-label" for="{{ penalty_form.percentage.id_for_label }}">{{ penalty_form.percentage.label }}</label>
+              <div class="input-group">
+                {{ penalty_form.percentage }}
+                <span class="input-group-text">%</span>
+              </div>
+              {% for error in penalty_form.percentage.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
+            </div>
+            <div class="col-md-2">
+              <div class="form-check mb-2">
+                {{ penalty_form.DELETE }}
+                <label class="form-check-label" for="{{ penalty_form.DELETE.id_for_label }}">Omitir</label>
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+
+      <template id="empty-penalty-form">
+        <div class="row g-3 align-items-end penalty-row">
+          <div class="col-md-5">
+            <label class="form-label" for="{{ penalty_formset.empty_form.days_before.id_for_label }}">{{ penalty_formset.empty_form.days_before.label }}</label>
+            {{ penalty_formset.empty_form.days_before }}
+          </div>
+          <div class="col-md-5">
+            <label class="form-label" for="{{ penalty_formset.empty_form.percentage.id_for_label }}">{{ penalty_formset.empty_form.percentage.label }}</label>
+            <div class="input-group">
+              {{ penalty_formset.empty_form.percentage }}
+              <span class="input-group-text">%</span>
+            </div>
+          </div>
+          <div class="col-md-2">
+            <div class="form-check mb-2">
+              {{ penalty_formset.empty_form.DELETE }}
+              <label class="form-check-label" for="{{ penalty_formset.empty_form.DELETE.id_for_label }}">Omitir</label>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <div class="d-flex justify-content-end gap-2 mt-4">
+        <a class="btn btn-outline-secondary" href="{% url 'cancellation_policies' %}">
+          <i class="bi bi-x-lg me-1"></i>
+          Cancelar
+        </a>
+        <button class="btn btn-primary" type="submit">
+          <i class="bi bi-save me-1"></i>
+          Guardar política
+        </button>
+      </div>
+    </form>
+  </section>
+
+  <script>
+    (() => {
+      const addButton = document.getElementById("add-penalty-row");
+      const rows = document.getElementById("penalty-rows");
+      const totalForms = document.getElementById("id_penalties-TOTAL_FORMS");
+      const template = document.getElementById("empty-penalty-form");
+      if (!addButton || !rows || !totalForms || !template) return;
+
+      addButton.addEventListener("click", () => {
+        const index = Number(totalForms.value);
+        const html = template.innerHTML.replaceAll("__prefix__", String(index));
+        rows.insertAdjacentHTML("beforeend", html);
+        totalForms.value = String(index + 1);
+      });
+    })();
+  </script>
+{% endblock %}
