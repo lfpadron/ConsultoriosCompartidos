@@ -10,7 +10,6 @@ from django.http import (
     HttpRequest,
     HttpResponse,
     HttpResponseBase,
-    HttpResponseForbidden,
 )
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -19,35 +18,30 @@ from django.views.generic import DetailView, FormView, ListView, TemplateView
 from django.views.generic.edit import FormMixin
 
 from apps.astrotrace.services import record_event
+from apps.core.permissions import can_edit_screen, get_user_roles
 from apps.identity.forms import (
     ForcedPasswordChangeForm,
     ManagedUserFilterForm,
     ManagedUserForm,
+    PermissionMatrixForm,
     ProfilePasswordChangeForm,
 )
-from apps.identity.models import CustomUser, UserRole
+from apps.identity.models import ApplicationScreen, CustomUser, UserRole
+from apps.identity.permission_service import update_permission_matrix
 from apps.identity.services import send_user_invitation
-
-MANAGER_ROLES = {UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.OWNER}
 
 
 class UserManagementPermissionMixin(LoginRequiredMixin):
-    """Allow only operational user managers into the user CRUD."""
-
-    def dispatch(
-        self,
-        request: HttpRequest,
-        *args: Any,
-        **kwargs: Any,
-    ) -> HttpResponseBase:
-        if getattr(request.user, "role", "") not in MANAGER_ROLES:
-            return HttpResponseForbidden("No tienes permiso para administrar usuarios.")
-        return super().dispatch(request, *args, **kwargs)
+    """Scope user management after screen access is enforced by middleware."""
 
     def get_queryset(self) -> QuerySet[CustomUser]:
         return scope_users_for_manager(
             CustomUser.objects.all()
-            .prefetch_related("assigned_clinics", "assigned_owners")
+            .prefetch_related(
+                "assigned_clinics",
+                "assigned_owners",
+                "role_assignments",
+            )
             .order_by("email"),
             cast(Any, self).request.user,
         )
@@ -79,7 +73,14 @@ class UserListView(UserManagementPermissionMixin, ListView):
                 | Q(phone__icontains=self.search_query)
             )
         if role:
-            queryset = queryset.filter(role=role)
+            queryset = queryset.filter(
+                Q(role=role)
+                | Q(
+                    role_assignments__role=role,
+                    role_assignments__is_active=True,
+                    role_assignments__is_deleted=False,
+                )
+            )
         if is_active in {"0", "1"}:
             queryset = queryset.filter(is_active=is_active == "1")
         return queryset.distinct()
@@ -102,6 +103,9 @@ class UserDetailView(UserManagementPermissionMixin, DetailView):
         context["page_title"] = "Detalle de usuario"
         context["assigned_clinics"] = user.assigned_clinics.filter(is_deleted=False)
         context["assigned_owners"] = user.assigned_owners.filter(is_deleted=False)
+        context["role_labels"] = [
+            dict(UserRole.choices)[role] for role in sorted(user.get_role_values())
+        ]
         context["owner_profile"] = getattr(user, "owner_profile", None)
         context["tenant_doctor_profile"] = getattr(user, "tenant_doctor_profile", None)
         return context
@@ -155,7 +159,11 @@ class UserFormView(UserManagementPermissionMixin, FormMixin, TemplateView):
             event_type=event_type,
             object_label=user.email,
             actor=cast(Model, self.request.user),
-            payload={"user_id": str(user.pk), "role": user.role},
+            payload={
+                "user_id": str(user.pk),
+                "primary_role": user.role,
+                "roles": sorted(user.get_role_values()),
+            },
         )
 
         temporary_password = form.cleaned_data.get("temporary_password") or ""
@@ -267,8 +275,13 @@ class ProfileView(LoginRequiredMixin, FormView):
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
+        profile_user = cast(CustomUser, self.request.user)
         context["page_title"] = "Perfil"
-        context["profile_user"] = self.request.user
+        context["profile_user"] = profile_user
+        context["role_labels"] = [
+            dict(UserRole.choices)[role]
+            for role in sorted(profile_user.get_role_values())
+        ]
         return context
 
     def form_valid(self, form: ProfilePasswordChangeForm) -> HttpResponse:
@@ -288,11 +301,18 @@ def scope_users_for_manager(
     queryset: QuerySet[CustomUser],
     manager: Any,
 ) -> QuerySet[CustomUser]:
-    role = getattr(manager, "role", "")
-    if role == UserRole.SUPERADMIN:
+    roles = get_user_roles(manager)
+    if UserRole.SUPERADMIN in roles:
         return queryset
-    if role == UserRole.ADMIN:
-        scoped = queryset.exclude(role=UserRole.SUPERADMIN)
+    if UserRole.ADMIN in roles:
+        scoped = queryset.exclude(
+            Q(role=UserRole.SUPERADMIN)
+            | Q(
+                role_assignments__role=UserRole.SUPERADMIN,
+                role_assignments__is_active=True,
+                role_assignments__is_deleted=False,
+            )
+        )
         clinics = manager.assigned_clinics.filter(is_deleted=False)
         if not clinics.exists():
             return scoped
@@ -303,11 +323,93 @@ def scope_users_for_manager(
             | Q(tenant_doctor_profile__assigned_rooms__clinic__in=clinics)
             | Q(assigned_owners__consulting_rooms__clinic__in=clinics)
         ).distinct()
-    if role == UserRole.OWNER:
+    if UserRole.OWNER in roles:
         owner = getattr(manager, "owner_profile", None)
         if owner is None:
             return queryset.filter(pk=manager.pk)
         return queryset.filter(
-            Q(pk=manager.pk) | Q(role=UserRole.ASSISTANT, assigned_owners=owner)
+            Q(pk=manager.pk)
+            | (
+                Q(assigned_owners=owner)
+                & (
+                    Q(role=UserRole.ASSISTANT)
+                    | Q(
+                        role_assignments__role=UserRole.ASSISTANT,
+                        role_assignments__is_active=True,
+                        role_assignments__is_deleted=False,
+                    )
+                )
+            )
         ).distinct()
-    return queryset.none()
+    return queryset.filter(pk=manager.pk)
+
+
+class PermissionMatrixView(LoginRequiredMixin, FormMixin, TemplateView):
+    template_name = "identity/permission_matrix.html"
+    form_class = PermissionMatrixForm
+
+    def get_screens(self) -> QuerySet[ApplicationScreen]:
+        return ApplicationScreen.objects.filter(
+            is_active=True,
+            is_deleted=False,
+        ).order_by("sort_order", "label")
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["screens"] = self.get_screens()
+        kwargs["can_edit"] = can_edit_screen(self.request.user, "permissions")
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        form = context["form"]
+        rows = []
+        for screen in form.screens:
+            cells = []
+            for role, role_label in UserRole.choices:
+                cells.append(
+                    {
+                        "role": role,
+                        "role_label": role_label,
+                        "field": form[form.field_name(role, screen.key)],
+                        "is_protected": (
+                            role == UserRole.SUPERADMIN
+                            and screen.key == "permissions"
+                        ),
+                    }
+                )
+            rows.append({"screen": screen, "cells": cells})
+        context.update(
+            {
+                "page_title": "Gestión de permisos",
+                "roles": UserRole.choices,
+                "matrix_rows": rows,
+                "can_edit_permissions": can_edit_screen(
+                    self.request.user,
+                    "permissions",
+                ),
+            }
+        )
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        if form.is_valid():
+            return self.form_valid(form)
+        return self.form_invalid(form)
+
+    def form_valid(self, form: PermissionMatrixForm) -> HttpResponse:
+        levels = {
+            (role, screen.key): form.access_level_for(role, screen.key)
+            for screen in form.screens
+            for role, _label in UserRole.choices
+        }
+        updated = update_permission_matrix(
+            levels=levels,
+            actor=cast(Model, self.request.user),
+        )
+        messages.success(
+            self.request,
+            f"Permisos actualizados: {updated} cambio(s).",
+        )
+        return redirect("permissions")

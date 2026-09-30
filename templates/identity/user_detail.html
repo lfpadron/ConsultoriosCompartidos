@@ -13,25 +13,29 @@
             <i class="bi bi-arrow-left me-1"></i>
             Volver
           </a>
-          <form method="post" action="{% url 'user_send_invitation' managed_user.pk %}">
-            {% csrf_token %}
-            <button class="btn btn-outline-secondary" type="submit">
-              <i class="bi bi-envelope me-1"></i>
-              Reenviar invitación
-            </button>
-          </form>
-          <a class="btn btn-primary" href="{% url 'user_update' managed_user.pk %}">
-            <i class="bi bi-pencil me-1"></i>
-            Editar
-          </a>
+          {% if current_screen_can_edit %}
+            <form method="post" action="{% url 'user_send_invitation' managed_user.pk %}">
+              {% csrf_token %}
+              <button class="btn btn-outline-secondary" type="submit">
+                <i class="bi bi-envelope me-1"></i>
+                Reenviar invitación
+              </button>
+            </form>
+            <a class="btn btn-primary" href="{% url 'user_update' managed_user.pk %}">
+              <i class="bi bi-pencil me-1"></i>
+              Editar
+            </a>
+          {% endif %}
         </div>
       </div>
 
       <dl class="row mb-0">
         <dt class="col-sm-4 col-lg-3 text-secondary">Nombre</dt>
         <dd class="col-sm-8 col-lg-9">{{ managed_user.full_name|default:"Sin datos" }}</dd>
-        <dt class="col-sm-4 col-lg-3 text-secondary">Grupo</dt>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Rol principal</dt>
         <dd class="col-sm-8 col-lg-9">{{ managed_user.get_role_display }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Roles activos</dt>
+        <dd class="col-sm-8 col-lg-9">{{ role_labels|join:", " }}</dd>
         <dt class="col-sm-4 col-lg-3 text-secondary">Teléfono</dt>
         <dd class="col-sm-8 col-lg-9">{{ managed_user.phone|default:"Sin datos" }}</dd>
         <dt class="col-sm-4 col-lg-3 text-secondary">Correo alterno</dt>

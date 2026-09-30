@@ -7,10 +7,12 @@
         <p class="text-uppercase text-secondary small fw-semibold mb-2">Administración</p>
         <h1 class="h4 mb-0">Usuarios</h1>
       </div>
-      <a class="btn btn-primary" href="{% url 'user_create' %}">
-        <i class="bi bi-plus-lg me-1"></i>
-        Nuevo usuario
-      </a>
+      {% if current_screen_can_edit %}
+        <a class="btn btn-primary" href="{% url 'user_create' %}">
+          <i class="bi bi-plus-lg me-1"></i>
+          Nuevo usuario
+        </a>
+      {% endif %}
     </div>
 
     <form method="get" class="row g-3 align-items-end mb-3">
@@ -57,7 +59,7 @@
             <tr>
               <td>{{ managed_user.email }}</td>
               <td>{{ managed_user.full_name|default:"Sin nombre" }}</td>
-              <td>{{ managed_user.get_role_display }}</td>
+              <td>{{ managed_user.role_display_names|join:", " }}</td>
               <td>{{ managed_user.phone|default:"Sin datos" }}</td>
               <td>
                 {% if managed_user.is_active %}
@@ -74,12 +76,14 @@
                   <a class="btn btn-outline-secondary" href="{% url 'user_detail' managed_user.pk %}" title="Ver detalle">
                     <i class="bi bi-eye"></i>
                   </a>
-                  <a class="btn btn-outline-secondary" href="{% url 'user_update' managed_user.pk %}" title="Editar">
-                    <i class="bi bi-pencil"></i>
-                  </a>
-                  <a class="btn btn-outline-danger" href="{% url 'user_deactivate' managed_user.pk %}" title="Desactivar">
-                    <i class="bi bi-slash-circle"></i>
-                  </a>
+                  {% if current_screen_can_edit %}
+                    <a class="btn btn-outline-secondary" href="{% url 'user_update' managed_user.pk %}" title="Editar">
+                      <i class="bi bi-pencil"></i>
+                    </a>
+                    <a class="btn btn-outline-danger" href="{% url 'user_deactivate' managed_user.pk %}" title="Desactivar">
+                      <i class="bi bi-slash-circle"></i>
+                    </a>
+                  {% endif %}
                 </div>
               </td>
             </tr>

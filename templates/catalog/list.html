@@ -7,10 +7,12 @@
         <p class="text-uppercase text-secondary small fw-semibold mb-2">Catálogo</p>
         <h1 class="h4 mb-0">{{ resource.plural_label }}</h1>
       </div>
-      <a class="btn btn-primary" href="{% url resource.create_url_name %}">
-        <i class="bi bi-plus-lg me-1"></i>
-        Nuevo
-      </a>
+      {% if current_screen_can_edit %}
+        <a class="btn btn-primary" href="{% url resource.create_url_name %}">
+          <i class="bi bi-plus-lg me-1"></i>
+          Nuevo
+        </a>
+      {% endif %}
     </div>
 
     {% if filter_form %}
@@ -80,12 +82,14 @@
                   <a class="btn btn-outline-secondary" href="{% url resource.detail_url_name row.object.pk %}" title="Ver detalle">
                     <i class="bi bi-eye"></i>
                   </a>
-                  <a class="btn btn-outline-secondary" href="{% url resource.update_url_name row.object.pk %}" title="Editar">
-                    <i class="bi bi-pencil"></i>
-                  </a>
-                  <a class="btn btn-outline-danger" href="{% url resource.deactivate_url_name row.object.pk %}" title="Desactivar">
-                    <i class="bi bi-slash-circle"></i>
-                  </a>
+                  {% if current_screen_can_edit %}
+                    <a class="btn btn-outline-secondary" href="{% url resource.update_url_name row.object.pk %}" title="Editar">
+                      <i class="bi bi-pencil"></i>
+                    </a>
+                    <a class="btn btn-outline-danger" href="{% url resource.deactivate_url_name row.object.pk %}" title="Desactivar">
+                      <i class="bi bi-slash-circle"></i>
+                    </a>
+                  {% endif %}
                 </div>
               </td>
             </tr>

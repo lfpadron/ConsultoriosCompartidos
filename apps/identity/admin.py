@@ -4,7 +4,19 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.utils.translation import gettext_lazy as _
 
-from apps.identity.models import CustomUser
+from apps.identity.models import (
+    ApplicationScreen,
+    CustomUser,
+    RoleScreenPermission,
+    UserRoleAssignment,
+)
+
+
+class UserRoleAssignmentInline(admin.TabularInline):
+    model = UserRoleAssignment
+    fk_name = "user"
+    extra = 0
+    fields = ("role", "is_active")
 
 
 @admin.register(CustomUser)
@@ -34,6 +46,7 @@ class CustomUserAdmin(UserAdmin):
         "assigned_clinics",
         "assigned_owners",
     )
+    inlines = (UserRoleAssignmentInline,)
     fieldsets = (
         (None, {"fields": ("email", "password")}),
         (
@@ -91,3 +104,24 @@ class CustomUserAdmin(UserAdmin):
             },
         ),
     )
+
+
+@admin.register(ApplicationScreen)
+class ApplicationScreenAdmin(admin.ModelAdmin):
+    list_display = ("label", "key", "url_name", "sort_order", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("label", "key", "url_name")
+    ordering = ("sort_order", "label")
+
+
+@admin.register(RoleScreenPermission)
+class RoleScreenPermissionAdmin(admin.ModelAdmin):
+    list_display = ("screen", "role", "access_level", "is_active")
+    list_filter = ("role", "access_level", "is_active")
+    search_fields = ("screen__label", "screen__key")
+    list_select_related = ("screen",)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and obj.is_protected_permission:
+            return False
+        return super().has_delete_permission(request, obj)

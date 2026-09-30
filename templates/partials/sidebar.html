@@ -11,10 +11,17 @@
   </a>
   <nav class="sidebar-nav nav nav-pills flex-column gap-1">
     {% for item in navigation_items %}
-      <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
-        <i class="bi {{ item.icon }}"></i>
-        <span>{{ item.label }}</span>
-      </a>
+      {% if item.access_level == "none" %}
+        <span class="nav-link nav-link-unavailable d-flex align-items-center gap-2" aria-disabled="true">
+          <i class="bi {{ item.icon }}"></i>
+          <span>{{ item.label }}</span>
+        </span>
+      {% else %}
+        <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
+          <i class="bi {{ item.icon }}"></i>
+          <span>{{ item.label }}</span>
+        </a>
+      {% endif %}
     {% endfor %}
   </nav>
   {% if request.user.is_authenticated %}
@@ -40,10 +47,17 @@
   <div class="offcanvas-body d-flex flex-column">
     <nav class="sidebar-nav nav nav-pills flex-column gap-1 flex-grow-1">
       {% for item in navigation_items %}
-        <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
-          <i class="bi {{ item.icon }}"></i>
-          <span>{{ item.label }}</span>
-        </a>
+        {% if item.access_level == "none" %}
+          <span class="nav-link nav-link-unavailable d-flex align-items-center gap-2" aria-disabled="true">
+            <i class="bi {{ item.icon }}"></i>
+            <span>{{ item.label }}</span>
+          </span>
+        {% else %}
+          <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
+            <i class="bi {{ item.icon }}"></i>
+            <span>{{ item.label }}</span>
+          </a>
+        {% endif %}
       {% endfor %}
     </nav>
     {% if request.user.is_authenticated %}

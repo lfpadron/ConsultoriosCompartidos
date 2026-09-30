@@ -5,12 +5,18 @@ from typing import Any, cast
 from django import forms
 from django.contrib.auth import get_user_model, password_validation
 from django.contrib.auth.forms import AuthenticationForm, PasswordChangeForm
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 from django.utils.translation import gettext_lazy as _
 
 from apps.catalog.models import Clinic, OwnerProfile
 from apps.core.form_utils import style_form_fields
-from apps.identity.models import UserRole
+from apps.identity.models import (
+    ApplicationScreen,
+    RoleScreenPermission,
+    ScreenAccessLevel,
+    UserRole,
+)
+from apps.identity.services import sync_user_roles
 
 
 class EmailAuthenticationForm(AuthenticationForm):
@@ -55,6 +61,15 @@ class ManagedUserFilterForm(forms.Form):
 
 
 class ManagedUserForm(forms.ModelForm):
+    additional_roles = forms.MultipleChoiceField(
+        label=_("Roles adicionales"),
+        choices=UserRole.choices,
+        required=False,
+        help_text=_(
+            "Permite que una misma persona opere, por ejemplo, como propietaria "
+            "y médica arrendataria."
+        ),
+    )
     temporary_password = forms.CharField(
         label=_("Contraseña temporal"),
         required=False,
@@ -81,6 +96,7 @@ class ManagedUserForm(forms.ModelForm):
             "secondary_email",
             "secondary_phone",
             "role",
+            "additional_roles",
             "assigned_clinics",
             "assigned_owners",
             "temporary_password",
@@ -89,7 +105,7 @@ class ManagedUserForm(forms.ModelForm):
             "is_active",
         )
         labels = {
-            "role": _("Grupo"),
+            "role": _("Rol principal"),
             "assigned_clinics": _("Clínicas asignadas"),
             "assigned_owners": _("Médicos propietarios asignados"),
         }
@@ -107,6 +123,10 @@ class ManagedUserForm(forms.ModelForm):
             self.fields["temporary_password"].required = True
             self.fields["must_change_password"].initial = True
         role_field = cast(forms.ChoiceField, self.fields["role"])
+        additional_roles_field = cast(
+            forms.MultipleChoiceField,
+            self.fields["additional_roles"],
+        )
         clinics_field = cast(
             forms.ModelMultipleChoiceField,
             self.fields["assigned_clinics"],
@@ -116,6 +136,11 @@ class ManagedUserForm(forms.ModelForm):
             self.fields["assigned_owners"],
         )
         role_field.choices = self._role_choices_for_current_user()
+        additional_roles_field.choices = self._role_choices_for_current_user()
+        if self.instance.pk:
+            additional_roles_field.initial = sorted(
+                self.instance.get_role_values() - {self.instance.role}
+            )
         clinics_field.queryset = self._clinic_queryset()
         owners_field.queryset = self._owner_queryset()
         clinics_field.required = False
@@ -141,41 +166,80 @@ class ManagedUserForm(forms.ModelForm):
             raise forms.ValidationError(_("No puedes asignar ese grupo de usuario."))
         return role
 
+    def clean_additional_roles(self) -> list[str]:
+        roles = set(self.cleaned_data.get("additional_roles") or [])
+        allowed_roles = {
+            value for value, _label in self._role_choices_for_current_user()
+        }
+        invalid_roles = roles - allowed_roles
+        if invalid_roles:
+            raise forms.ValidationError(_("No puedes asignar uno de esos roles."))
+        primary_role = self.cleaned_data.get("role")
+        roles.discard(primary_role)
+        return sorted(roles)
+
     def clean(self) -> dict[str, Any]:
         cleaned_data = super().clean() or {}
         role = cleaned_data.get("role")
+        all_roles = {role, *(cleaned_data.get("additional_roles") or [])}
+        all_roles.discard(None)
         clinics = cleaned_data.get("assigned_clinics")
         owners = cleaned_data.get("assigned_owners")
 
-        if role == UserRole.ADMIN and not clinics:
+        if UserRole.ADMIN in all_roles and not clinics:
             self.add_error(
                 "assigned_clinics",
                 _("Un administrador de negocio debe estar asignado a una clínica."),
             )
-        if role == UserRole.ASSISTANT and not owners:
+        if UserRole.ASSISTANT in all_roles and not owners:
             self.add_error(
                 "assigned_owners",
                 _("Un asistente administrativo debe estar asignado a un propietario."),
             )
+        if UserRole.SUPERADMIN in all_roles:
+            superadmins = get_user_model().objects.filter(is_active=True).filter(
+                Q(role=UserRole.SUPERADMIN)
+                | Q(
+                    role_assignments__role=UserRole.SUPERADMIN,
+                    role_assignments__is_active=True,
+                    role_assignments__is_deleted=False,
+                )
+            )
+            if self.instance.pk:
+                superadmins = superadmins.exclude(pk=self.instance.pk)
+            if superadmins.distinct().count() >= 3:
+                self.add_error(
+                    "role",
+                    _(
+                        "Solo puede haber tres administradores de sistemas "
+                        "activos a la vez."
+                    ),
+                )
         return cleaned_data
 
     def save(self, commit: bool = True) -> Any:
         user = super().save(commit=False)
         role = self.cleaned_data["role"]
+        all_roles = {role, *(self.cleaned_data.get("additional_roles") or [])}
         temporary_password = self.cleaned_data.get("temporary_password")
-        user.is_staff = role == UserRole.SUPERADMIN
-        user.is_superuser = role == UserRole.SUPERADMIN
+        user.is_staff = UserRole.SUPERADMIN in all_roles
+        user.is_superuser = UserRole.SUPERADMIN in all_roles
         if temporary_password:
             user.set_password(temporary_password)
             user.must_change_password = True
         if commit:
             user.save()
             self.save_m2m()
+            sync_user_roles(
+                user=user,
+                roles=all_roles,
+                actor=self.current_user,
+            )
         return user
 
     def _role_choices_for_current_user(self) -> tuple[tuple[str, Any], ...]:
-        current_role = getattr(self.current_user, "role", "")
-        if current_role == UserRole.SUPERADMIN:
+        current_roles = self.current_user.get_role_values()
+        if UserRole.SUPERADMIN in current_roles:
             allowed_roles = {
                 UserRole.SUPERADMIN,
                 UserRole.ADMIN,
@@ -186,7 +250,7 @@ class ManagedUserForm(forms.ModelForm):
                 UserRole.RECEPTIONIST,
                 UserRole.AUDITOR,
             }
-        elif current_role == UserRole.ADMIN:
+        elif UserRole.ADMIN in current_roles:
             allowed_roles = {
                 UserRole.ADMIN,
                 UserRole.OWNER,
@@ -196,7 +260,7 @@ class ManagedUserForm(forms.ModelForm):
                 UserRole.RECEPTIONIST,
                 UserRole.AUDITOR,
             }
-        elif current_role == UserRole.OWNER:
+        elif UserRole.OWNER in current_roles:
             allowed_roles = {UserRole.ASSISTANT}
         else:
             allowed_roles = set()
@@ -206,7 +270,7 @@ class ManagedUserForm(forms.ModelForm):
 
     def _clinic_queryset(self) -> QuerySet[Clinic]:
         queryset = Clinic.objects.filter(is_deleted=False).order_by("name")
-        if getattr(self.current_user, "role", "") == UserRole.ADMIN:
+        if self.current_user.has_role(UserRole.ADMIN):
             assigned = self.current_user.assigned_clinics.filter(is_deleted=False)
             if assigned.exists():
                 queryset = queryset.filter(pk__in=assigned.values("pk"))
@@ -214,14 +278,14 @@ class ManagedUserForm(forms.ModelForm):
 
     def _owner_queryset(self) -> QuerySet[OwnerProfile]:
         queryset = OwnerProfile.objects.filter(is_deleted=False).select_related("user")
-        current_role = getattr(self.current_user, "role", "")
-        if current_role == UserRole.OWNER:
+        current_roles = self.current_user.get_role_values()
+        if UserRole.OWNER in current_roles:
             owner = getattr(self.current_user, "owner_profile", None)
             if owner is not None:
                 queryset = queryset.filter(pk=owner.pk)
             else:
                 queryset = queryset.none()
-        elif current_role == UserRole.ADMIN:
+        elif UserRole.ADMIN in current_roles:
             assigned = self.current_user.assigned_clinics.filter(is_deleted=False)
             if assigned.exists():
                 queryset = queryset.filter(consulting_rooms__clinic__in=assigned)
@@ -283,3 +347,49 @@ class ProfilePasswordChangeForm(PasswordChangeForm):
     def __init__(self, user: Any, *args: Any, **kwargs: Any) -> None:
         super().__init__(user, *args, **kwargs)
         style_form_fields(self.fields)
+
+
+class PermissionMatrixForm(forms.Form):
+    """Dynamic role-by-screen permission matrix."""
+
+    def __init__(
+        self,
+        *args: Any,
+        screens: QuerySet[ApplicationScreen],
+        can_edit: bool,
+        **kwargs: Any,
+    ) -> None:
+        self.screens = list(screens)
+        self.can_edit = can_edit
+        super().__init__(*args, **kwargs)
+        permissions = {
+            (permission.role, permission.screen_id): permission.access_level
+            for permission in RoleScreenPermission.objects.filter(
+                screen__in=self.screens,
+                is_deleted=False,
+            )
+        }
+        for screen in self.screens:
+            for role, _label in UserRole.choices:
+                field_name = self.field_name(role, screen.key)
+                is_protected = (
+                    role == UserRole.SUPERADMIN and screen.key == "permissions"
+                )
+                initial = permissions.get(
+                    (role, screen.pk),
+                    ScreenAccessLevel.EDIT if is_protected else ScreenAccessLevel.NONE,
+                )
+                self.fields[field_name] = forms.ChoiceField(
+                    label=f"{screen.label} - {dict(UserRole.choices)[role]}",
+                    choices=ScreenAccessLevel.choices,
+                    initial=initial,
+                    disabled=not can_edit or is_protected,
+                    widget=forms.Select(attrs={"class": "form-select form-select-sm"}),
+                )
+
+    @staticmethod
+    def field_name(role: str, screen_key: str) -> str:
+        return f"permission__{role}__{screen_key}"
+
+    def access_level_for(self, role: str, screen_key: str) -> str:
+        return self.cleaned_data[self.field_name(role, screen_key)]

@@ -1,5 +1,5 @@
 import re
-from datetime import date, time
+from datetime import date, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -7,6 +7,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 from apps.astrotrace.models import TraceEvent
 from apps.catalog.models import (
@@ -46,6 +47,12 @@ def create_user(email: str) -> Any:
         first_name="Reserva",
         last_name="Usuario",
     )
+
+
+def future_monday() -> date:
+    today = timezone.localdate()
+    days_until_monday = (7 - today.weekday()) % 7 or 7
+    return today + timedelta(days=days_until_monday + 28)
 
 
 def create_room(name: str = "Consultorio Reserva") -> ConsultingRoom:
@@ -297,7 +304,10 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
     create_rate(room)
     client.force_login(user)
 
-    response = client.get(f"/calendario/?week=2026-08-17&room={room.pk}")
+    target_date = future_monday()
+    response = client.get(
+        f"/calendario/?week={target_date.isoformat()}&room={room.pk}"
+    )
 
     assert response.status_code == 200
     assert "Solicitar reservación" in response.content.decode()
@@ -357,9 +367,10 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
     create_rate(room)
     client.force_login(user)
 
+    target_date = future_monday()
     response = client.get(
-        f"/calendario/vista-rapida/?week=2026-08-17"
-        f"&room={room.pk}&selected_date=2026-08-17"
+        f"/calendario/vista-rapida/?week={target_date.isoformat()}"
+        f"&room={room.pk}&selected_date={target_date.isoformat()}"
     )
 
     content = response.content.decode()
@@ -436,18 +447,19 @@ def test_quick_calendar_shows_reserved_day_when_no_free_blocks(client: Any) -> N
     doctor = create_tenant_doctor("doctor-vista-rapida@example.com")
     create_availability(room)
     create_rate(room)
+    target_date = future_monday()
     create_reservation(
         room=room,
         tenant_doctor=doctor,
-        reservation_date=date(2026, 8, 17),
+        reservation_date=target_date,
         start_time=time(8, 0),
         end_time=time(13, 0),
     )
     client.force_login(user)
 
     response = client.get(
-        f"/calendario/vista-rapida/?week=2026-08-17"
-        f"&room={room.pk}&selected_date=2026-08-17"
+        f"/calendario/vista-rapida/?week={target_date.isoformat()}"
+        f"&room={room.pk}&selected_date={target_date.isoformat()}"
     )
 
     content = response.content.decode()

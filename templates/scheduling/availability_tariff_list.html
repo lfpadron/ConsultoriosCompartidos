@@ -75,8 +75,8 @@
               <tr>
                 <td>
                   <a class="btn btn-sm btn-outline-primary" href="{{ row.edit_url }}">
-                    <i class="bi bi-pencil me-1"></i>
-                    Editar
+                    <i class="bi {% if current_screen_can_edit %}bi-pencil{% else %}bi-eye{% endif %} me-1"></i>
+                    {% if current_screen_can_edit %}Editar{% else %}Ver{% endif %}
                   </a>
                 </td>
                 <td>{{ row.clinic }}</td>

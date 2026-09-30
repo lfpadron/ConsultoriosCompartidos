@@ -19,10 +19,12 @@
               Timeline
             </a>
           {% endif %}
-          <a class="btn btn-primary" href="{% url resource.update_url_name object.pk %}">
-            <i class="bi bi-pencil me-1"></i>
-            Editar
-          </a>
+          {% if current_screen_can_edit %}
+            <a class="btn btn-primary" href="{% url resource.update_url_name object.pk %}">
+              <i class="bi bi-pencil me-1"></i>
+              Editar
+            </a>
+          {% endif %}
         </div>
       </div>
 

@@ -22,22 +22,24 @@
             <i class="bi bi-diagram-3 me-1"></i>
             Timeline
           </a>
-          <a class="btn btn-outline-primary" href="{% url 'document_in_review' document.pk %}">
-            <i class="bi bi-hourglass-split me-1"></i>
-            En revisión
-          </a>
-          <a class="btn btn-outline-success" href="{% url 'document_approve' document.pk %}">
-            <i class="bi bi-check2-circle me-1"></i>
-            Aprobar
-          </a>
-          <a class="btn btn-outline-warning" href="{% url 'document_reject' document.pk %}">
-            <i class="bi bi-x-octagon me-1"></i>
-            Rechazar
-          </a>
-          <a class="btn btn-outline-danger" href="{% url 'document_cancel' document.pk %}">
-            <i class="bi bi-slash-circle me-1"></i>
-            Cancelar
-          </a>
+          {% if current_screen_can_edit %}
+            <a class="btn btn-outline-primary" href="{% url 'document_in_review' document.pk %}">
+              <i class="bi bi-hourglass-split me-1"></i>
+              En revisión
+            </a>
+            <a class="btn btn-outline-success" href="{% url 'document_approve' document.pk %}">
+              <i class="bi bi-check2-circle me-1"></i>
+              Aprobar
+            </a>
+            <a class="btn btn-outline-warning" href="{% url 'document_reject' document.pk %}">
+              <i class="bi bi-x-octagon me-1"></i>
+              Rechazar
+            </a>
+            <a class="btn btn-outline-danger" href="{% url 'document_cancel' document.pk %}">
+              <i class="bi bi-slash-circle me-1"></i>
+              Cancelar
+            </a>
+          {% endif %}
         </div>
       </div>
     </div>

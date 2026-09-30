@@ -33,6 +33,7 @@ from apps.catalog.models import (
 )
 from apps.core.permissions import scope_queryset_for_user
 from apps.identity.models import UserRole
+from apps.identity.services import assign_user_role
 from apps.vault.services.document_service import (
     get_document_field_for_object,
     get_documents_for_object,
@@ -490,14 +491,19 @@ class CatalogFormView(CatalogBaseMixin, FormMixin, TemplateView):
             payload={"model": instance._meta.label, "id": str(instance.pk)},
         )
 
-    @staticmethod
-    def _sync_profile_role(instance: Model) -> None:
+    def _sync_profile_role(self, instance: Model) -> None:
         if isinstance(instance, OwnerProfile):
-            instance.user.role = UserRole.OWNER
-            instance.user.save(update_fields=["role"])
+            assign_user_role(
+                user=instance.user,
+                role=UserRole.OWNER,
+                actor=cast(Model, self.request.user),
+            )
         elif isinstance(instance, TenantDoctorProfile):
-            instance.user.role = UserRole.TENANT_DOCTOR
-            instance.user.save(update_fields=["role"])
+            assign_user_role(
+                user=instance.user,
+                role=UserRole.TENANT_DOCTOR,
+                actor=cast(Model, self.request.user),
+            )
 
 
 class CatalogDeactivateView(CatalogBaseMixin, TemplateView):

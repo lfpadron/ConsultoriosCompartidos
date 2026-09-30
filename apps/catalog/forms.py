@@ -140,7 +140,14 @@ class OwnerProfileForm(BootstrapModelForm):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         user_model = get_user_model()
-        queryset = user_model.objects.filter(is_active=True, role=UserRole.OWNER)
+        queryset = user_model.objects.filter(is_active=True).filter(
+            Q(role=UserRole.OWNER)
+            | Q(
+                role_assignments__role=UserRole.OWNER,
+                role_assignments__is_active=True,
+                role_assignments__is_deleted=False,
+            )
+        )
 
         if self.instance.pk:
             queryset = queryset.filter(
@@ -177,9 +184,13 @@ class TenantDoctorProfileForm(BootstrapModelForm):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         user_model = get_user_model()
-        queryset = user_model.objects.filter(
-            is_active=True,
-            role=UserRole.TENANT_DOCTOR,
+        queryset = user_model.objects.filter(is_active=True).filter(
+            Q(role=UserRole.TENANT_DOCTOR)
+            | Q(
+                role_assignments__role=UserRole.TENANT_DOCTOR,
+                role_assignments__is_active=True,
+                role_assignments__is_deleted=False,
+            )
         )
 
         if self.instance.pk:

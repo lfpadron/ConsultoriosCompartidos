@@ -19,6 +19,7 @@ class CustomUserManager(BaseUserManager):
         user = cast(Any, self.model(email=normalized_email, **extra_fields))
         user.set_password(password)
         user.save(using=self._db)
+        user.role_assignments.get_or_create(role=user.role)
         return user
 
     def create_user(

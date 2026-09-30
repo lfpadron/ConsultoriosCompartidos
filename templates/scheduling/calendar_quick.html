@@ -134,7 +134,7 @@
                 <td>{{ row.tenant_doctor|default:"Sin médico" }}</td>
                 <td>{{ row.label }}</td>
                 <td class="text-end">
-                  {% if row.reservation_url %}
+                  {% if row.reservation_url and screen_access_map.reservations == "edit" %}
                     <a class="btn btn-sm btn-primary" hx-boost="false" href="{{ row.reservation_url }}">
                       <i class="bi bi-calendar-plus me-1"></i>
                       Reservar

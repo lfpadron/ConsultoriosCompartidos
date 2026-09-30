@@ -16,14 +16,17 @@
         <dd class="col-sm-8 col-lg-9">{{ profile_user.full_name|default:"Sin nombre" }}</dd>
         <dt class="col-sm-4 col-lg-3 text-secondary">Correo</dt>
         <dd class="col-sm-8 col-lg-9">{{ profile_user.email }}</dd>
-        <dt class="col-sm-4 col-lg-3 text-secondary">Rol</dt>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Rol principal</dt>
         <dd class="col-sm-8 col-lg-9">{{ profile_user.get_role_display }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Roles activos</dt>
+        <dd class="col-sm-8 col-lg-9">{{ role_labels|join:", " }}</dd>
       </dl>
     </div>
 
     <div class="status-panel p-3 p-lg-4">
       <h2 class="h5 mb-3">Cambiar contraseña</h2>
-      <form method="post" novalidate>
+      {% if current_screen_can_edit %}
+        <form method="post" novalidate>
         {% csrf_token %}
         {% if form.non_field_errors %}
           <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
@@ -48,7 +51,10 @@
             Actualizar contraseña
           </button>
         </div>
-      </form>
+        </form>
+      {% else %}
+        <div class="text-secondary">La contraseña no puede modificarse con acceso de solo lectura.</div>
+      {% endif %}
     </div>
   </section>
 {% endblock %}

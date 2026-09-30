@@ -1,49 +1,15 @@
 """Navigation metadata for the base layout."""
 
+from apps.identity.screen_registry import SCREEN_DEFINITIONS
+
 NAVIGATION_ITEMS = [
-    {"label": "Dashboard", "url_name": "dashboard", "icon": "bi-speedometer2"},
-    {"label": "Clínicas", "url_name": "clinics", "icon": "bi-hospital"},
-    {"label": "Consultorios", "url_name": "rooms", "icon": "bi-door-open"},
     {
-        "label": "Especialidades",
-        "url_name": "specialties",
-        "icon": "bi-clipboard2-pulse",
-    },
-    {"label": "Equipamiento", "url_name": "equipment", "icon": "bi-tools"},
-    {"label": "Propietarios", "url_name": "owners", "icon": "bi-person-badge"},
-    {
-        "label": "Médicos Arrendatarios",
-        "url_name": "tenant_doctors",
-        "icon": "bi-person-vcard",
-    },
-    {
-        "label": "Disponibilidad y tarifas",
-        "url_name": "availability",
-        "icon": "bi-calendar-week",
-    },
-    {"label": "Calendario", "url_name": "calendar_week", "icon": "bi-calendar3"},
-    {"label": "Vista rápida", "url_name": "calendar_quick", "icon": "bi-grid-3x3-gap"},
-    {"label": "Reservaciones", "url_name": "reservations", "icon": "bi-calendar-check"},
-    {"label": "Estados de Cuenta", "url_name": "statements", "icon": "bi-receipt"},
-    {
-        "label": "Descuentos Consultorio",
-        "url_name": "room_rate_discounts",
-        "icon": "bi-percent",
-    },
-    {
-        "label": "Descuentos Arrendatario",
-        "url_name": "tenant_doctor_discounts",
-        "icon": "bi-tags",
-    },
-    {"label": "Pagos", "url_name": "payments", "icon": "bi-credit-card"},
-    {"label": "Liquidaciones", "url_name": "settlements", "icon": "bi-bank"},
-    {"label": "Documentos", "url_name": "documents", "icon": "bi-file-earmark-pdf"},
-    {"label": "Accesos", "url_name": "access_credentials", "icon": "bi-key"},
-    {"label": "Timeline", "url_name": "timeline", "icon": "bi-diagram-3"},
-    {"label": "Reportes", "url_name": "reports", "icon": "bi-bar-chart"},
-    {"label": "Usuarios", "url_name": "users", "icon": "bi-people"},
-    {"label": "Perfil", "url_name": "profile", "icon": "bi-person-circle"},
-    {"label": "Administración", "url_name": "administration", "icon": "bi-gear"},
+        "screen_key": definition.key,
+        "label": definition.label,
+        "url_name": definition.url_name,
+        "icon": definition.icon,
+    }
+    for definition in SCREEN_DEFINITIONS
 ]
 
 PAGE_TITLES = {
@@ -68,5 +34,6 @@ PAGE_TITLES = {
     "reports": "Reportes",
     "users": "Usuarios",
     "profile": "Perfil",
+    "permissions": "Permisos",
     "administration": "Administración",
 }

@@ -118,7 +118,7 @@
                               {% else %}
                                 <div class="small text-secondary mt-2">Sin tarifa configurada</div>
                               {% endif %}
-                              {% if entry.can_request %}
+                              {% if entry.can_request and screen_access_map.reservations == "edit" %}
                                 <a class="btn btn-sm btn-outline-primary mt-2" hx-boost="false" href="{% url 'reservation_request' %}?source=calendar&room={{ row.room.pk }}&date={{ day.date|date:'Y-m-d' }}&start_time={{ block.start_time|time:'H:i' }}&end_time={{ block.end_time|time:'H:i' }}{% if selected_tenant_doctor %}&tenant_doctor={{ selected_tenant_doctor.pk }}{% endif %}">
                                   <i class="bi bi-calendar-plus me-1"></i>
                                   Solicitar reservación

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="permission-content" class="status-panel p-3 p-lg-4" hx-boost="true" hx-target="#permission-content" hx-select="#permission-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-4">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Seguridad</p>
+        <h1 class="h4 mb-1">Gestión de permisos</h1>
+        <p class="text-secondary mb-0">Configura el nivel de acceso a cada pantalla por rol.</p>
+      </div>
+      <div class="d-flex flex-wrap gap-2" aria-label="Niveles disponibles">
+        <span class="badge text-bg-light">Sin acceso</span>
+        <span class="badge text-bg-secondary">Lectura</span>
+        <span class="badge text-bg-primary">Edición</span>
+      </div>
+    </div>
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
+      {% endif %}
+
+      <div class="table-responsive">
+        <table class="table table-sm align-middle permission-matrix-table">
+          <thead>
+            <tr>
+              <th scope="col" class="text-nowrap">Pantalla</th>
+              {% for role, role_label in roles %}
+                <th scope="col" class="text-center">{{ role_label }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in matrix_rows %}
+              <tr>
+                <th scope="row" class="text-nowrap">
+                  <i class="bi {{ row.screen.icon }} me-1" aria-hidden="true"></i>
+                  {{ row.screen.label }}
+                </th>
+                {% for cell in row.cells %}
+                  <td>
+                    {{ cell.field }}
+                    {% if cell.is_protected %}
+                      <div class="form-text text-center">
+                        <i class="bi bi-lock-fill" aria-hidden="true"></i>
+                        Protegido
+                      </div>
+                    {% endif %}
+                    {% for error in cell.field.errors %}
+                      <div class="invalid-feedback d-block">{{ error }}</div>
+                    {% endfor %}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% if can_edit_permissions %}
+        <div class="d-flex justify-content-end mt-4">
+          <button class="btn btn-primary" type="submit">
+            <i class="bi bi-save me-1" aria-hidden="true"></i>
+            Guardar permisos
+          </button>
+        </div>
+      {% endif %}
+    </form>
+  </section>
+{% endblock %}

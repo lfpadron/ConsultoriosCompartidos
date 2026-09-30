@@ -8,10 +8,12 @@
           <p class="text-uppercase text-secondary small fw-semibold mb-2">Finanzas</p>
           <h1 class="h4 mb-0">{{ page_title }}</h1>
         </div>
-        <a class="btn btn-primary" href="{% url resource.create_url_name %}">
-          <i class="bi bi-plus-lg me-1"></i>
-          Nuevo descuento
-        </a>
+        {% if current_screen_can_edit %}
+          <a class="btn btn-primary" href="{% url resource.create_url_name %}">
+            <i class="bi bi-plus-lg me-1"></i>
+            Nuevo descuento
+          </a>
+        {% endif %}
       </div>
     </div>
 
@@ -33,13 +35,17 @@
                   <td>{{ cell }}</td>
                 {% endfor %}
                 <td class="text-end">
-                  <form method="post" action="{% url resource.toggle_url_name row.object.pk %}" class="d-inline">
-                    {% csrf_token %}
-                    <button class="btn btn-sm {% if row.object.is_active %}btn-outline-danger{% else %}btn-outline-primary{% endif %}" type="submit">
-                      <i class="bi {% if row.object.is_active %}bi-slash-circle{% else %}bi-check2-circle{% endif %} me-1"></i>
-                      {% if row.object.is_active %}Desactivar{% else %}Activar{% endif %}
-                    </button>
-                  </form>
+                  {% if current_screen_can_edit %}
+                    <form method="post" action="{% url resource.toggle_url_name row.object.pk %}" class="d-inline">
+                      {% csrf_token %}
+                      <button class="btn btn-sm {% if row.object.is_active %}btn-outline-danger{% else %}btn-outline-primary{% endif %}" type="submit">
+                        <i class="bi {% if row.object.is_active %}bi-slash-circle{% else %}bi-check2-circle{% endif %} me-1"></i>
+                        {% if row.object.is_active %}Desactivar{% else %}Activar{% endif %}
+                      </button>
+                    </form>
+                  {% else %}
+                    <span class="text-secondary small">Solo lectura</span>
+                  {% endif %}
                 </td>
               </tr>
             {% empty %}

@@ -1,0 +1,2180 @@
+diff --git a/apps/catalog/forms.py b/apps/catalog/forms.py
+index e11a74f..b38f13e 100644
+--- a/apps/catalog/forms.py
++++ b/apps/catalog/forms.py
+@@ -140,7 +140,14 @@ class OwnerProfileForm(BootstrapModelForm):
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         super().__init__(*args, **kwargs)
+         user_model = get_user_model()
+-        queryset = user_model.objects.filter(is_active=True, role=UserRole.OWNER)
++        queryset = user_model.objects.filter(is_active=True).filter(
++            Q(role=UserRole.OWNER)
++            | Q(
++                role_assignments__role=UserRole.OWNER,
++                role_assignments__is_active=True,
++                role_assignments__is_deleted=False,
++            )
++        )
+ 
+         if self.instance.pk:
+             queryset = queryset.filter(
+@@ -177,9 +184,13 @@ class TenantDoctorProfileForm(BootstrapModelForm):
+     def __init__(self, *args: Any, **kwargs: Any) -> None:
+         super().__init__(*args, **kwargs)
+         user_model = get_user_model()
+-        queryset = user_model.objects.filter(
+-            is_active=True,
+-            role=UserRole.TENANT_DOCTOR,
++        queryset = user_model.objects.filter(is_active=True).filter(
++            Q(role=UserRole.TENANT_DOCTOR)
++            | Q(
++                role_assignments__role=UserRole.TENANT_DOCTOR,
++                role_assignments__is_active=True,
++                role_assignments__is_deleted=False,
++            )
+         )
+ 
+         if self.instance.pk:
+diff --git a/apps/catalog/views.py b/apps/catalog/views.py
+index 2f8b45f..617ba88 100644
+--- a/apps/catalog/views.py
++++ b/apps/catalog/views.py
+@@ -33,6 +33,7 @@ from apps.catalog.models import (
+ )
+ from apps.core.permissions import scope_queryset_for_user
+ from apps.identity.models import UserRole
++from apps.identity.services import assign_user_role
+ from apps.vault.services.document_service import (
+     get_document_field_for_object,
+     get_documents_for_object,
+@@ -490,14 +491,19 @@ class CatalogFormView(CatalogBaseMixin, FormMixin, TemplateView):
+             payload={"model": instance._meta.label, "id": str(instance.pk)},
+         )
+ 
+-    @staticmethod
+-    def _sync_profile_role(instance: Model) -> None:
++    def _sync_profile_role(self, instance: Model) -> None:
+         if isinstance(instance, OwnerProfile):
+-            instance.user.role = UserRole.OWNER
+-            instance.user.save(update_fields=["role"])
++            assign_user_role(
++                user=instance.user,
++                role=UserRole.OWNER,
++                actor=cast(Model, self.request.user),
++            )
+         elif isinstance(instance, TenantDoctorProfile):
+-            instance.user.role = UserRole.TENANT_DOCTOR
+-            instance.user.save(update_fields=["role"])
++            assign_user_role(
++                user=instance.user,
++                role=UserRole.TENANT_DOCTOR,
++                actor=cast(Model, self.request.user),
++            )
+ 
+ 
+ class CatalogDeactivateView(CatalogBaseMixin, TemplateView):
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index da9998b..ac5b33d 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -1,19 +1,22 @@
+-"""Simple MVP access rules.
+-
+-This is intentionally path-level and coarse while the project does not have
+-full object-level authorization yet.
+-"""
++"""Role, screen, method and object-level access rules."""
+ 
+ from collections.abc import Callable
+-from typing import Any
++from typing import Any, cast
+ 
+ from django.conf import settings
+ from django.contrib.auth.views import redirect_to_login
+ from django.db.models import Q, QuerySet
+ from django.http import HttpRequest, HttpResponse, HttpResponseForbidden
+ from django.shortcuts import redirect, resolve_url
++from django.urls import Resolver404, resolve
+ 
+-from apps.identity.models import UserRole
++from apps.identity.models import RoleScreenPermission, ScreenAccessLevel, UserRole
++from apps.identity.screen_registry import (
++    SCREEN_DEFINITIONS,
++    default_access_for_role,
++    route_requires_edit,
++    screen_key_for_route,
++)
+ 
+ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+ PUBLIC_PATH_PREFIXES = (
+@@ -23,14 +26,6 @@ PUBLIC_PATH_PREFIXES = (
+     "/static/",
+     "/media/",
+ )
+-RECEPTIONIST_BLOCKED_PREFIXES = (
+-    "/tarifas/",
+-    "/pagos/",
+-    "/liquidaciones/",
+-    "/reportes/ingresos",
+-    "/reportes/pagos",
+-    "/reportes/liquidaciones",
+-)
+ FORCED_PASSWORD_ALLOWED_PREFIXES = (
+     "/cambiar-contrasena/",
+     "/logout/",
+@@ -40,7 +35,7 @@ FORCED_PASSWORD_ALLOWED_PREFIXES = (
+ 
+ 
+ class MvpAccessMiddleware:
+-    """Enforce the broad role rules needed for user-test hardening."""
++    """Enforce screen permissions while preserving forced password changes."""
+ 
+     def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
+         self.get_response = get_response
+@@ -55,17 +50,40 @@ class MvpAccessMiddleware:
+                 request.get_full_path(), resolve_url(settings.LOGIN_URL)
+             )
+ 
+-        role = getattr(user, "role", "")
+         if getattr(user, "must_change_password", False) and not any(
+             request.path.startswith(prefix)
+             for prefix in FORCED_PASSWORD_ALLOWED_PREFIXES
+         ):
+             return redirect("password_change_required")
+-        if role == UserRole.AUDITOR and request.method not in SAFE_METHODS:
+-            return HttpResponseForbidden("El rol Auditor es de solo lectura.")
+-        if role == UserRole.RECEPTIONIST and _is_blocked_for_receptionist(request.path):
++
++        if any(
++            request.path.startswith(prefix)
++            for prefix in FORCED_PASSWORD_ALLOWED_PREFIXES
++        ):
++            return self.get_response(request)
++
++        try:
++            match = resolve(request.path_info)
++        except Resolver404:
++            return self.get_response(request)
++
++        url_name = match.url_name
++        screen_key = screen_key_for_route(url_name)
++        if screen_key is None:
++            return self.get_response(request)
++
++        access_level = get_screen_access(user, screen_key)
++        cast_request = cast(Any, request)
++        cast_request.current_screen_key = screen_key
++        cast_request.current_screen_access = access_level
++        required_level = (
++            ScreenAccessLevel.EDIT
++            if route_requires_edit(url_name or "", request.method or "")
++            else ScreenAccessLevel.READ
++        )
++        if not access_level_allows(access_level, required_level):
+             return HttpResponseForbidden(
+-                "Recepción no tiene acceso a finanzas completas."
++                "No tienes permiso para acceder o modificar esta pantalla."
+             )
+ 
+         return self.get_response(request)
+@@ -75,29 +93,118 @@ def _is_public_path(path: str) -> bool:
+     return any(path.startswith(prefix) for prefix in PUBLIC_PATH_PREFIXES)
+ 
+ 
+-def _is_blocked_for_receptionist(path: str) -> bool:
+-    return any(path.startswith(prefix) for prefix in RECEPTIONIST_BLOCKED_PREFIXES)
++ACCESS_LEVEL_RANK: dict[str, int] = {
++    ScreenAccessLevel.NONE: 0,
++    ScreenAccessLevel.READ: 1,
++    ScreenAccessLevel.EDIT: 2,
++}
++
++
++def get_user_roles(user: Any) -> set[str]:
++    if not getattr(user, "is_authenticated", False):
++        return set()
++    role_getter = getattr(user, "get_role_values", None)
++    if callable(role_getter):
++        return set(role_getter())
++    role = getattr(user, "role", "")
++    return {role} if role else set()
++
++
++def user_has_role(user: Any, role: str) -> bool:
++    return role in get_user_roles(user)
++
++
++def access_level_allows(current: str, required: str) -> bool:
++    return ACCESS_LEVEL_RANK.get(current, 0) >= ACCESS_LEVEL_RANK.get(required, 0)
++
++
++def get_user_screen_access_map(user: Any) -> dict[str, str]:
++    roles = get_user_roles(user)
++    screen_keys = [definition.key for definition in SCREEN_DEFINITIONS]
++    result: dict[str, str] = {
++        key: ScreenAccessLevel.NONE for key in screen_keys
++    }
++    if not roles:
++        return result
++
++    explicit = {
++        (permission.role, permission.screen.key): permission.access_level
++        for permission in RoleScreenPermission.objects.filter(
++            role__in=roles,
++            screen__key__in=screen_keys,
++            screen__is_active=True,
++            screen__is_deleted=False,
++            is_active=True,
++            is_deleted=False,
++        ).select_related("screen")
++    }
++    for screen_key in screen_keys:
++        levels = [
++            explicit.get(
++                (role, screen_key),
++                default_access_for_role(role, screen_key),
++            )
++            for role in roles
++        ]
++        result[screen_key] = max(
++            levels,
++            key=lambda level: ACCESS_LEVEL_RANK.get(level, 0),
++        )
++
++    if UserRole.SUPERADMIN in roles:
++        result["permissions"] = ScreenAccessLevel.EDIT
++    return result
++
++
++def get_screen_access(user: Any, screen_key: str) -> str:
++    return get_user_screen_access_map(user).get(screen_key, ScreenAccessLevel.NONE)
++
++
++def can_edit_screen(user: Any, screen_key: str) -> bool:
++    return access_level_allows(
++        get_screen_access(user, screen_key),
++        ScreenAccessLevel.EDIT,
++    )
+ 
+ 
+ def scope_queryset_for_user(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]:
+-    """Apply coarse owner/tenant scoping when the user has a linked profile."""
++    """Apply the union of every data scope granted by the user's active roles."""
+ 
+-    role = getattr(user, "role", "")
+-    if role == UserRole.ADMIN:
++    roles = get_user_roles(user)
++    if roles.intersection(
++        {
++            UserRole.SUPERADMIN,
++            UserRole.OPERATOR,
++            UserRole.RECEPTIONIST,
++            UserRole.AUDITOR,
++        }
++    ):
++        return queryset
++    if UserRole.ADMIN in roles:
+         return _scope_business_admin_queryset(queryset, user)
+-    if role == UserRole.OWNER:
++
++    scoped = queryset.none()
++    has_scoped_role = False
++    if UserRole.OWNER in roles:
++        has_scoped_role = True
+         owner = getattr(user, "owner_profile", None)
+-        if owner is None:
++        if owner is not None:
++            scoped = scoped | _scope_owner_queryset(queryset, owner)
++        elif roles == {UserRole.OWNER}:
+             return queryset
+-        return _scope_owner_queryset(queryset, owner)
+-    if role == UserRole.TENANT_DOCTOR:
++    if UserRole.TENANT_DOCTOR in roles:
++        has_scoped_role = True
+         tenant_doctor = getattr(user, "tenant_doctor_profile", None)
+-        if tenant_doctor is None:
++        if tenant_doctor is not None:
++            scoped = scoped | _scope_tenant_doctor_queryset(queryset, tenant_doctor)
++        elif roles == {UserRole.TENANT_DOCTOR}:
+             return queryset
+-        return _scope_tenant_doctor_queryset(queryset, tenant_doctor)
+-    if role == UserRole.ASSISTANT:
+-        return _scope_assistant_queryset(queryset, user)
+-    return queryset
++    if UserRole.ASSISTANT in roles:
++        has_scoped_role = True
++        scoped = scoped | _scope_assistant_queryset(queryset, user)
++    if has_scoped_role:
++        return scoped.distinct()
++    return queryset.none()
+ 
+ 
+ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[Any]:
+diff --git a/apps/identity/admin.py b/apps/identity/admin.py
+index 6346b33..1997a3e 100644
+--- a/apps/identity/admin.py
++++ b/apps/identity/admin.py
+@@ -4,7 +4,19 @@ from django.contrib import admin
+ from django.contrib.auth.admin import UserAdmin
+ from django.utils.translation import gettext_lazy as _
+ 
+-from apps.identity.models import CustomUser
++from apps.identity.models import (
++    ApplicationScreen,
++    CustomUser,
++    RoleScreenPermission,
++    UserRoleAssignment,
++)
++
++
++class UserRoleAssignmentInline(admin.TabularInline):
++    model = UserRoleAssignment
++    fk_name = "user"
++    extra = 0
++    fields = ("role", "is_active")
+ 
+ 
+ @admin.register(CustomUser)
+@@ -34,6 +46,7 @@ class CustomUserAdmin(UserAdmin):
+         "assigned_clinics",
+         "assigned_owners",
+     )
++    inlines = (UserRoleAssignmentInline,)
+     fieldsets = (
+         (None, {"fields": ("email", "password")}),
+         (
+@@ -91,3 +104,24 @@ class CustomUserAdmin(UserAdmin):
+             },
+         ),
+     )
++
++
++@admin.register(ApplicationScreen)
++class ApplicationScreenAdmin(admin.ModelAdmin):
++    list_display = ("label", "key", "url_name", "sort_order", "is_active")
++    list_filter = ("is_active",)
++    search_fields = ("label", "key", "url_name")
++    ordering = ("sort_order", "label")
++
++
++@admin.register(RoleScreenPermission)
++class RoleScreenPermissionAdmin(admin.ModelAdmin):
++    list_display = ("screen", "role", "access_level", "is_active")
++    list_filter = ("role", "access_level", "is_active")
++    search_fields = ("screen__label", "screen__key")
++    list_select_related = ("screen",)
++
++    def has_delete_permission(self, request, obj=None):
++        if obj is not None and obj.is_protected_permission:
++            return False
++        return super().has_delete_permission(request, obj)
+diff --git a/apps/identity/forms.py b/apps/identity/forms.py
+index 4458352..ee876dd 100644
+--- a/apps/identity/forms.py
++++ b/apps/identity/forms.py
+@@ -5,12 +5,18 @@ from typing import Any, cast
+ from django import forms
+ from django.contrib.auth import get_user_model, password_validation
+ from django.contrib.auth.forms import AuthenticationForm, PasswordChangeForm
+-from django.db.models import QuerySet
++from django.db.models import Q, QuerySet
+ from django.utils.translation import gettext_lazy as _
+ 
+ from apps.catalog.models import Clinic, OwnerProfile
+ from apps.core.form_utils import style_form_fields
+-from apps.identity.models import UserRole
++from apps.identity.models import (
++    ApplicationScreen,
++    RoleScreenPermission,
++    ScreenAccessLevel,
++    UserRole,
++)
++from apps.identity.services import sync_user_roles
+ 
+ 
+ class EmailAuthenticationForm(AuthenticationForm):
+@@ -55,6 +61,15 @@ class ManagedUserFilterForm(forms.Form):
+ 
+ 
+ class ManagedUserForm(forms.ModelForm):
++    additional_roles = forms.MultipleChoiceField(
++        label=_("Roles adicionales"),
++        choices=UserRole.choices,
++        required=False,
++        help_text=_(
++            "Permite que una misma persona opere, por ejemplo, como propietaria "
++            "y médica arrendataria."
++        ),
++    )
+     temporary_password = forms.CharField(
+         label=_("Contraseña temporal"),
+         required=False,
+@@ -81,6 +96,7 @@ class ManagedUserForm(forms.ModelForm):
+             "secondary_email",
+             "secondary_phone",
+             "role",
++            "additional_roles",
+             "assigned_clinics",
+             "assigned_owners",
+             "temporary_password",
+@@ -89,7 +105,7 @@ class ManagedUserForm(forms.ModelForm):
+             "is_active",
+         )
+         labels = {
+-            "role": _("Grupo"),
++            "role": _("Rol principal"),
+             "assigned_clinics": _("Clínicas asignadas"),
+             "assigned_owners": _("Médicos propietarios asignados"),
+         }
+@@ -107,6 +123,10 @@ class ManagedUserForm(forms.ModelForm):
+             self.fields["temporary_password"].required = True
+             self.fields["must_change_password"].initial = True
+         role_field = cast(forms.ChoiceField, self.fields["role"])
++        additional_roles_field = cast(
++            forms.MultipleChoiceField,
++            self.fields["additional_roles"],
++        )
+         clinics_field = cast(
+             forms.ModelMultipleChoiceField,
+             self.fields["assigned_clinics"],
+@@ -116,6 +136,11 @@ class ManagedUserForm(forms.ModelForm):
+             self.fields["assigned_owners"],
+         )
+         role_field.choices = self._role_choices_for_current_user()
++        additional_roles_field.choices = self._role_choices_for_current_user()
++        if self.instance.pk:
++            additional_roles_field.initial = sorted(
++                self.instance.get_role_values() - {self.instance.role}
++            )
+         clinics_field.queryset = self._clinic_queryset()
+         owners_field.queryset = self._owner_queryset()
+         clinics_field.required = False
+@@ -141,41 +166,80 @@ class ManagedUserForm(forms.ModelForm):
+             raise forms.ValidationError(_("No puedes asignar ese grupo de usuario."))
+         return role
+ 
++    def clean_additional_roles(self) -> list[str]:
++        roles = set(self.cleaned_data.get("additional_roles") or [])
++        allowed_roles = {
++            value for value, _label in self._role_choices_for_current_user()
++        }
++        invalid_roles = roles - allowed_roles
++        if invalid_roles:
++            raise forms.ValidationError(_("No puedes asignar uno de esos roles."))
++        primary_role = self.cleaned_data.get("role")
++        roles.discard(primary_role)
++        return sorted(roles)
++
+     def clean(self) -> dict[str, Any]:
+         cleaned_data = super().clean() or {}
+         role = cleaned_data.get("role")
++        all_roles = {role, *(cleaned_data.get("additional_roles") or [])}
++        all_roles.discard(None)
+         clinics = cleaned_data.get("assigned_clinics")
+         owners = cleaned_data.get("assigned_owners")
+ 
+-        if role == UserRole.ADMIN and not clinics:
++        if UserRole.ADMIN in all_roles and not clinics:
+             self.add_error(
+                 "assigned_clinics",
+                 _("Un administrador de negocio debe estar asignado a una clínica."),
+             )
+-        if role == UserRole.ASSISTANT and not owners:
++        if UserRole.ASSISTANT in all_roles and not owners:
+             self.add_error(
+                 "assigned_owners",
+                 _("Un asistente administrativo debe estar asignado a un propietario."),
+             )
++        if UserRole.SUPERADMIN in all_roles:
++            superadmins = get_user_model().objects.filter(is_active=True).filter(
++                Q(role=UserRole.SUPERADMIN)
++                | Q(
++                    role_assignments__role=UserRole.SUPERADMIN,
++                    role_assignments__is_active=True,
++                    role_assignments__is_deleted=False,
++                )
++            )
++            if self.instance.pk:
++                superadmins = superadmins.exclude(pk=self.instance.pk)
++            if superadmins.distinct().count() >= 3:
++                self.add_error(
++                    "role",
++                    _(
++                        "Solo puede haber tres administradores de sistemas "
++                        "activos a la vez."
++                    ),
++                )
+         return cleaned_data
+ 
+     def save(self, commit: bool = True) -> Any:
+         user = super().save(commit=False)
+         role = self.cleaned_data["role"]
++        all_roles = {role, *(self.cleaned_data.get("additional_roles") or [])}
+         temporary_password = self.cleaned_data.get("temporary_password")
+-        user.is_staff = role == UserRole.SUPERADMIN
+-        user.is_superuser = role == UserRole.SUPERADMIN
++        user.is_staff = UserRole.SUPERADMIN in all_roles
++        user.is_superuser = UserRole.SUPERADMIN in all_roles
+         if temporary_password:
+             user.set_password(temporary_password)
+             user.must_change_password = True
+         if commit:
+             user.save()
+             self.save_m2m()
++            sync_user_roles(
++                user=user,
++                roles=all_roles,
++                actor=self.current_user,
++            )
+         return user
+ 
+     def _role_choices_for_current_user(self) -> tuple[tuple[str, Any], ...]:
+-        current_role = getattr(self.current_user, "role", "")
+-        if current_role == UserRole.SUPERADMIN:
++        current_roles = self.current_user.get_role_values()
++        if UserRole.SUPERADMIN in current_roles:
+             allowed_roles = {
+                 UserRole.SUPERADMIN,
+                 UserRole.ADMIN,
+@@ -186,7 +250,7 @@ class ManagedUserForm(forms.ModelForm):
+                 UserRole.RECEPTIONIST,
+                 UserRole.AUDITOR,
+             }
+-        elif current_role == UserRole.ADMIN:
++        elif UserRole.ADMIN in current_roles:
+             allowed_roles = {
+                 UserRole.ADMIN,
+                 UserRole.OWNER,
+@@ -196,7 +260,7 @@ class ManagedUserForm(forms.ModelForm):
+                 UserRole.RECEPTIONIST,
+                 UserRole.AUDITOR,
+             }
+-        elif current_role == UserRole.OWNER:
++        elif UserRole.OWNER in current_roles:
+             allowed_roles = {UserRole.ASSISTANT}
+         else:
+             allowed_roles = set()
+@@ -206,7 +270,7 @@ class ManagedUserForm(forms.ModelForm):
+ 
+     def _clinic_queryset(self) -> QuerySet[Clinic]:
+         queryset = Clinic.objects.filter(is_deleted=False).order_by("name")
+-        if getattr(self.current_user, "role", "") == UserRole.ADMIN:
++        if self.current_user.has_role(UserRole.ADMIN):
+             assigned = self.current_user.assigned_clinics.filter(is_deleted=False)
+             if assigned.exists():
+                 queryset = queryset.filter(pk__in=assigned.values("pk"))
+@@ -214,14 +278,14 @@ class ManagedUserForm(forms.ModelForm):
+ 
+     def _owner_queryset(self) -> QuerySet[OwnerProfile]:
+         queryset = OwnerProfile.objects.filter(is_deleted=False).select_related("user")
+-        current_role = getattr(self.current_user, "role", "")
+-        if current_role == UserRole.OWNER:
++        current_roles = self.current_user.get_role_values()
++        if UserRole.OWNER in current_roles:
+             owner = getattr(self.current_user, "owner_profile", None)
+             if owner is not None:
+                 queryset = queryset.filter(pk=owner.pk)
+             else:
+                 queryset = queryset.none()
+-        elif current_role == UserRole.ADMIN:
++        elif UserRole.ADMIN in current_roles:
+             assigned = self.current_user.assigned_clinics.filter(is_deleted=False)
+             if assigned.exists():
+                 queryset = queryset.filter(consulting_rooms__clinic__in=assigned)
+@@ -283,3 +347,49 @@ class ProfilePasswordChangeForm(PasswordChangeForm):
+     def __init__(self, user: Any, *args: Any, **kwargs: Any) -> None:
+         super().__init__(user, *args, **kwargs)
+         style_form_fields(self.fields)
++
++
++class PermissionMatrixForm(forms.Form):
++    """Dynamic role-by-screen permission matrix."""
++
++    def __init__(
++        self,
++        *args: Any,
++        screens: QuerySet[ApplicationScreen],
++        can_edit: bool,
++        **kwargs: Any,
++    ) -> None:
++        self.screens = list(screens)
++        self.can_edit = can_edit
++        super().__init__(*args, **kwargs)
++        permissions = {
++            (permission.role, permission.screen_id): permission.access_level
++            for permission in RoleScreenPermission.objects.filter(
++                screen__in=self.screens,
++                is_deleted=False,
++            )
++        }
++        for screen in self.screens:
++            for role, _label in UserRole.choices:
++                field_name = self.field_name(role, screen.key)
++                is_protected = (
++                    role == UserRole.SUPERADMIN and screen.key == "permissions"
++                )
++                initial = permissions.get(
++                    (role, screen.pk),
++                    ScreenAccessLevel.EDIT if is_protected else ScreenAccessLevel.NONE,
++                )
++                self.fields[field_name] = forms.ChoiceField(
++                    label=f"{screen.label} - {dict(UserRole.choices)[role]}",
++                    choices=ScreenAccessLevel.choices,
++                    initial=initial,
++                    disabled=not can_edit or is_protected,
++                    widget=forms.Select(attrs={"class": "form-select form-select-sm"}),
++                )
++
++    @staticmethod
++    def field_name(role: str, screen_key: str) -> str:
++        return f"permission__{role}__{screen_key}"
++
++    def access_level_for(self, role: str, screen_key: str) -> str:
++        return self.cleaned_data[self.field_name(role, screen_key)]
+diff --git a/apps/identity/managers.py b/apps/identity/managers.py
+index 036550d..002d690 100644
+--- a/apps/identity/managers.py
++++ b/apps/identity/managers.py
+@@ -19,6 +19,7 @@ class CustomUserManager(BaseUserManager):
+         user = cast(Any, self.model(email=normalized_email, **extra_fields))
+         user.set_password(password)
+         user.save(using=self._db)
++        user.role_assignments.get_or_create(role=user.role)
+         return user
+ 
+     def create_user(
+diff --git a/apps/identity/models.py b/apps/identity/models.py
+index 892588d..fd11de0 100644
+--- a/apps/identity/models.py
++++ b/apps/identity/models.py
+@@ -1,6 +1,7 @@
+ """Identity models."""
+ 
+ import uuid
++from typing import Any
+ 
+ from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+ from django.core.exceptions import ValidationError
+@@ -8,6 +9,7 @@ from django.db import models
+ from django.utils import timezone
+ from django.utils.translation import gettext_lazy as _
+ 
++from apps.core.models import BaseModel
+ from apps.identity.managers import CustomUserManager
+ 
+ 
+@@ -22,6 +24,12 @@ class UserRole(models.TextChoices):
+     AUDITOR = "auditor", _("Auditor")
+ 
+ 
++class ScreenAccessLevel(models.TextChoices):
++    NONE = "none", _("Sin acceso")
++    READ = "read", _("Lectura")
++    EDIT = "edit", _("Edición")
++
++
+ class CustomUser(AbstractBaseUser, PermissionsMixin):
+     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+     email = models.EmailField(_("correo electrónico"), unique=True)
+@@ -101,3 +109,136 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
+ 
+     def __str__(self) -> str:
+         return self.email
++
++    def get_role_values(self) -> set[str]:
++        roles = {self.role}
++        if self.pk:
++            roles.update(
++                self.role_assignments.filter(
++                    is_active=True,
++                    is_deleted=False,
++                ).values_list("role", flat=True)
++            )
++        return roles
++
++    def has_role(self, role: str) -> bool:
++        return role in self.get_role_values()
++
++    @property
++    def role_display_names(self) -> list[str]:
++        labels = dict(UserRole.choices)
++        return [str(labels[role]) for role in sorted(self.get_role_values())]
++
++
++class UserRoleAssignment(BaseModel):
++    user = models.ForeignKey(
++        CustomUser,
++        on_delete=models.CASCADE,
++        related_name="role_assignments",
++        verbose_name=_("usuario"),
++    )
++    role = models.CharField(
++        _("rol"),
++        max_length=32,
++        choices=UserRole.choices,
++    )
++
++    class Meta:
++        verbose_name = _("rol asignado")
++        verbose_name_plural = _("roles asignados")
++        ordering = ("user__email", "role")
++        constraints = [
++            models.UniqueConstraint(
++                fields=("user", "role"),
++                name="identity_unique_user_role_assignment",
++            )
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.user} - {self.get_role_display()}"
++
++
++class ApplicationScreen(BaseModel):
++    key = models.SlugField(_("clave"), max_length=80, unique=True)
++    label = models.CharField(_("nombre"), max_length=120)
++    url_name = models.CharField(_("nombre de ruta"), max_length=120, unique=True)
++    icon = models.CharField(_("icono"), max_length=80, blank=True)
++    sort_order = models.PositiveSmallIntegerField(_("orden"), default=0)
++
++    class Meta:
++        verbose_name = _("pantalla")
++        verbose_name_plural = _("pantallas")
++        ordering = ("sort_order", "label")
++
++    def __str__(self) -> str:
++        return self.label
++
++
++class RoleScreenPermission(BaseModel):
++    screen = models.ForeignKey(
++        ApplicationScreen,
++        on_delete=models.PROTECT,
++        related_name="role_permissions",
++        verbose_name=_("pantalla"),
++    )
++    role = models.CharField(
++        _("rol"),
++        max_length=32,
++        choices=UserRole.choices,
++    )
++    access_level = models.CharField(
++        _("nivel de acceso"),
++        max_length=12,
++        choices=ScreenAccessLevel.choices,
++        default=ScreenAccessLevel.NONE,
++    )
++
++    class Meta:
++        verbose_name = _("permiso de pantalla")
++        verbose_name_plural = _("permisos de pantalla")
++        ordering = ("screen__sort_order", "role")
++        constraints = [
++            models.UniqueConstraint(
++                fields=("screen", "role"),
++                name="identity_unique_role_screen_permission",
++            )
++        ]
++
++    @property
++    def is_protected_permission(self) -> bool:
++        return self.role == UserRole.SUPERADMIN and self.screen.key == "permissions"
++
++    def clean(self) -> None:
++        super().clean()
++        if (
++            self.is_protected_permission
++            and self.access_level != ScreenAccessLevel.EDIT
++        ):
++            raise ValidationError(
++                {
++                    "access_level": _(
++                        "El administrador de sistemas debe conservar acceso de "
++                        "edición a la gestión de permisos."
++                    )
++                }
++            )
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++    def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
++        if self.is_protected_permission:
++            raise ValidationError(
++                _(
++                    "No se puede eliminar el permiso protegido del administrador "
++                    "de sistemas."
++                )
++            )
++        return super().delete(*args, **kwargs)
++
++    def __str__(self) -> str:
++        return (
++            f"{self.get_role_display()} - {self.screen}: "
++            f"{self.get_access_level_display()}"
++        )
+diff --git a/apps/identity/services.py b/apps/identity/services.py
+index 2048718..8181601 100644
+--- a/apps/identity/services.py
++++ b/apps/identity/services.py
+@@ -1,15 +1,95 @@
+-"""Operational services for user invitations."""
++"""Operational services for identity, roles and invitations."""
+ 
+ from typing import Any
+ 
+ from django.conf import settings
+ from django.core.mail import send_mail
++from django.db import transaction
+ from django.db.models import Model
+ from django.http import HttpRequest
+ from django.urls import reverse
+ from django.utils import timezone
+ 
+ from apps.astrotrace.services import record_event
++from apps.identity.models import UserRoleAssignment
++
++
++@transaction.atomic
++def sync_user_roles(
++    *,
++    user: Any,
++    roles: set[str],
++    actor: Model | None = None,
++) -> None:
++    """Make active role assignments match the requested set."""
++
++    requested_roles = set(roles) | {user.role}
++    existing = {
++        assignment.role: assignment
++        for assignment in UserRoleAssignment.objects.filter(user=user)
++    }
++    previous_roles = {
++        role
++        for role, assignment in existing.items()
++        if assignment.is_active and not assignment.is_deleted
++    }
++
++    for role in requested_roles:
++        assignment = existing.get(role)
++        if assignment is None:
++            assignment = UserRoleAssignment(user=user, role=role)
++            if actor is not None:
++                assignment.created_by = actor  # type: ignore[assignment]
++                assignment.updated_by = actor  # type: ignore[assignment]
++            assignment.save()
++            continue
++        update_fields = []
++        if not assignment.is_active:
++            assignment.is_active = True
++            update_fields.append("is_active")
++        if assignment.is_deleted:
++            assignment.is_deleted = False
++            update_fields.append("is_deleted")
++        if actor is not None:
++            assignment.updated_by = actor  # type: ignore[assignment]
++            update_fields.append("updated_by")
++        if update_fields:
++            assignment.save(update_fields=[*update_fields, "updated_at"])
++
++    for role, assignment in existing.items():
++        if role in requested_roles or not assignment.is_active:
++            continue
++        assignment.is_active = False
++        if actor is not None:
++            assignment.updated_by = actor  # type: ignore[assignment]
++        assignment.save(update_fields=["is_active", "updated_by", "updated_at"])
++
++    if previous_roles != requested_roles:
++        record_event(
++            event_type="identity.user_roles.updated",
++            object_label=user.email,
++            actor=actor,
++            payload={
++                "model": user._meta.label,
++                "id": str(user.pk),
++                "level": "legal",
++                "previous_roles": sorted(previous_roles),
++                "roles": sorted(requested_roles),
++            },
++        )
++
++
++def assign_user_role(
++    *,
++    user: Any,
++    role: str,
++    actor: Model | None = None,
++) -> None:
++    sync_user_roles(
++        user=user,
++        roles=user.get_role_values() | {role},
++        actor=actor,
++    )
+ 
+ 
+ def send_user_invitation(
+diff --git a/apps/identity/urls.py b/apps/identity/urls.py
+index 9444bd9..02eb5ee 100644
+--- a/apps/identity/urls.py
++++ b/apps/identity/urls.py
+@@ -6,6 +6,7 @@ from apps.identity import views
+ 
+ urlpatterns = [
+     path("perfil/", views.ProfileView.as_view(), name="profile"),
++    path("permisos/", views.PermissionMatrixView.as_view(), name="permissions"),
+     path("usuarios/", views.UserListView.as_view(), name="users"),
+     path("usuarios/nuevo/", views.UserCreateView.as_view(), name="user_create"),
+     path("usuarios/<uuid:pk>/", views.UserDetailView.as_view(), name="user_detail"),
+diff --git a/apps/identity/views.py b/apps/identity/views.py
+index e7c46ba..ddfca5a 100644
+--- a/apps/identity/views.py
++++ b/apps/identity/views.py
+@@ -10,7 +10,6 @@ from django.http import (
+     HttpRequest,
+     HttpResponse,
+     HttpResponseBase,
+-    HttpResponseForbidden,
+ )
+ from django.shortcuts import redirect
+ from django.urls import reverse
+@@ -19,35 +18,30 @@ from django.views.generic import DetailView, FormView, ListView, TemplateView
+ from django.views.generic.edit import FormMixin
+ 
+ from apps.astrotrace.services import record_event
++from apps.core.permissions import can_edit_screen, get_user_roles
+ from apps.identity.forms import (
+     ForcedPasswordChangeForm,
+     ManagedUserFilterForm,
+     ManagedUserForm,
++    PermissionMatrixForm,
+     ProfilePasswordChangeForm,
+ )
+-from apps.identity.models import CustomUser, UserRole
++from apps.identity.models import ApplicationScreen, CustomUser, UserRole
++from apps.identity.permission_service import update_permission_matrix
+ from apps.identity.services import send_user_invitation
+ 
+-MANAGER_ROLES = {UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.OWNER}
+-
+ 
+ class UserManagementPermissionMixin(LoginRequiredMixin):
+-    """Allow only operational user managers into the user CRUD."""
+-
+-    def dispatch(
+-        self,
+-        request: HttpRequest,
+-        *args: Any,
+-        **kwargs: Any,
+-    ) -> HttpResponseBase:
+-        if getattr(request.user, "role", "") not in MANAGER_ROLES:
+-            return HttpResponseForbidden("No tienes permiso para administrar usuarios.")
+-        return super().dispatch(request, *args, **kwargs)
++    """Scope user management after screen access is enforced by middleware."""
+ 
+     def get_queryset(self) -> QuerySet[CustomUser]:
+         return scope_users_for_manager(
+             CustomUser.objects.all()
+-            .prefetch_related("assigned_clinics", "assigned_owners")
++            .prefetch_related(
++                "assigned_clinics",
++                "assigned_owners",
++                "role_assignments",
++            )
+             .order_by("email"),
+             cast(Any, self).request.user,
+         )
+@@ -79,7 +73,14 @@ class UserListView(UserManagementPermissionMixin, ListView):
+                 | Q(phone__icontains=self.search_query)
+             )
+         if role:
+-            queryset = queryset.filter(role=role)
++            queryset = queryset.filter(
++                Q(role=role)
++                | Q(
++                    role_assignments__role=role,
++                    role_assignments__is_active=True,
++                    role_assignments__is_deleted=False,
++                )
++            )
+         if is_active in {"0", "1"}:
+             queryset = queryset.filter(is_active=is_active == "1")
+         return queryset.distinct()
+@@ -102,6 +103,9 @@ class UserDetailView(UserManagementPermissionMixin, DetailView):
+         context["page_title"] = "Detalle de usuario"
+         context["assigned_clinics"] = user.assigned_clinics.filter(is_deleted=False)
+         context["assigned_owners"] = user.assigned_owners.filter(is_deleted=False)
++        context["role_labels"] = [
++            dict(UserRole.choices)[role] for role in sorted(user.get_role_values())
++        ]
+         context["owner_profile"] = getattr(user, "owner_profile", None)
+         context["tenant_doctor_profile"] = getattr(user, "tenant_doctor_profile", None)
+         return context
+@@ -155,7 +159,11 @@ class UserFormView(UserManagementPermissionMixin, FormMixin, TemplateView):
+             event_type=event_type,
+             object_label=user.email,
+             actor=cast(Model, self.request.user),
+-            payload={"user_id": str(user.pk), "role": user.role},
++            payload={
++                "user_id": str(user.pk),
++                "primary_role": user.role,
++                "roles": sorted(user.get_role_values()),
++            },
+         )
+ 
+         temporary_password = form.cleaned_data.get("temporary_password") or ""
+@@ -267,8 +275,13 @@ class ProfileView(LoginRequiredMixin, FormView):
+ 
+     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+         context = super().get_context_data(**kwargs)
++        profile_user = cast(CustomUser, self.request.user)
+         context["page_title"] = "Perfil"
+-        context["profile_user"] = self.request.user
++        context["profile_user"] = profile_user
++        context["role_labels"] = [
++            dict(UserRole.choices)[role]
++            for role in sorted(profile_user.get_role_values())
++        ]
+         return context
+ 
+     def form_valid(self, form: ProfilePasswordChangeForm) -> HttpResponse:
+@@ -288,11 +301,18 @@ def scope_users_for_manager(
+     queryset: QuerySet[CustomUser],
+     manager: Any,
+ ) -> QuerySet[CustomUser]:
+-    role = getattr(manager, "role", "")
+-    if role == UserRole.SUPERADMIN:
++    roles = get_user_roles(manager)
++    if UserRole.SUPERADMIN in roles:
+         return queryset
+-    if role == UserRole.ADMIN:
+-        scoped = queryset.exclude(role=UserRole.SUPERADMIN)
++    if UserRole.ADMIN in roles:
++        scoped = queryset.exclude(
++            Q(role=UserRole.SUPERADMIN)
++            | Q(
++                role_assignments__role=UserRole.SUPERADMIN,
++                role_assignments__is_active=True,
++                role_assignments__is_deleted=False,
++            )
++        )
+         clinics = manager.assigned_clinics.filter(is_deleted=False)
+         if not clinics.exists():
+             return scoped
+@@ -303,11 +323,93 @@ def scope_users_for_manager(
+             | Q(tenant_doctor_profile__assigned_rooms__clinic__in=clinics)
+             | Q(assigned_owners__consulting_rooms__clinic__in=clinics)
+         ).distinct()
+-    if role == UserRole.OWNER:
++    if UserRole.OWNER in roles:
+         owner = getattr(manager, "owner_profile", None)
+         if owner is None:
+             return queryset.filter(pk=manager.pk)
+         return queryset.filter(
+-            Q(pk=manager.pk) | Q(role=UserRole.ASSISTANT, assigned_owners=owner)
++            Q(pk=manager.pk)
++            | (
++                Q(assigned_owners=owner)
++                & (
++                    Q(role=UserRole.ASSISTANT)
++                    | Q(
++                        role_assignments__role=UserRole.ASSISTANT,
++                        role_assignments__is_active=True,
++                        role_assignments__is_deleted=False,
++                    )
++                )
++            )
+         ).distinct()
+-    return queryset.none()
++    return queryset.filter(pk=manager.pk)
++
++
++class PermissionMatrixView(LoginRequiredMixin, FormMixin, TemplateView):
++    template_name = "identity/permission_matrix.html"
++    form_class = PermissionMatrixForm
++
++    def get_screens(self) -> QuerySet[ApplicationScreen]:
++        return ApplicationScreen.objects.filter(
++            is_active=True,
++            is_deleted=False,
++        ).order_by("sort_order", "label")
++
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["screens"] = self.get_screens()
++        kwargs["can_edit"] = can_edit_screen(self.request.user, "permissions")
++        return kwargs
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        form = context["form"]
++        rows = []
++        for screen in form.screens:
++            cells = []
++            for role, role_label in UserRole.choices:
++                cells.append(
++                    {
++                        "role": role,
++                        "role_label": role_label,
++                        "field": form[form.field_name(role, screen.key)],
++                        "is_protected": (
++                            role == UserRole.SUPERADMIN
++                            and screen.key == "permissions"
++                        ),
++                    }
++                )
++            rows.append({"screen": screen, "cells": cells})
++        context.update(
++            {
++                "page_title": "Gestión de permisos",
++                "roles": UserRole.choices,
++                "matrix_rows": rows,
++                "can_edit_permissions": can_edit_screen(
++                    self.request.user,
++                    "permissions",
++                ),
++            }
++        )
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        form = self.get_form()
++        if form.is_valid():
++            return self.form_valid(form)
++        return self.form_invalid(form)
++
++    def form_valid(self, form: PermissionMatrixForm) -> HttpResponse:
++        levels = {
++            (role, screen.key): form.access_level_for(role, screen.key)
++            for screen in form.screens
++            for role, _label in UserRole.choices
++        }
++        updated = update_permission_matrix(
++            levels=levels,
++            actor=cast(Model, self.request.user),
++        )
++        messages.success(
++            self.request,
++            f"Permisos actualizados: {updated} cambio(s).",
++        )
++        return redirect("permissions")
+diff --git a/apps/presentation/context_processors.py b/apps/presentation/context_processors.py
+index 9935f10..809f854 100644
+--- a/apps/presentation/context_processors.py
++++ b/apps/presentation/context_processors.py
+@@ -4,13 +4,34 @@ from typing import Any
+ 
+ from django.http import HttpRequest
+ 
++from apps.core.permissions import get_user_screen_access_map
++from apps.identity.models import ScreenAccessLevel
+ from apps.presentation.navigation import NAVIGATION_ITEMS
+ 
+ 
+ def navigation(request: HttpRequest) -> dict[str, Any]:
+     query_params = request.GET.copy()
+     query_params.pop("page", None)
++    access_map = get_user_screen_access_map(request.user)
++    navigation_items = [
++        {
++            **item,
++            "access_level": access_map.get(
++                item["screen_key"],
++                ScreenAccessLevel.NONE,
++            ),
++        }
++        for item in NAVIGATION_ITEMS
++    ]
++    current_access = getattr(
++        request,
++        "current_screen_access",
++        ScreenAccessLevel.NONE,
++    )
+     return {
+-        "navigation_items": NAVIGATION_ITEMS,
++        "navigation_items": navigation_items,
++        "screen_access_map": access_map,
++        "current_screen_access": current_access,
++        "current_screen_can_edit": current_access == ScreenAccessLevel.EDIT,
+         "pagination_querystring": query_params.urlencode(),
+     }
+diff --git a/apps/presentation/navigation.py b/apps/presentation/navigation.py
+index 9d5c311..1d2f111 100644
+--- a/apps/presentation/navigation.py
++++ b/apps/presentation/navigation.py
+@@ -1,49 +1,15 @@
+ """Navigation metadata for the base layout."""
+ 
++from apps.identity.screen_registry import SCREEN_DEFINITIONS
++
+ NAVIGATION_ITEMS = [
+-    {"label": "Dashboard", "url_name": "dashboard", "icon": "bi-speedometer2"},
+-    {"label": "Clínicas", "url_name": "clinics", "icon": "bi-hospital"},
+-    {"label": "Consultorios", "url_name": "rooms", "icon": "bi-door-open"},
+-    {
+-        "label": "Especialidades",
+-        "url_name": "specialties",
+-        "icon": "bi-clipboard2-pulse",
+-    },
+-    {"label": "Equipamiento", "url_name": "equipment", "icon": "bi-tools"},
+-    {"label": "Propietarios", "url_name": "owners", "icon": "bi-person-badge"},
+-    {
+-        "label": "Médicos Arrendatarios",
+-        "url_name": "tenant_doctors",
+-        "icon": "bi-person-vcard",
+-    },
+-    {
+-        "label": "Disponibilidad y tarifas",
+-        "url_name": "availability",
+-        "icon": "bi-calendar-week",
+-    },
+-    {"label": "Calendario", "url_name": "calendar_week", "icon": "bi-calendar3"},
+-    {"label": "Vista rápida", "url_name": "calendar_quick", "icon": "bi-grid-3x3-gap"},
+-    {"label": "Reservaciones", "url_name": "reservations", "icon": "bi-calendar-check"},
+-    {"label": "Estados de Cuenta", "url_name": "statements", "icon": "bi-receipt"},
+-    {
+-        "label": "Descuentos Consultorio",
+-        "url_name": "room_rate_discounts",
+-        "icon": "bi-percent",
+-    },
+     {
+-        "label": "Descuentos Arrendatario",
+-        "url_name": "tenant_doctor_discounts",
+-        "icon": "bi-tags",
+-    },
+-    {"label": "Pagos", "url_name": "payments", "icon": "bi-credit-card"},
+-    {"label": "Liquidaciones", "url_name": "settlements", "icon": "bi-bank"},
+-    {"label": "Documentos", "url_name": "documents", "icon": "bi-file-earmark-pdf"},
+-    {"label": "Accesos", "url_name": "access_credentials", "icon": "bi-key"},
+-    {"label": "Timeline", "url_name": "timeline", "icon": "bi-diagram-3"},
+-    {"label": "Reportes", "url_name": "reports", "icon": "bi-bar-chart"},
+-    {"label": "Usuarios", "url_name": "users", "icon": "bi-people"},
+-    {"label": "Perfil", "url_name": "profile", "icon": "bi-person-circle"},
+-    {"label": "Administración", "url_name": "administration", "icon": "bi-gear"},
++        "screen_key": definition.key,
++        "label": definition.label,
++        "url_name": definition.url_name,
++        "icon": definition.icon,
++    }
++    for definition in SCREEN_DEFINITIONS
+ ]
+ 
+ PAGE_TITLES = {
+@@ -68,5 +34,6 @@ PAGE_TITLES = {
+     "reports": "Reportes",
+     "users": "Usuarios",
+     "profile": "Perfil",
++    "permissions": "Permisos",
+     "administration": "Administración",
+ }
+diff --git a/static/css/app.css b/static/css/app.css
+index 69e6992..b42c7ed 100644
+--- a/static/css/app.css
++++ b/static/css/app.css
+@@ -36,6 +36,11 @@ body {
+   background: rgba(255, 255, 255, 0.1);
+ }
+ 
++.app-sidebar .nav-link-unavailable {
++  color: rgba(255, 255, 255, 0.34);
++  user-select: none;
++}
++
+ .app-content {
+   min-width: 0;
+   min-height: 0;
+diff --git a/templates/catalog/detail.html b/templates/catalog/detail.html
+index 7749e24..87650d2 100644
+--- a/templates/catalog/detail.html
++++ b/templates/catalog/detail.html
+@@ -19,10 +19,12 @@
+               Timeline
+             </a>
+           {% endif %}
+-          <a class="btn btn-primary" href="{% url resource.update_url_name object.pk %}">
+-            <i class="bi bi-pencil me-1"></i>
+-            Editar
+-          </a>
++          {% if current_screen_can_edit %}
++            <a class="btn btn-primary" href="{% url resource.update_url_name object.pk %}">
++              <i class="bi bi-pencil me-1"></i>
++              Editar
++            </a>
++          {% endif %}
+         </div>
+       </div>
+ 
+diff --git a/templates/catalog/list.html b/templates/catalog/list.html
+index c6d558f..2eb83fc 100644
+--- a/templates/catalog/list.html
++++ b/templates/catalog/list.html
+@@ -7,10 +7,12 @@
+         <p class="text-uppercase text-secondary small fw-semibold mb-2">Catálogo</p>
+         <h1 class="h4 mb-0">{{ resource.plural_label }}</h1>
+       </div>
+-      <a class="btn btn-primary" href="{% url resource.create_url_name %}">
+-        <i class="bi bi-plus-lg me-1"></i>
+-        Nuevo
+-      </a>
++      {% if current_screen_can_edit %}
++        <a class="btn btn-primary" href="{% url resource.create_url_name %}">
++          <i class="bi bi-plus-lg me-1"></i>
++          Nuevo
++        </a>
++      {% endif %}
+     </div>
+ 
+     {% if filter_form %}
+@@ -80,12 +82,14 @@
+                   <a class="btn btn-outline-secondary" href="{% url resource.detail_url_name row.object.pk %}" title="Ver detalle">
+                     <i class="bi bi-eye"></i>
+                   </a>
+-                  <a class="btn btn-outline-secondary" href="{% url resource.update_url_name row.object.pk %}" title="Editar">
+-                    <i class="bi bi-pencil"></i>
+-                  </a>
+-                  <a class="btn btn-outline-danger" href="{% url resource.deactivate_url_name row.object.pk %}" title="Desactivar">
+-                    <i class="bi bi-slash-circle"></i>
+-                  </a>
++                  {% if current_screen_can_edit %}
++                    <a class="btn btn-outline-secondary" href="{% url resource.update_url_name row.object.pk %}" title="Editar">
++                      <i class="bi bi-pencil"></i>
++                    </a>
++                    <a class="btn btn-outline-danger" href="{% url resource.deactivate_url_name row.object.pk %}" title="Desactivar">
++                      <i class="bi bi-slash-circle"></i>
++                    </a>
++                  {% endif %}
+                 </div>
+               </td>
+             </tr>
+diff --git a/templates/finance/discount_list.html b/templates/finance/discount_list.html
+index 3b27ee6..f354c51 100644
+--- a/templates/finance/discount_list.html
++++ b/templates/finance/discount_list.html
+@@ -8,10 +8,12 @@
+           <p class="text-uppercase text-secondary small fw-semibold mb-2">Finanzas</p>
+           <h1 class="h4 mb-0">{{ page_title }}</h1>
+         </div>
+-        <a class="btn btn-primary" href="{% url resource.create_url_name %}">
+-          <i class="bi bi-plus-lg me-1"></i>
+-          Nuevo descuento
+-        </a>
++        {% if current_screen_can_edit %}
++          <a class="btn btn-primary" href="{% url resource.create_url_name %}">
++            <i class="bi bi-plus-lg me-1"></i>
++            Nuevo descuento
++          </a>
++        {% endif %}
+       </div>
+     </div>
+ 
+@@ -33,13 +35,17 @@
+                   <td>{{ cell }}</td>
+                 {% endfor %}
+                 <td class="text-end">
+-                  <form method="post" action="{% url resource.toggle_url_name row.object.pk %}" class="d-inline">
+-                    {% csrf_token %}
+-                    <button class="btn btn-sm {% if row.object.is_active %}btn-outline-danger{% else %}btn-outline-primary{% endif %}" type="submit">
+-                      <i class="bi {% if row.object.is_active %}bi-slash-circle{% else %}bi-check2-circle{% endif %} me-1"></i>
+-                      {% if row.object.is_active %}Desactivar{% else %}Activar{% endif %}
+-                    </button>
+-                  </form>
++                  {% if current_screen_can_edit %}
++                    <form method="post" action="{% url resource.toggle_url_name row.object.pk %}" class="d-inline">
++                      {% csrf_token %}
++                      <button class="btn btn-sm {% if row.object.is_active %}btn-outline-danger{% else %}btn-outline-primary{% endif %}" type="submit">
++                        <i class="bi {% if row.object.is_active %}bi-slash-circle{% else %}bi-check2-circle{% endif %} me-1"></i>
++                        {% if row.object.is_active %}Desactivar{% else %}Activar{% endif %}
++                      </button>
++                    </form>
++                  {% else %}
++                    <span class="text-secondary small">Solo lectura</span>
++                  {% endif %}
+                 </td>
+               </tr>
+             {% empty %}
+diff --git a/templates/finance/payment_detail.html b/templates/finance/payment_detail.html
+index 56cbcb8..b34be20 100644
+--- a/templates/finance/payment_detail.html
++++ b/templates/finance/payment_detail.html
+@@ -19,18 +19,20 @@
+             <i class="bi bi-diagram-3 me-1"></i>
+             Timeline
+           </a>
+-          <a class="btn btn-outline-primary" href="{% url 'payment_validate' payment.pk %}">
+-            <i class="bi bi-check2-circle me-1"></i>
+-            Validar
+-          </a>
+-          <a class="btn btn-outline-warning" href="{% url 'payment_reject' payment.pk %}">
+-            <i class="bi bi-x-octagon me-1"></i>
+-            Rechazar
+-          </a>
+-          <a class="btn btn-outline-danger" href="{% url 'payment_cancel' payment.pk %}">
+-            <i class="bi bi-slash-circle me-1"></i>
+-            Cancelar
+-          </a>
++          {% if current_screen_can_edit %}
++            <a class="btn btn-outline-primary" href="{% url 'payment_validate' payment.pk %}">
++              <i class="bi bi-check2-circle me-1"></i>
++              Validar
++            </a>
++            <a class="btn btn-outline-warning" href="{% url 'payment_reject' payment.pk %}">
++              <i class="bi bi-x-octagon me-1"></i>
++              Rechazar
++            </a>
++            <a class="btn btn-outline-danger" href="{% url 'payment_cancel' payment.pk %}">
++              <i class="bi bi-slash-circle me-1"></i>
++              Cancelar
++            </a>
++          {% endif %}
+         </div>
+       </div>
+     </div>
+diff --git a/templates/finance/rate_rule_detail.html b/templates/finance/rate_rule_detail.html
+index a150e97..1e21039 100644
+--- a/templates/finance/rate_rule_detail.html
++++ b/templates/finance/rate_rule_detail.html
+@@ -12,10 +12,12 @@
+           <i class="bi bi-arrow-left me-1"></i>
+           Volver
+         </a>
+-        <a class="btn btn-primary" href="{% url 'rate_update' object.pk %}">
+-          <i class="bi bi-pencil me-1"></i>
+-          Editar
+-        </a>
++        {% if current_screen_can_edit %}
++          <a class="btn btn-primary" href="{% url 'rate_update' object.pk %}">
++            <i class="bi bi-pencil me-1"></i>
++            Editar
++          </a>
++        {% endif %}
+       </div>
+     </div>
+ 
+diff --git a/templates/finance/rate_rule_list.html b/templates/finance/rate_rule_list.html
+index dd19161..44b78fd 100644
+--- a/templates/finance/rate_rule_list.html
++++ b/templates/finance/rate_rule_list.html
+@@ -8,10 +8,12 @@
+           <p class="text-uppercase text-secondary small fw-semibold mb-2">Finanzas</p>
+           <h1 class="h4 mb-0">Reglas tarifarias</h1>
+         </div>
+-        <a class="btn btn-primary" href="{% url 'rate_create' %}">
+-          <i class="bi bi-plus-lg me-1"></i>
+-          Nueva tarifa
+-        </a>
++        {% if current_screen_can_edit %}
++          <a class="btn btn-primary" href="{% url 'rate_create' %}">
++            <i class="bi bi-plus-lg me-1"></i>
++            Nueva tarifa
++          </a>
++        {% endif %}
+       </div>
+ 
+       <form method="get" class="row g-3 align-items-end">
+@@ -79,12 +81,14 @@
+                     <a class="btn btn-outline-secondary" href="{% url 'rate_detail' row.object.pk %}" title="Ver detalle">
+                       <i class="bi bi-eye"></i>
+                     </a>
+-                    <a class="btn btn-outline-secondary" href="{% url 'rate_update' row.object.pk %}" title="Editar">
+-                      <i class="bi bi-pencil"></i>
+-                    </a>
+-                    <a class="btn btn-outline-danger" href="{% url 'rate_deactivate' row.object.pk %}" title="Desactivar">
+-                      <i class="bi bi-slash-circle"></i>
+-                    </a>
++                    {% if current_screen_can_edit %}
++                      <a class="btn btn-outline-secondary" href="{% url 'rate_update' row.object.pk %}" title="Editar">
++                        <i class="bi bi-pencil"></i>
++                      </a>
++                      <a class="btn btn-outline-danger" href="{% url 'rate_deactivate' row.object.pk %}" title="Desactivar">
++                        <i class="bi bi-slash-circle"></i>
++                      </a>
++                    {% endif %}
+                   </div>
+                 </td>
+               </tr>
+diff --git a/templates/finance/settlement_detail.html b/templates/finance/settlement_detail.html
+index 2b1a826..47e8598 100644
+--- a/templates/finance/settlement_detail.html
++++ b/templates/finance/settlement_detail.html
+@@ -22,7 +22,7 @@
+             <i class="bi bi-diagram-3 me-1"></i>
+             Timeline
+           </a>
+-          {% if settlement.status != "pagada" and settlement.status != "cancelada" %}
++          {% if current_screen_can_edit and settlement.status != "pagada" and settlement.status != "cancelada" %}
+             <a class="btn btn-outline-primary" href="{% url 'settlement_paid' settlement.pk %}">
+               <i class="bi bi-bank me-1"></i>
+               Marcar como pagada
+diff --git a/templates/identity/profile.html b/templates/identity/profile.html
+index 6340887..f6a9e4b 100644
+--- a/templates/identity/profile.html
++++ b/templates/identity/profile.html
+@@ -16,14 +16,17 @@
+         <dd class="col-sm-8 col-lg-9">{{ profile_user.full_name|default:"Sin nombre" }}</dd>
+         <dt class="col-sm-4 col-lg-3 text-secondary">Correo</dt>
+         <dd class="col-sm-8 col-lg-9">{{ profile_user.email }}</dd>
+-        <dt class="col-sm-4 col-lg-3 text-secondary">Rol</dt>
++        <dt class="col-sm-4 col-lg-3 text-secondary">Rol principal</dt>
+         <dd class="col-sm-8 col-lg-9">{{ profile_user.get_role_display }}</dd>
++        <dt class="col-sm-4 col-lg-3 text-secondary">Roles activos</dt>
++        <dd class="col-sm-8 col-lg-9">{{ role_labels|join:", " }}</dd>
+       </dl>
+     </div>
+ 
+     <div class="status-panel p-3 p-lg-4">
+       <h2 class="h5 mb-3">Cambiar contraseña</h2>
+-      <form method="post" novalidate>
++      {% if current_screen_can_edit %}
++        <form method="post" novalidate>
+         {% csrf_token %}
+         {% if form.non_field_errors %}
+           <div class="alert alert-danger" role="alert">{{ form.non_field_errors }}</div>
+@@ -48,7 +51,10 @@
+             Actualizar contraseña
+           </button>
+         </div>
+-      </form>
++        </form>
++      {% else %}
++        <div class="text-secondary">La contraseña no puede modificarse con acceso de solo lectura.</div>
++      {% endif %}
+     </div>
+   </section>
+ {% endblock %}
+diff --git a/templates/identity/user_detail.html b/templates/identity/user_detail.html
+index 2bc74a2..2045bb8 100644
+--- a/templates/identity/user_detail.html
++++ b/templates/identity/user_detail.html
+@@ -13,25 +13,29 @@
+             <i class="bi bi-arrow-left me-1"></i>
+             Volver
+           </a>
+-          <form method="post" action="{% url 'user_send_invitation' managed_user.pk %}">
+-            {% csrf_token %}
+-            <button class="btn btn-outline-secondary" type="submit">
+-              <i class="bi bi-envelope me-1"></i>
+-              Reenviar invitación
+-            </button>
+-          </form>
+-          <a class="btn btn-primary" href="{% url 'user_update' managed_user.pk %}">
+-            <i class="bi bi-pencil me-1"></i>
+-            Editar
+-          </a>
++          {% if current_screen_can_edit %}
++            <form method="post" action="{% url 'user_send_invitation' managed_user.pk %}">
++              {% csrf_token %}
++              <button class="btn btn-outline-secondary" type="submit">
++                <i class="bi bi-envelope me-1"></i>
++                Reenviar invitación
++              </button>
++            </form>
++            <a class="btn btn-primary" href="{% url 'user_update' managed_user.pk %}">
++              <i class="bi bi-pencil me-1"></i>
++              Editar
++            </a>
++          {% endif %}
+         </div>
+       </div>
+ 
+       <dl class="row mb-0">
+         <dt class="col-sm-4 col-lg-3 text-secondary">Nombre</dt>
+         <dd class="col-sm-8 col-lg-9">{{ managed_user.full_name|default:"Sin datos" }}</dd>
+-        <dt class="col-sm-4 col-lg-3 text-secondary">Grupo</dt>
++        <dt class="col-sm-4 col-lg-3 text-secondary">Rol principal</dt>
+         <dd class="col-sm-8 col-lg-9">{{ managed_user.get_role_display }}</dd>
++        <dt class="col-sm-4 col-lg-3 text-secondary">Roles activos</dt>
++        <dd class="col-sm-8 col-lg-9">{{ role_labels|join:", " }}</dd>
+         <dt class="col-sm-4 col-lg-3 text-secondary">Teléfono</dt>
+         <dd class="col-sm-8 col-lg-9">{{ managed_user.phone|default:"Sin datos" }}</dd>
+         <dt class="col-sm-4 col-lg-3 text-secondary">Correo alterno</dt>
+diff --git a/templates/identity/user_list.html b/templates/identity/user_list.html
+index e7681ab..177c0ad 100644
+--- a/templates/identity/user_list.html
++++ b/templates/identity/user_list.html
+@@ -7,10 +7,12 @@
+         <p class="text-uppercase text-secondary small fw-semibold mb-2">Administración</p>
+         <h1 class="h4 mb-0">Usuarios</h1>
+       </div>
+-      <a class="btn btn-primary" href="{% url 'user_create' %}">
+-        <i class="bi bi-plus-lg me-1"></i>
+-        Nuevo usuario
+-      </a>
++      {% if current_screen_can_edit %}
++        <a class="btn btn-primary" href="{% url 'user_create' %}">
++          <i class="bi bi-plus-lg me-1"></i>
++          Nuevo usuario
++        </a>
++      {% endif %}
+     </div>
+ 
+     <form method="get" class="row g-3 align-items-end mb-3">
+@@ -57,7 +59,7 @@
+             <tr>
+               <td>{{ managed_user.email }}</td>
+               <td>{{ managed_user.full_name|default:"Sin nombre" }}</td>
+-              <td>{{ managed_user.get_role_display }}</td>
++              <td>{{ managed_user.role_display_names|join:", " }}</td>
+               <td>{{ managed_user.phone|default:"Sin datos" }}</td>
+               <td>
+                 {% if managed_user.is_active %}
+@@ -74,12 +76,14 @@
+                   <a class="btn btn-outline-secondary" href="{% url 'user_detail' managed_user.pk %}" title="Ver detalle">
+                     <i class="bi bi-eye"></i>
+                   </a>
+-                  <a class="btn btn-outline-secondary" href="{% url 'user_update' managed_user.pk %}" title="Editar">
+-                    <i class="bi bi-pencil"></i>
+-                  </a>
+-                  <a class="btn btn-outline-danger" href="{% url 'user_deactivate' managed_user.pk %}" title="Desactivar">
+-                    <i class="bi bi-slash-circle"></i>
+-                  </a>
++                  {% if current_screen_can_edit %}
++                    <a class="btn btn-outline-secondary" href="{% url 'user_update' managed_user.pk %}" title="Editar">
++                      <i class="bi bi-pencil"></i>
++                    </a>
++                    <a class="btn btn-outline-danger" href="{% url 'user_deactivate' managed_user.pk %}" title="Desactivar">
++                      <i class="bi bi-slash-circle"></i>
++                    </a>
++                  {% endif %}
+                 </div>
+               </td>
+             </tr>
+diff --git a/templates/integration/access_detail.html b/templates/integration/access_detail.html
+index d613162..1fe3c70 100644
+--- a/templates/integration/access_detail.html
++++ b/templates/integration/access_detail.html
+@@ -15,14 +15,16 @@
+             <i class="bi bi-arrow-left me-1"></i>
+             Volver
+           </a>
+-          <a class="btn btn-outline-primary" href="{% url 'access_credential_use' credential.pk %}">
+-            <i class="bi bi-door-open me-1"></i>
+-            Simular uso
+-          </a>
+-          <a class="btn btn-outline-danger" href="{% url 'access_credential_revoke' credential.pk %}">
+-            <i class="bi bi-slash-circle me-1"></i>
+-            Revocar
+-          </a>
++          {% if current_screen_can_edit %}
++            <a class="btn btn-outline-primary" href="{% url 'access_credential_use' credential.pk %}">
++              <i class="bi bi-door-open me-1"></i>
++              Simular uso
++            </a>
++            <a class="btn btn-outline-danger" href="{% url 'access_credential_revoke' credential.pk %}">
++              <i class="bi bi-slash-circle me-1"></i>
++              Revocar
++            </a>
++          {% endif %}
+         </div>
+       </div>
+     </div>
+diff --git a/templates/partials/sidebar.html b/templates/partials/sidebar.html
+index 9ea8726..8670901 100644
+--- a/templates/partials/sidebar.html
++++ b/templates/partials/sidebar.html
+@@ -11,10 +11,17 @@
+   </a>
+   <nav class="sidebar-nav nav nav-pills flex-column gap-1">
+     {% for item in navigation_items %}
+-      <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
+-        <i class="bi {{ item.icon }}"></i>
+-        <span>{{ item.label }}</span>
+-      </a>
++      {% if item.access_level == "none" %}
++        <span class="nav-link nav-link-unavailable d-flex align-items-center gap-2" aria-disabled="true">
++          <i class="bi {{ item.icon }}"></i>
++          <span>{{ item.label }}</span>
++        </span>
++      {% else %}
++        <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
++          <i class="bi {{ item.icon }}"></i>
++          <span>{{ item.label }}</span>
++        </a>
++      {% endif %}
+     {% endfor %}
+   </nav>
+   {% if request.user.is_authenticated %}
+@@ -40,10 +47,17 @@
+   <div class="offcanvas-body d-flex flex-column">
+     <nav class="sidebar-nav nav nav-pills flex-column gap-1 flex-grow-1">
+       {% for item in navigation_items %}
+-        <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
+-          <i class="bi {{ item.icon }}"></i>
+-          <span>{{ item.label }}</span>
+-        </a>
++        {% if item.access_level == "none" %}
++          <span class="nav-link nav-link-unavailable d-flex align-items-center gap-2" aria-disabled="true">
++            <i class="bi {{ item.icon }}"></i>
++            <span>{{ item.label }}</span>
++          </span>
++        {% else %}
++          <a class="nav-link d-flex align-items-center gap-2" href="{% url item.url_name %}">
++            <i class="bi {{ item.icon }}"></i>
++            <span>{{ item.label }}</span>
++          </a>
++        {% endif %}
+       {% endfor %}
+     </nav>
+     {% if request.user.is_authenticated %}
+diff --git a/templates/scheduling/availability_tariff_detail.html b/templates/scheduling/availability_tariff_detail.html
+index c560055..b91bac5 100644
+--- a/templates/scheduling/availability_tariff_detail.html
++++ b/templates/scheduling/availability_tariff_detail.html
+@@ -16,10 +16,12 @@
+             <i class="bi bi-arrow-left me-1"></i>
+             Volver
+           </a>
+-          <a class="btn btn-primary" href="{% url 'availability_room_detail' room.pk %}">
+-            <i class="bi bi-plus-lg me-1"></i>
+-            Nuevo bloque
+-          </a>
++          {% if current_screen_can_edit %}
++            <a class="btn btn-primary" href="{% url 'availability_room_detail' room.pk %}">
++              <i class="bi bi-plus-lg me-1"></i>
++              Nuevo bloque
++            </a>
++          {% endif %}
+         </div>
+       </div>
+     </div>
+@@ -44,10 +46,14 @@
+             {% for block in blocks %}
+               <tr>
+                 <td>
+-                  <a class="btn btn-sm btn-outline-primary" href="{{ block.edit_url }}">
+-                    <i class="bi bi-pencil me-1"></i>
+-                    Editar
+-                  </a>
++                  {% if current_screen_can_edit %}
++                    <a class="btn btn-sm btn-outline-primary" href="{{ block.edit_url }}">
++                      <i class="bi bi-pencil me-1"></i>
++                      Editar
++                    </a>
++                  {% else %}
++                    <span class="text-secondary small">Solo lectura</span>
++                  {% endif %}
+                 </td>
+                 <td>{{ block.weekday_label }}</td>
+                 <td>{{ block.time_range }}</td>
+@@ -69,7 +75,8 @@
+       </div>
+     </div>
+ 
+-    <div class="status-panel p-3 p-lg-4">
++    {% if current_screen_can_edit %}
++      <div class="status-panel p-3 p-lg-4">
+       <div class="mb-3">
+         <p class="text-uppercase text-secondary small fw-semibold mb-2">
+           {% if is_editing %}Editar bloque{% else %}Alta de bloque{% endif %}
+@@ -142,6 +149,7 @@
+           </button>
+         </div>
+       </form>
+-    </div>
++      </div>
++    {% endif %}
+   </section>
+ {% endblock %}
+diff --git a/templates/scheduling/availability_tariff_list.html b/templates/scheduling/availability_tariff_list.html
+index dce65d3..65bb191 100644
+--- a/templates/scheduling/availability_tariff_list.html
++++ b/templates/scheduling/availability_tariff_list.html
+@@ -75,8 +75,8 @@
+               <tr>
+                 <td>
+                   <a class="btn btn-sm btn-outline-primary" href="{{ row.edit_url }}">
+-                    <i class="bi bi-pencil me-1"></i>
+-                    Editar
++                    <i class="bi {% if current_screen_can_edit %}bi-pencil{% else %}bi-eye{% endif %} me-1"></i>
++                    {% if current_screen_can_edit %}Editar{% else %}Ver{% endif %}
+                   </a>
+                 </td>
+                 <td>{{ row.clinic }}</td>
+diff --git a/templates/scheduling/calendar_quick.html b/templates/scheduling/calendar_quick.html
+index 3bc6ea3..c5b6a6e 100644
+--- a/templates/scheduling/calendar_quick.html
++++ b/templates/scheduling/calendar_quick.html
+@@ -134,7 +134,7 @@
+                 <td>{{ row.tenant_doctor|default:"Sin médico" }}</td>
+                 <td>{{ row.label }}</td>
+                 <td class="text-end">
+-                  {% if row.reservation_url %}
++                  {% if row.reservation_url and screen_access_map.reservations == "edit" %}
+                     <a class="btn btn-sm btn-primary" hx-boost="false" href="{{ row.reservation_url }}">
+                       <i class="bi bi-calendar-plus me-1"></i>
+                       Reservar
+diff --git a/templates/scheduling/calendar_week.html b/templates/scheduling/calendar_week.html
+index 46048b6..09a0527 100644
+--- a/templates/scheduling/calendar_week.html
++++ b/templates/scheduling/calendar_week.html
+@@ -118,7 +118,7 @@
+                               {% else %}
+                                 <div class="small text-secondary mt-2">Sin tarifa configurada</div>
+                               {% endif %}
+-                              {% if entry.can_request %}
++                              {% if entry.can_request and screen_access_map.reservations == "edit" %}
+                                 <a class="btn btn-sm btn-outline-primary mt-2" hx-boost="false" href="{% url 'reservation_request' %}?source=calendar&room={{ row.room.pk }}&date={{ day.date|date:'Y-m-d' }}&start_time={{ block.start_time|time:'H:i' }}&end_time={{ block.end_time|time:'H:i' }}{% if selected_tenant_doctor %}&tenant_doctor={{ selected_tenant_doctor.pk }}{% endif %}">
+                                   <i class="bi bi-calendar-plus me-1"></i>
+                                   Solicitar reservación
+diff --git a/templates/scheduling/detail.html b/templates/scheduling/detail.html
+index 0e67ae5..dfd4654 100644
+--- a/templates/scheduling/detail.html
++++ b/templates/scheduling/detail.html
+@@ -12,10 +12,12 @@
+           <i class="bi bi-arrow-left me-1"></i>
+           Volver
+         </a>
+-        <a class="btn btn-primary" href="{% url resource.update_url_name object.pk %}">
+-          <i class="bi bi-pencil me-1"></i>
+-          Editar
+-        </a>
++        {% if current_screen_can_edit %}
++          <a class="btn btn-primary" href="{% url resource.update_url_name object.pk %}">
++            <i class="bi bi-pencil me-1"></i>
++            Editar
++          </a>
++        {% endif %}
+       </div>
+     </div>
+ 
+diff --git a/templates/scheduling/list.html b/templates/scheduling/list.html
+index 452928e..b28b81f 100644
+--- a/templates/scheduling/list.html
++++ b/templates/scheduling/list.html
+@@ -16,10 +16,12 @@
+           <i class="bi bi-calendar3 me-1"></i>
+           Calendario
+         </a>
+-        <a class="btn btn-primary" href="{% url resource.create_url_name %}">
+-          <i class="bi bi-plus-lg me-1"></i>
+-          Nuevo
+-        </a>
++        {% if current_screen_can_edit %}
++          <a class="btn btn-primary" href="{% url resource.create_url_name %}">
++            <i class="bi bi-plus-lg me-1"></i>
++            Nuevo
++          </a>
++        {% endif %}
+       </div>
+     </div>
+ 
+@@ -86,12 +88,14 @@
+                   <a class="btn btn-outline-secondary" href="{% url resource.detail_url_name row.object.pk %}" title="Ver detalle">
+                     <i class="bi bi-eye"></i>
+                   </a>
+-                  <a class="btn btn-outline-secondary" href="{% url resource.update_url_name row.object.pk %}" title="Editar">
+-                    <i class="bi bi-pencil"></i>
+-                  </a>
+-                  <a class="btn btn-outline-danger" href="{% url resource.deactivate_url_name row.object.pk %}" title="Desactivar">
+-                    <i class="bi bi-slash-circle"></i>
+-                  </a>
++                  {% if current_screen_can_edit %}
++                    <a class="btn btn-outline-secondary" href="{% url resource.update_url_name row.object.pk %}" title="Editar">
++                      <i class="bi bi-pencil"></i>
++                    </a>
++                    <a class="btn btn-outline-danger" href="{% url resource.deactivate_url_name row.object.pk %}" title="Desactivar">
++                      <i class="bi bi-slash-circle"></i>
++                    </a>
++                  {% endif %}
+                 </div>
+               </td>
+             </tr>
+diff --git a/templates/scheduling/reservation_detail.html b/templates/scheduling/reservation_detail.html
+index b7079a4..e488cae 100644
+--- a/templates/scheduling/reservation_detail.html
++++ b/templates/scheduling/reservation_detail.html
+@@ -19,14 +19,16 @@
+             <i class="bi bi-diagram-3 me-1"></i>
+             Timeline
+           </a>
+-          <a class="btn btn-outline-primary" href="{% url 'reservation_confirm' reservation.pk %}">
+-            <i class="bi bi-check2-circle me-1"></i>
+-            Confirmar
+-          </a>
+-          <a class="btn btn-outline-danger" href="{% url 'reservation_cancel' reservation.pk %}">
+-            <i class="bi bi-x-circle me-1"></i>
+-            Cancelar
+-          </a>
++          {% if current_screen_can_edit %}
++            <a class="btn btn-outline-primary" href="{% url 'reservation_confirm' reservation.pk %}">
++              <i class="bi bi-check2-circle me-1"></i>
++              Confirmar
++            </a>
++            <a class="btn btn-outline-danger" href="{% url 'reservation_cancel' reservation.pk %}">
++              <i class="bi bi-x-circle me-1"></i>
++              Cancelar
++            </a>
++          {% endif %}
+         </div>
+       </div>
+     </div>
+@@ -54,24 +56,28 @@
+           <div class="text-secondary">{{ access_status.status_label }}</div>
+         </div>
+         <div class="d-flex flex-wrap gap-2">
+-          {% if access_status.can_provision %}
++          {% if access_status.can_provision and screen_access_map.access_credentials == "edit" %}
+             <a class="btn btn-primary" href="{% url 'access_provision' reservation.pk %}">
+               <i class="bi bi-key me-1"></i>
+               Habilitar acceso simulado
+             </a>
+           {% elif access_status.credential %}
+-            <a class="btn btn-outline-secondary" href="{% url 'access_credential_detail' access_status.credential.pk %}">
+-              <i class="bi bi-eye me-1"></i>
+-              Ver acceso
+-            </a>
+-            <a class="btn btn-outline-primary" href="{% url 'access_credential_use' access_status.credential.pk %}">
+-              <i class="bi bi-door-open me-1"></i>
+-              Simular uso
+-            </a>
+-            <a class="btn btn-outline-danger" href="{% url 'access_credential_revoke' access_status.credential.pk %}">
+-              <i class="bi bi-slash-circle me-1"></i>
+-              Revocar acceso
+-            </a>
++            {% if screen_access_map.access_credentials != "none" %}
++              <a class="btn btn-outline-secondary" href="{% url 'access_credential_detail' access_status.credential.pk %}">
++                <i class="bi bi-eye me-1"></i>
++                Ver acceso
++              </a>
++            {% endif %}
++            {% if screen_access_map.access_credentials == "edit" %}
++              <a class="btn btn-outline-primary" href="{% url 'access_credential_use' access_status.credential.pk %}">
++                <i class="bi bi-door-open me-1"></i>
++                Simular uso
++              </a>
++              <a class="btn btn-outline-danger" href="{% url 'access_credential_revoke' access_status.credential.pk %}">
++                <i class="bi bi-slash-circle me-1"></i>
++                Revocar acceso
++              </a>
++            {% endif %}
+           {% endif %}
+         </div>
+       </div>
+@@ -133,10 +139,12 @@
+     <div class="status-panel p-3 p-lg-4">
+       <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+         <h2 class="h5 mb-0">Pagos</h2>
+-        <a class="btn btn-primary" href="{% url 'payment_register' reservation.pk %}">
+-          <i class="bi bi-plus-lg me-1"></i>
+-          Registrar pago
+-        </a>
++        {% if screen_access_map.payments == "edit" %}
++          <a class="btn btn-primary" href="{% url 'payment_register' reservation.pk %}">
++            <i class="bi bi-plus-lg me-1"></i>
++            Registrar pago
++          </a>
++        {% endif %}
+       </div>
+ 
+       <div class="row g-3 mb-3">
+@@ -181,10 +189,12 @@
+                 <td>{{ payment.reference|default:"Sin referencia" }}</td>
+                 <td>{{ payment.get_status_display }}</td>
+                 <td class="text-end">
+-                  <a class="btn btn-sm btn-outline-secondary" href="{% url 'payment_detail' payment.pk %}">
+-                    <i class="bi bi-eye me-1"></i>
+-                    Ver
+-                  </a>
++                  {% if screen_access_map.payments != "none" %}
++                    <a class="btn btn-sm btn-outline-secondary" href="{% url 'payment_detail' payment.pk %}">
++                      <i class="bi bi-eye me-1"></i>
++                      Ver
++                    </a>
++                  {% endif %}
+                 </td>
+               </tr>
+             {% empty %}
+@@ -202,11 +212,13 @@
+         <h2 class="h5 mb-0">Liquidación</h2>
+         <div class="d-flex flex-wrap gap-2">
+           {% if settlement_summary.settlement %}
+-            <a class="btn btn-outline-secondary" href="{% url 'settlement_detail' settlement_summary.settlement.pk %}">
+-              <i class="bi bi-eye me-1"></i>
+-              Ver liquidación
+-            </a>
+-            {% if settlement_summary.settlement.status != "pagada" and settlement_summary.settlement.status != "cancelada" %}
++            {% if screen_access_map.settlements != "none" %}
++              <a class="btn btn-outline-secondary" href="{% url 'settlement_detail' settlement_summary.settlement.pk %}">
++                <i class="bi bi-eye me-1"></i>
++                Ver liquidación
++              </a>
++            {% endif %}
++            {% if screen_access_map.settlements == "edit" and settlement_summary.settlement.status != "pagada" and settlement_summary.settlement.status != "cancelada" %}
+               <a class="btn btn-outline-primary" href="{% url 'settlement_paid' settlement_summary.settlement.pk %}">
+                 <i class="bi bi-bank me-1"></i>
+                 Marcar como pagada
+@@ -216,7 +228,7 @@
+                 Cancelar liquidación
+               </a>
+             {% endif %}
+-          {% else %}
++          {% elif screen_access_map.settlements == "edit" %}
+             <a class="btn btn-primary" href="{% url 'settlement_generate' reservation.pk %}">
+               <i class="bi bi-plus-lg me-1"></i>
+               Generar liquidación
+diff --git a/templates/vault/_related_documents.html b/templates/vault/_related_documents.html
+index f7e31ee..843f745 100644
+--- a/templates/vault/_related_documents.html
++++ b/templates/vault/_related_documents.html
+@@ -1,10 +1,12 @@
+ <div class="status-panel p-3 p-lg-4">
+   <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+     <h2 class="h5 mb-0">Documentos</h2>
+-    <a class="btn btn-primary" href="{% url 'document_upload' %}?{{ document_upload_field }}={{ document_parent.pk }}">
+-      <i class="bi bi-plus-lg me-1"></i>
+-      Subir documento
+-    </a>
++    {% if screen_access_map.documents == "edit" %}
++      <a class="btn btn-primary" href="{% url 'document_upload' %}?{{ document_upload_field }}={{ document_parent.pk }}">
++        <i class="bi bi-plus-lg me-1"></i>
++        Subir documento
++      </a>
++    {% endif %}
+   </div>
+ 
+   <div class="table-responsive">
+diff --git a/templates/vault/document_detail.html b/templates/vault/document_detail.html
+index 98673ce..a6037e3 100644
+--- a/templates/vault/document_detail.html
++++ b/templates/vault/document_detail.html
+@@ -22,22 +22,24 @@
+             <i class="bi bi-diagram-3 me-1"></i>
+             Timeline
+           </a>
+-          <a class="btn btn-outline-primary" href="{% url 'document_in_review' document.pk %}">
+-            <i class="bi bi-hourglass-split me-1"></i>
+-            En revisión
+-          </a>
+-          <a class="btn btn-outline-success" href="{% url 'document_approve' document.pk %}">
+-            <i class="bi bi-check2-circle me-1"></i>
+-            Aprobar
+-          </a>
+-          <a class="btn btn-outline-warning" href="{% url 'document_reject' document.pk %}">
+-            <i class="bi bi-x-octagon me-1"></i>
+-            Rechazar
+-          </a>
+-          <a class="btn btn-outline-danger" href="{% url 'document_cancel' document.pk %}">
+-            <i class="bi bi-slash-circle me-1"></i>
+-            Cancelar
+-          </a>
++          {% if current_screen_can_edit %}
++            <a class="btn btn-outline-primary" href="{% url 'document_in_review' document.pk %}">
++              <i class="bi bi-hourglass-split me-1"></i>
++              En revisión
++            </a>
++            <a class="btn btn-outline-success" href="{% url 'document_approve' document.pk %}">
++              <i class="bi bi-check2-circle me-1"></i>
++              Aprobar
++            </a>
++            <a class="btn btn-outline-warning" href="{% url 'document_reject' document.pk %}">
++              <i class="bi bi-x-octagon me-1"></i>
++              Rechazar
++            </a>
++            <a class="btn btn-outline-danger" href="{% url 'document_cancel' document.pk %}">
++              <i class="bi bi-slash-circle me-1"></i>
++              Cancelar
++            </a>
++          {% endif %}
+         </div>
+       </div>
+     </div>
+diff --git a/templates/vault/document_list.html b/templates/vault/document_list.html
+index 47a1179..7d3ba24 100644
+--- a/templates/vault/document_list.html
++++ b/templates/vault/document_list.html
+@@ -8,10 +8,12 @@
+           <p class="text-uppercase text-secondary small fw-semibold mb-2">Bóveda documental</p>
+           <h1 class="h4 mb-0">Documentos</h1>
+         </div>
+-        <a class="btn btn-primary" href="{% url 'document_upload' %}">
+-          <i class="bi bi-plus-lg me-1"></i>
+-          Subir documento
+-        </a>
++        {% if current_screen_can_edit %}
++          <a class="btn btn-primary" href="{% url 'document_upload' %}">
++            <i class="bi bi-plus-lg me-1"></i>
++            Subir documento
++          </a>
++        {% endif %}
+       </div>
+ 
+       <form method="get" class="row g-3 align-items-end">
+diff --git a/tests/test_reservations.py b/tests/test_reservations.py
+index b261a43..ceebee5 100644
+--- a/tests/test_reservations.py
++++ b/tests/test_reservations.py
+@@ -1,5 +1,5 @@
+ import re
+-from datetime import date, time
++from datetime import date, time, timedelta
+ from decimal import Decimal
+ from typing import Any
+ 
+@@ -7,6 +7,7 @@ import pytest
+ from django.contrib.auth import get_user_model
+ from django.core import mail
+ from django.core.exceptions import ValidationError
++from django.utils import timezone
+ 
+ from apps.astrotrace.models import TraceEvent
+ from apps.catalog.models import (
+@@ -48,6 +49,12 @@ def create_user(email: str) -> Any:
+     )
+ 
+ 
++def future_monday() -> date:
++    today = timezone.localdate()
++    days_until_monday = (7 - today.weekday()) % 7 or 7
++    return today + timedelta(days=days_until_monday + 28)
++
++
+ def create_room(name: str = "Consultorio Reserva") -> ConsultingRoom:
+     owner_user = create_user(f"{name.lower().replace(' ', '-')}@owner.example.com")
+     clinic = Clinic.objects.create(name=f"Clínica {name}")
+@@ -297,7 +304,10 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
+     create_rate(room)
+     client.force_login(user)
+ 
+-    response = client.get(f"/calendario/?week=2026-08-17&room={room.pk}")
++    target_date = future_monday()
++    response = client.get(
++        f"/calendario/?week={target_date.isoformat()}&room={room.pk}"
++    )
+ 
+     assert response.status_code == 200
+     assert "Solicitar reservación" in response.content.decode()
+@@ -357,9 +367,10 @@ def test_quick_calendar_shows_free_day_and_reservation_action(client: Any) -> No
+     create_rate(room)
+     client.force_login(user)
+ 
++    target_date = future_monday()
+     response = client.get(
+-        f"/calendario/vista-rapida/?week=2026-08-17"
+-        f"&room={room.pk}&selected_date=2026-08-17"
++        f"/calendario/vista-rapida/?week={target_date.isoformat()}"
++        f"&room={room.pk}&selected_date={target_date.isoformat()}"
+     )
+ 
+     content = response.content.decode()
+@@ -436,18 +447,19 @@ def test_quick_calendar_shows_reserved_day_when_no_free_blocks(client: Any) -> N
+     doctor = create_tenant_doctor("doctor-vista-rapida@example.com")
+     create_availability(room)
+     create_rate(room)
++    target_date = future_monday()
+     create_reservation(
+         room=room,
+         tenant_doctor=doctor,
+-        reservation_date=date(2026, 8, 17),
++        reservation_date=target_date,
+         start_time=time(8, 0),
+         end_time=time(13, 0),
+     )
+     client.force_login(user)
+ 
+     response = client.get(
+-        f"/calendario/vista-rapida/?week=2026-08-17"
+-        f"&room={room.pk}&selected_date=2026-08-17"
++        f"/calendario/vista-rapida/?week={target_date.isoformat()}"
++        f"&room={room.pk}&selected_date={target_date.isoformat()}"
+     )
+ 
+     content = response.content.decode()
