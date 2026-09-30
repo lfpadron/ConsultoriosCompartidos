@@ -6,6 +6,7 @@ from apps.scheduling.models import (
     AvailabilityException,
     AvailabilityRule,
     Reservation,
+    ReservationBatch,
     Weekday,
     rule_weekdays,
 )
@@ -58,3 +59,24 @@ class ReservationAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "room__clinic")
     search_fields = ("room__name", "tenant_doctor__display_name", "notes")
+
+
+@admin.register(ReservationBatch)
+class ReservationBatchAdmin(admin.ModelAdmin):
+    list_display = (
+        "reference",
+        "room",
+        "tenant_doctor",
+        "batch_type",
+        "occurrence_count",
+        "tariff_final",
+        "currency",
+        "status",
+    )
+    list_filter = ("batch_type", "status", "room__clinic")
+    search_fields = (
+        "reference",
+        "room__name",
+        "tenant_doctor__display_name",
+        "tenant_doctor__user__email",
+    )

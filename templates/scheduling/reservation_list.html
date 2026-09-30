@@ -64,6 +64,7 @@
       <table class="table table-hover align-middle">
         <thead>
           <tr>
+            <th>Grupo</th>
             <th>Consultorio</th>
             <th>Médico</th>
             <th>Fecha</th>
@@ -75,6 +76,13 @@
         <tbody>
           {% for reservation in reservations %}
             <tr>
+              <td>
+                {% if reservation.batch %}
+                  <a href="{% url 'reservation_batch_detail' reservation.batch.pk %}">{{ reservation.batch.reference }}</a>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
               <td>{{ reservation.room }}</td>
               <td>{{ reservation.tenant_doctor }}</td>
               <td>{{ reservation.date|date:"d/m/Y" }}</td>
@@ -88,7 +96,7 @@
             </tr>
           {% empty %}
             <tr>
-              <td colspan="6" class="text-center text-secondary py-5">Sin reservaciones.</td>
+              <td colspan="7" class="text-center text-secondary py-5">Sin reservaciones.</td>
             </tr>
           {% endfor %}
         </tbody>

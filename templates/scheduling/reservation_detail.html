@@ -38,6 +38,13 @@
       <dl class="row mb-0">
         <dt class="col-sm-4 col-lg-3 text-secondary">Consultorio</dt>
         <dd class="col-sm-8 col-lg-9">{{ reservation.room }}</dd>
+        {% if reservation.batch %}
+          <dt class="col-sm-4 col-lg-3 text-secondary">Grupo</dt>
+          <dd class="col-sm-8 col-lg-9">
+            <a href="{% url 'reservation_batch_detail' reservation.batch.pk %}">{{ reservation.batch.reference }}</a>
+            · {{ reservation.batch.get_batch_type_display }}
+          </dd>
+        {% endif %}
         <dt class="col-sm-4 col-lg-3 text-secondary">Médico arrendatario</dt>
         <dd class="col-sm-8 col-lg-9">{{ reservation.tenant_doctor }}</dd>
         <dt class="col-sm-4 col-lg-3 text-secondary">Fecha</dt>

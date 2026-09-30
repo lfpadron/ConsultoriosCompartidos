@@ -1,5 +1,6 @@
 """Scheduling models prepared for availability and calendar rules."""
 
+import uuid
 from dataclasses import dataclass
 from datetime import date, time
 from decimal import Decimal
@@ -10,6 +11,7 @@ from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+from apps.core.constants import DEFAULT_CURRENCY
 from apps.core.models import BaseModel
 
 
@@ -229,7 +231,185 @@ ACTIVE_RESERVATION_STATUSES = {
 }
 
 
+class ReservationBatchType(models.TextChoices):
+    SINGLE = "single", _("Única")
+    RECURRING = "recurring", _("Repetitiva")
+
+
+class ReservationBatchStatus(models.TextChoices):
+    REQUESTED = "requested", _("Por confirmar")
+    CONFIRMED = "confirmed", _("Confirmada")
+    PARTIALLY_CANCELLED = "partially_cancelled", _("Cancelada parcialmente")
+    CANCELLED = "cancelled", _("Cancelada")
+    EXPIRED = "expired", _("Vencida")
+
+
+class ReservationDeadlinePolicy(models.TextChoices):
+    PENDING_CONFIGURATION = "pending_configuration", _("Pendiente de configurar")
+    HOURS_BEFORE = "hours_before", _("Horas antes")
+    PREVIOUS_DAY = "previous_day", _("Día calendario anterior")
+    EXCEPTION_HOURS = "exception_hours", _("Excepción: horas antes")
+
+
+def generate_reservation_batch_reference() -> str:
+    return uuid.uuid4().hex[:12].upper()
+
+
+class ReservationBatch(BaseModel):
+    reference = models.CharField(
+        _("referencia"),
+        max_length=12,
+        unique=True,
+        default=generate_reservation_batch_reference,
+        editable=False,
+    )
+    room = models.ForeignKey(
+        "catalog.ConsultingRoom",
+        on_delete=models.PROTECT,
+        related_name="reservation_batches",
+        verbose_name=_("consultorio"),
+    )
+    tenant_doctor = models.ForeignKey(
+        "catalog.TenantDoctorProfile",
+        on_delete=models.PROTECT,
+        related_name="reservation_batches",
+        verbose_name=_("médico arrendatario"),
+    )
+    batch_type = models.CharField(
+        _("tipo de reservación"),
+        max_length=12,
+        choices=ReservationBatchType.choices,
+        default=ReservationBatchType.SINGLE,
+    )
+    status = models.CharField(
+        _("estado"),
+        max_length=24,
+        choices=ReservationBatchStatus.choices,
+        default=ReservationBatchStatus.REQUESTED,
+    )
+    recurrence_rule = models.JSONField(
+        _("regla de recurrencia"),
+        default=dict,
+        blank=True,
+    )
+    occurrence_count = models.PositiveSmallIntegerField(
+        _("número de ocurrencias"),
+        default=1,
+    )
+    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
+    tariff_total = models.DecimalField(
+        _("tarifa total"),
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    tariff_final = models.DecimalField(
+        _("tarifa final"),
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    payment_deadline_at = models.DateTimeField(
+        _("fecha límite de pago"),
+        blank=True,
+        null=True,
+    )
+    deadline_policy = models.CharField(
+        _("política de vencimiento"),
+        max_length=32,
+        choices=ReservationDeadlinePolicy.choices,
+        default=ReservationDeadlinePolicy.PENDING_CONFIGURATION,
+    )
+    deadline_policy_snapshot = models.JSONField(
+        _("snapshot de política de vencimiento"),
+        default=dict,
+        blank=True,
+    )
+    cancellation_policy = models.ForeignKey(
+        "billing.CancellationPolicy",
+        on_delete=models.PROTECT,
+        related_name="reservation_batches",
+        verbose_name=_("política de cancelación aceptada"),
+        blank=True,
+        null=True,
+    )
+    cancellation_policy_snapshot = models.JSONField(
+        _("snapshot de política de cancelación"),
+        default=dict,
+        blank=True,
+    )
+    cancellation_terms_accepted_at = models.DateTimeField(
+        _("términos de cancelación aceptados en"),
+        blank=True,
+        null=True,
+    )
+    payment_proof_submitted_at = models.DateTimeField(
+        _("comprobante enviado en"),
+        blank=True,
+        null=True,
+    )
+    expired_at = models.DateTimeField(_("vencida en"), blank=True, null=True)
+    requested_at = models.DateTimeField(_("solicitada en"), default=timezone.now)
+    notes = models.TextField(_("notas"), blank=True)
+
+    class Meta:
+        verbose_name = _("grupo de reservaciones")
+        verbose_name_plural = _("grupos de reservaciones")
+        ordering = ("-requested_at", "reference")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(occurrence_count__gte=1),
+                name="scheduling_batch_occurrence_count_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(tariff_total__gte=0),
+                name="scheduling_batch_tariff_total_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(tariff_final__gte=0),
+                name="scheduling_batch_tariff_final_nonnegative",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.reference} - {self.room}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if self.occurrence_count < 1:
+            errors["occurrence_count"] = _("Debe existir al menos una ocurrencia.")
+        if self.tariff_total < Decimal("0.00"):
+            errors["tariff_total"] = _("La tarifa total no puede ser negativa.")
+        if self.tariff_final < Decimal("0.00"):
+            errors["tariff_final"] = _("La tarifa final no puede ser negativa.")
+        if self.room_id and self.cancellation_policy_id:
+            policy = self.cancellation_policy
+            if policy is not None and policy.clinic_id != self.room.clinic_id:
+                errors["cancellation_policy"] = _(
+                    "La política debe pertenecer a la clínica del consultorio."
+                )
+            elif policy is not None and policy.room_id not in {None, self.room_id}:
+                errors["cancellation_policy"] = _(
+                    "La política no corresponde al consultorio seleccionado."
+                )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
 class Reservation(BaseModel):
+    batch = models.ForeignKey(
+        ReservationBatch,
+        on_delete=models.PROTECT,
+        related_name="reservations",
+        verbose_name=_("grupo de reservaciones"),
+        blank=True,
+        null=True,
+    )
     room = models.ForeignKey(
         "catalog.ConsultingRoom",
         on_delete=models.PROTECT,
@@ -293,6 +473,21 @@ class Reservation(BaseModel):
 
         if self.start_time >= self.end_time:
             errors["end_time"] = _("La hora fin debe ser mayor que la hora inicio.")
+
+        if self.batch_id:
+            batch = self.batch
+            if batch is not None and self.room_id and batch.room_id != self.room_id:
+                errors["batch"] = _(
+                    "El grupo y la reservación deben pertenecer al mismo consultorio."
+                )
+            if (
+                batch is not None
+                and self.tenant_doctor_id
+                and batch.tenant_doctor_id != self.tenant_doctor_id
+            ):
+                errors["batch"] = _(
+                    "El grupo y la reservación deben pertenecer al mismo médico."
+                )
 
         if self.room_id and self.status in ACTIVE_RESERVATION_STATUSES:
             overlaps = Reservation.objects.filter(

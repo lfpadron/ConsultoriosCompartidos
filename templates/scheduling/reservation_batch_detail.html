@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <section id="reservation-batch-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#reservation-batch-content" hx-select="#reservation-batch-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+        <div>
+          <p class="text-uppercase text-secondary small fw-semibold mb-2">Grupo de reservaciones</p>
+          <h1 class="h4 mb-1">{{ reservation_batch.reference }}</h1>
+          <div class="text-secondary">{{ reservation_batch.get_batch_type_display }} · {{ reservation_batch.get_status_display }}</div>
+        </div>
+        <a class="btn btn-outline-secondary" href="{% url 'reservations' %}">
+          <i class="bi bi-arrow-left me-1"></i>
+          Volver a reservaciones
+        </a>
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Resumen</h2>
+      <dl class="row mb-0">
+        <dt class="col-sm-4 col-lg-3 text-secondary">Consultorio</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.room }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Médico arrendatario</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.tenant_doctor }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Ocurrencias</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.occurrence_count }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Tarifa total</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.tariff_total }} {{ reservation_batch.currency }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Tarifa final</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.tariff_final }} {{ reservation_batch.currency }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Política de cancelación</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.cancellation_policy|default:"Sin política activa" }}</dd>
+        <dt class="col-sm-4 col-lg-3 text-secondary">Notas</dt>
+        <dd class="col-sm-8 col-lg-9">{{ reservation_batch.notes|default:"Sin notas"|linebreaksbr }}</dd>
+      </dl>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <h2 class="h5 mb-3">Fechas reservadas</h2>
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>Fecha</th>
+              <th>Horario</th>
+              <th>Tarifa</th>
+              <th>Estado</th>
+              <th class="text-end">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for reservation in reservations %}
+              <tr>
+                <td>{{ reservation.date|date:"d/m/Y" }}</td>
+                <td>{{ reservation.start_time|clinic_time:reservation.room }} - {{ reservation.end_time|clinic_time:reservation.room }}</td>
+                <td>{{ reservation.tariff_final }} {{ reservation_batch.currency }}</td>
+                <td><span class="badge text-bg-secondary">{{ reservation.get_status_display }}</span></td>
+                <td class="text-end">
+                  <a class="btn btn-sm btn-outline-secondary" href="{% url 'reservation_detail' reservation.pk %}" title="Ver reservación">
+                    <i class="bi bi-eye"></i>
+                  </a>
+                </td>
+              </tr>
+            {% empty %}
+              <tr>
+                <td colspan="5" class="text-center text-secondary py-4">Sin ocurrencias.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+{% endblock %}

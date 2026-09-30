@@ -121,9 +121,7 @@ def access_level_allows(current: str, required: str) -> bool:
 def get_user_screen_access_map(user: Any) -> dict[str, str]:
     roles = get_user_roles(user)
     screen_keys = [definition.key for definition in SCREEN_DEFINITIONS]
-    result: dict[str, str] = {
-        key: ScreenAccessLevel.NONE for key in screen_keys
-    }
+    result: dict[str, str] = {key: ScreenAccessLevel.NONE for key in screen_keys}
     if not roles:
         return result
 
@@ -256,7 +254,7 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
         return queryset.filter(clinic__in=clinics)
     if model_label == "billing.CancellationPenaltyRule":
         return queryset.filter(policy__clinic__in=clinics)
-    if model_label == "scheduling.Reservation":
+    if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
         return queryset.filter(room__clinic__in=clinics)
     if model_label == "finance.Statement":
         return queryset.filter(reservation__room__clinic__in=clinics)
@@ -285,7 +283,7 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
         return queryset.filter(pk=owner.pk)
     if model_label == "catalog.ConsultingRoom":
         return queryset.filter(owner=owner)
-    if model_label == "scheduling.Reservation":
+    if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
         return queryset.filter(room__owner=owner)
     if model_label == "finance.Statement":
         return queryset.filter(reservation__room__owner=owner)
@@ -343,7 +341,7 @@ def _scope_tenant_doctor_queryset(
         return queryset.filter(pk=tenant_doctor.pk)
     if model_label == "catalog.ConsultingRoom" and assigned_rooms.exists():
         return queryset.filter(pk__in=assigned_rooms.values("pk"))
-    if model_label == "scheduling.Reservation":
+    if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
         return queryset.filter(tenant_doctor=tenant_doctor)
     if model_label == "finance.Statement":
         return queryset.filter(reservation__tenant_doctor=tenant_doctor)
@@ -353,10 +351,14 @@ def _scope_tenant_doctor_queryset(
         return queryset.filter(tenant_doctor=tenant_doctor)
     if model_label == "billing.TenantSubscription":
         return queryset.filter(tenant_doctor=tenant_doctor)
-    if model_label in {
-        "billing.RoomFixedFeeRule",
-        "billing.RoomMonthlyFee",
-    } and assigned_rooms.exists():
+    if (
+        model_label
+        in {
+            "billing.RoomFixedFeeRule",
+            "billing.RoomMonthlyFee",
+        }
+        and assigned_rooms.exists()
+    ):
         return queryset.filter(room__in=assigned_rooms)
     if model_label == "billing.CancellationPolicy" and assigned_rooms.exists():
         return queryset.filter(
@@ -394,7 +396,7 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
         return queryset.filter(pk__in=owners.values("pk"))
     if model_label == "catalog.ConsultingRoom":
         return queryset.filter(owner__in=owners)
-    if model_label == "scheduling.Reservation":
+    if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
         return queryset.filter(room__owner__in=owners)
     if model_label == "finance.Statement":
         return queryset.filter(reservation__room__owner__in=owners)

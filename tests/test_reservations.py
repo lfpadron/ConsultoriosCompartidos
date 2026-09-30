@@ -1,15 +1,18 @@
+import importlib
 import re
 from datetime import date, time, timedelta
 from decimal import Decimal
 from typing import Any
 
 import pytest
+from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from apps.astrotrace.models import TraceEvent
+from apps.billing.models import CancellationPenaltyRule, CancellationPolicy
 from apps.catalog.models import (
     Clinic,
     ConsultingRoom,
@@ -29,6 +32,10 @@ from apps.finance.services.statement_engine import calculate_statement_hash
 from apps.scheduling.models import (
     AvailabilityException,
     AvailabilityRule,
+    Reservation,
+    ReservationBatch,
+    ReservationBatchStatus,
+    ReservationBatchType,
     ReservationStatus,
     Weekday,
 )
@@ -36,6 +43,9 @@ from apps.scheduling.services.reservation_service import (
     cancel_reservation,
     confirm_reservation,
     create_reservation,
+    create_reservation_batch,
+    generate_weekly_occurrence_dates,
+    preview_reservation_batch,
 )
 
 
@@ -137,6 +147,186 @@ def test_create_valid_reservation_generates_statement_and_events() -> None:
     assert statement.status == StatementStatus.CURRENT
     assert TraceEvent.objects.filter(event_type="reservation.requested").exists()
     assert TraceEvent.objects.filter(event_type="statement.generated").exists()
+
+
+def test_generate_weekly_occurrence_dates_includes_each_week() -> None:
+    assert generate_weekly_occurrence_dates(
+        start_date=date(2026, 6, 29),
+        end_date=date(2026, 7, 20),
+    ) == [
+        date(2026, 6, 29),
+        date(2026, 7, 6),
+        date(2026, 7, 13),
+        date(2026, 7, 20),
+    ]
+
+
+@pytest.mark.django_db
+def test_create_reservation_batch_creates_all_occurrences_and_totals() -> None:
+    room = create_room("Consultorio Repetitivo")
+    doctor = create_tenant_doctor("doctor-repetitivo@example.com")
+    create_availability(room)
+    create_rate(room)
+
+    batch = create_reservation_batch(
+        room=room,
+        tenant_doctor=doctor,
+        start_date=date(2026, 6, 29),
+        start_time=time(8, 0),
+        end_time=time(13, 0),
+        recurrence_end_date=date(2026, 7, 13),
+    )
+
+    assert batch.batch_type == ReservationBatchType.RECURRING
+    assert batch.occurrence_count == 3
+    assert batch.tariff_total == Decimal("1125.00")
+    assert batch.tariff_final == Decimal("1125.00")
+    assert list(batch.reservations.values_list("date", flat=True)) == [
+        date(2026, 6, 29),
+        date(2026, 7, 6),
+        date(2026, 7, 13),
+    ]
+    assert Statement.objects.filter(reservation__batch=batch).count() == 3
+    assert TraceEvent.objects.filter(
+        event_type="reservation_batch.created",
+        object_label__contains=batch.reference,
+    ).exists()
+
+
+@pytest.mark.django_db
+def test_reservation_batch_is_all_or_nothing_when_one_date_conflicts() -> None:
+    room = create_room("Consultorio Conflicto Grupo")
+    first_doctor = create_tenant_doctor("doctor-conflicto-previo@example.com")
+    recurring_doctor = create_tenant_doctor("doctor-conflicto-grupo@example.com")
+    create_availability(room)
+    create_rate(room)
+    create_reservation(
+        room=room,
+        tenant_doctor=first_doctor,
+        reservation_date=date(2026, 7, 6),
+        start_time=time(8, 0),
+        end_time=time(13, 0),
+    )
+    existing_batches = ReservationBatch.objects.count()
+    existing_reservations = Reservation.objects.count()
+
+    preview = preview_reservation_batch(
+        room=room,
+        tenant_doctor=recurring_doctor,
+        start_date=date(2026, 6, 29),
+        start_time=time(8, 0),
+        end_time=time(13, 0),
+        recurrence_end_date=date(2026, 7, 13),
+    )
+    with pytest.raises(ValidationError):
+        create_reservation_batch(
+            room=room,
+            tenant_doctor=recurring_doctor,
+            start_date=date(2026, 6, 29),
+            start_time=time(8, 0),
+            end_time=time(13, 0),
+            recurrence_end_date=date(2026, 7, 13),
+        )
+
+    assert preview.has_conflicts
+    assert preview.occurrences[1].conflict
+    assert ReservationBatch.objects.count() == existing_batches
+    assert Reservation.objects.count() == existing_reservations
+
+
+@pytest.mark.django_db
+def test_reservation_batch_snapshots_active_cancellation_policy() -> None:
+    room = create_room("Consultorio Política Grupo")
+    doctor = create_tenant_doctor("doctor-politica-grupo@example.com")
+    create_availability(room)
+    create_rate(room)
+    policy = CancellationPolicy.objects.create(
+        clinic=room.clinic,
+        room=room,
+        name="Cancelación consultorio",
+        start_date=date(2026, 1, 1),
+    )
+    CancellationPenaltyRule.objects.create(
+        policy=policy,
+        days_before=0,
+        percentage=Decimal("100.0"),
+    )
+
+    batch = create_reservation_batch(
+        room=room,
+        tenant_doctor=doctor,
+        start_date=date(2026, 6, 29),
+        start_time=time(8, 0),
+        end_time=time(13, 0),
+    )
+
+    assert batch.cancellation_policy == policy
+    assert batch.cancellation_terms_accepted_at is not None
+    assert batch.cancellation_policy_snapshot["name"] == "Cancelación consultorio"
+    assert batch.cancellation_policy_snapshot["penalties"] == [
+        {"days_before": 0, "percentage": "100.0"}
+    ]
+
+
+@pytest.mark.django_db
+def test_cancelling_occurrences_updates_batch_status() -> None:
+    room = create_room("Consultorio Estado Grupo")
+    doctor = create_tenant_doctor("doctor-estado-grupo@example.com")
+    create_availability(room)
+    create_rate(room)
+    batch = create_reservation_batch(
+        room=room,
+        tenant_doctor=doctor,
+        start_date=date(2026, 6, 29),
+        start_time=time(8, 0),
+        end_time=time(13, 0),
+        recurrence_end_date=date(2026, 7, 6),
+    )
+    reservations = list(batch.reservations.order_by("date"))
+
+    cancel_reservation(reservation=reservations[0], reason="Primera fecha")
+    batch.refresh_from_db()
+    assert batch.status == ReservationBatchStatus.PARTIALLY_CANCELLED
+
+    cancel_reservation(reservation=reservations[1], reason="Segunda fecha")
+    batch.refresh_from_db()
+    assert batch.status == ReservationBatchStatus.CANCELLED
+    assert (
+        TraceEvent.objects.filter(event_type="reservation_batch.status_changed").count()
+        == 2
+    )
+
+
+@pytest.mark.django_db
+def test_reservation_batch_data_migration_is_reversible() -> None:
+    room = create_room("Consultorio Histórico")
+    doctor = create_tenant_doctor("doctor-historico@example.com")
+    reservation = Reservation.objects.create(
+        room=room,
+        tenant_doctor=doctor,
+        date=date(2026, 6, 29),
+        start_time=time(8, 0),
+        end_time=time(9, 0),
+        tariff_total=Decimal("75.00"),
+        tariff_final=Decimal("75.00"),
+    )
+    migration = importlib.import_module(
+        "apps.scheduling.migrations.0007_backfill_reservation_batches"
+    )
+
+    migration.backfill_reservation_batches(django_apps, None)
+    reservation.refresh_from_db()
+
+    assert reservation.batch is not None
+    assert reservation.batch.batch_type == ReservationBatchType.SINGLE
+    assert reservation.batch.recurrence_rule["legacy"] is True
+    batch_id = reservation.batch_id
+
+    migration.reverse_backfill_reservation_batches(django_apps, None)
+    reservation.refresh_from_db()
+
+    assert reservation.batch_id is None
+    assert not ReservationBatch.objects.filter(pk=batch_id).exists()
 
 
 @pytest.mark.django_db
@@ -305,9 +495,7 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
     client.force_login(user)
 
     target_date = future_monday()
-    response = client.get(
-        f"/calendario/?week={target_date.isoformat()}&room={room.pk}"
-    )
+    response = client.get(f"/calendario/?week={target_date.isoformat()}&room={room.pk}")
 
     assert response.status_code == 200
     assert "Solicitar reservación" in response.content.decode()
@@ -740,6 +928,77 @@ def test_create_reservation_from_ui(client: Any) -> None:
 
     assert response.status_code == 302
     assert Statement.objects.filter(reservation__notes="Solicitud desde UI").exists()
+
+
+@pytest.mark.django_db
+def test_reservation_request_previews_and_creates_weekly_batch(client: Any) -> None:
+    user = create_user("ui-grupo@example.com")
+    room = create_room("Consultorio Grupo UI")
+    doctor = create_tenant_doctor("doctor-grupo-ui@example.com")
+    create_availability(room)
+    create_rate(room)
+    client.force_login(user)
+    payload = {
+        "room": str(room.pk),
+        "tenant_doctor": str(doctor.pk),
+        "date": "2026-06-29",
+        "start_time": "08:00",
+        "end_time": "13:00",
+        "booking_type": "weekly",
+        "recurrence_end_date": "2026-07-13",
+        "notes": "Todos los lunes",
+    }
+
+    preview_response = client.post(
+        "/reservaciones/solicitar/",
+        {**payload, "action": "preview"},
+    )
+
+    preview_content = preview_response.content.decode()
+    assert preview_response.status_code == 200
+    assert "Previsualización" in preview_content
+    assert "29/06/2026" in preview_content
+    assert "06/07/2026" in preview_content
+    assert "13/07/2026" in preview_content
+    assert "1125.00 MXN" in preview_content
+    assert not ReservationBatch.objects.filter(notes="Todos los lunes").exists()
+
+    create_response = client.post(
+        "/reservaciones/solicitar/",
+        {**payload, "action": "create"},
+    )
+
+    batch = ReservationBatch.objects.get(notes="Todos los lunes")
+    assert create_response.status_code == 302
+    assert create_response.url == f"/reservaciones/grupos/{batch.pk}/"
+    assert batch.reservations.count() == 3
+
+
+@pytest.mark.django_db
+def test_reservation_batch_detail_lists_occurrences(client: Any) -> None:
+    user = create_user("detalle-grupo@example.com")
+    room = create_room("Consultorio Detalle Grupo")
+    doctor = create_tenant_doctor("doctor-detalle-grupo@example.com")
+    create_availability(room)
+    create_rate(room)
+    batch = create_reservation_batch(
+        room=room,
+        tenant_doctor=doctor,
+        start_date=date(2026, 6, 29),
+        start_time=time(8, 0),
+        end_time=time(13, 0),
+        recurrence_end_date=date(2026, 7, 6),
+    )
+    client.force_login(user)
+
+    response = client.get(f"/reservaciones/grupos/{batch.pk}/")
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert batch.reference in content
+    assert "29/06/2026" in content
+    assert "06/07/2026" in content
+    assert "750.00 MXN" in content
 
 
 @pytest.mark.django_db

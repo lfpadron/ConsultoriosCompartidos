@@ -73,6 +73,11 @@ urlpatterns = [
         name="reservation_request",
     ),
     path(
+        "reservaciones/grupos/<uuid:pk>/",
+        views.ReservationBatchDetailView.as_view(),
+        name="reservation_batch_detail",
+    ),
+    path(
         "reservaciones/<uuid:pk>/",
         views.ReservationDetailView.as_view(),
         name="reservation_detail",

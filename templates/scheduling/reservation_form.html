@@ -28,6 +28,29 @@
 
       <div class="row g-3">
         <div class="col-md-6">
+          <fieldset>
+            <legend class="form-label">{{ form.booking_type.label }}</legend>
+            <div class="d-flex flex-wrap gap-3">
+              {% for option in form.booking_type %}
+                <div class="form-check">
+                  {{ option.tag }}
+                  <label class="form-check-label" for="{{ option.id_for_label }}">{{ option.choice_label }}</label>
+                </div>
+              {% endfor %}
+            </div>
+          </fieldset>
+          {% for error in form.booking_type.errors %}
+            <div class="invalid-feedback d-block">{{ error }}</div>
+          {% endfor %}
+        </div>
+        <div id="recurrence-end-field" class="col-md-6">
+          <label class="form-label" for="{{ form.recurrence_end_date.id_for_label }}">{{ form.recurrence_end_date.label }}</label>
+          {{ form.recurrence_end_date }}
+          {% for error in form.recurrence_end_date.errors %}
+            <div class="invalid-feedback d-block">{{ error }}</div>
+          {% endfor %}
+        </div>
+        <div class="col-md-6">
           <label class="form-label" for="{{ form.room.id_for_label }}">{{ form.room.label }}</label>
           {{ form.room }}
           {% for error in form.room.errors %}
@@ -115,12 +138,78 @@
         </div>
       </div>
 
+      {% if batch_preview %}
+        <div class="border-top mt-4 pt-4">
+          <div class="d-flex flex-column flex-md-row justify-content-between gap-2 mb-3">
+            <div>
+              <h2 class="h5 mb-1">Previsualización</h2>
+              <div class="text-secondary">{{ batch_preview.occurrences|length }} fecha{{ batch_preview.occurrences|length|pluralize:"s" }}</div>
+            </div>
+            <div class="text-md-end">
+              <div class="text-secondary small">Tarifa final del grupo</div>
+              <div class="fs-5 fw-semibold">{{ batch_preview.tariff_final }} {{ batch_preview.currency }}</div>
+            </div>
+          </div>
+          {% if batch_preview.has_conflicts %}
+            <div class="alert alert-warning" role="alert">
+              Hay conflictos en una o más fechas. No se creará ninguna reservación hasta corregirlos.
+            </div>
+          {% else %}
+            <div class="alert alert-success" role="status">
+              Todas las fechas están disponibles. El grupo se volverá a validar al solicitarlo.
+            </div>
+          {% endif %}
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Horario</th>
+                  <th>Tarifa</th>
+                  <th>Tarifa final</th>
+                  <th>Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for occurrence in batch_preview.occurrences %}
+                  <tr>
+                    <td>{{ occurrence.reservation_date|date:"d/m/Y" }}</td>
+                    <td>{{ occurrence.start_time|time:"H:i" }} - {{ occurrence.end_time|time:"H:i" }}</td>
+                    <td>{% if occurrence.tariff_total != None %}{{ occurrence.tariff_total }} {{ occurrence.currency }}{% else %}-{% endif %}</td>
+                    <td>{% if occurrence.tariff_final != None %}{{ occurrence.tariff_final }} {{ occurrence.currency }}{% else %}-{% endif %}</td>
+                    <td>
+                      {% if occurrence.conflict %}
+                        <span class="badge text-bg-warning">{{ occurrence.message }}</span>
+                      {% else %}
+                        <span class="badge text-bg-success">Disponible</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+              <tfoot>
+                <tr class="fw-semibold">
+                  <td colspan="2">Total</td>
+                  <td>{{ batch_preview.tariff_total }} {{ batch_preview.currency }}</td>
+                  <td>{{ batch_preview.tariff_final }} {{ batch_preview.currency }}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      {% endif %}
+
       <div class="d-flex justify-content-end gap-2 mt-4">
         <a class="btn btn-outline-secondary" hx-boost="false" href="{{ back_url }}">
           <i class="bi bi-x-lg me-1"></i>
           Cancelar
         </a>
-        <button class="btn btn-primary" type="submit">
+        <button class="btn btn-outline-primary" type="submit" name="action" value="preview">
+          <i class="bi bi-eye me-1"></i>
+          Previsualizar
+        </button>
+        <button class="btn btn-primary" type="submit" name="action" value="create" {% if batch_preview.has_conflicts %}disabled{% endif %}>
           <i class="bi bi-calendar-plus me-1"></i>
           Solicitar
         </button>
@@ -132,6 +221,15 @@
       (() => {
         const dataElement = document.getElementById("reservation-pricing-options");
         if (!dataElement) return;
+        const bookingTypeFields = document.querySelectorAll("[name=booking_type]");
+        const recurrenceEndField = document.getElementById("recurrence-end-field");
+        const toggleRecurrenceEnd = () => {
+          const selected = document.querySelector("[name=booking_type]:checked");
+          if (!recurrenceEndField || !selected) return;
+          recurrenceEndField.classList.toggle("d-none", selected.value !== "weekly");
+        };
+        bookingTypeFields.forEach((field) => field.addEventListener("change", toggleRecurrenceEnd));
+        toggleRecurrenceEnd();
         const options = JSON.parse(dataElement.textContent);
         const blockField = document.getElementById("id_block_slot");
         const startField = document.getElementById("id_start_time");

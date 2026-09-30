@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from django import forms
+from django.core.exceptions import ValidationError
 from django.db.models import QuerySet
 
 from apps.catalog.models import (
@@ -38,6 +39,9 @@ from apps.scheduling.models import (
     Weekday,
 )
 from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
+from apps.scheduling.services.reservation_service import (
+    generate_weekly_occurrence_dates,
+)
 
 TIME_CHOICE_STEP_MINUTES = 30
 MIN_HOURLY_RESERVATION_MINUTES = 60
@@ -188,7 +192,9 @@ def _unique_time_choices(values: list[time], empty_label: str) -> list[tuple[str
 
 
 def _price_type_label(price_type: str | None) -> str:
-    return dict(PriceType.choices).get(price_type, "Sin tarifa")
+    if price_type is None:
+        return "Sin tarifa"
+    return str(dict(PriceType.choices).get(price_type, "Sin tarifa"))
 
 
 def _discount_display(discount: Any | None, percentage: Decimal) -> str:
@@ -501,6 +507,25 @@ class ReservationFilterForm(OperationalFilterForm):
 
 
 class ReservationRequestForm(BootstrapModelForm):
+    BOOKING_TYPE_SINGLE = "single"
+    BOOKING_TYPE_WEEKLY = "weekly"
+    BOOKING_TYPE_CHOICES = (
+        (BOOKING_TYPE_SINGLE, "Única"),
+        (BOOKING_TYPE_WEEKLY, "Semanal"),
+    )
+
+    booking_type = forms.ChoiceField(
+        label="Tipo de reservación",
+        choices=BOOKING_TYPE_CHOICES,
+        initial=BOOKING_TYPE_SINGLE,
+        required=False,
+        widget=forms.RadioSelect,
+    )
+    recurrence_end_date = forms.DateField(
+        label="Repetir semanalmente hasta",
+        required=False,
+        widget=forms.DateInput(attrs={"type": "date"}),
+    )
     clinic_info = forms.CharField(
         label="Texto informativo de la clínica",
         required=False,
@@ -642,6 +667,31 @@ class ReservationRequestForm(BootstrapModelForm):
         reservation_date = cleaned_data.get("date")
         if not room or not reservation_date:
             return cleaned_data
+
+        booking_type = cleaned_data.get("booking_type") or self.BOOKING_TYPE_SINGLE
+        cleaned_data["booking_type"] = booking_type
+        recurrence_end_date = cleaned_data.get("recurrence_end_date")
+        if booking_type == self.BOOKING_TYPE_WEEKLY:
+            if recurrence_end_date is None:
+                self.add_error(
+                    "recurrence_end_date",
+                    "Indica hasta qué fecha se repetirá la reservación.",
+                )
+            elif recurrence_end_date < reservation_date + timedelta(days=7):
+                self.add_error(
+                    "recurrence_end_date",
+                    "La fecha debe incluir al menos una repetición semanal.",
+                )
+            else:
+                try:
+                    generate_weekly_occurrence_dates(
+                        start_date=reservation_date,
+                        end_date=recurrence_end_date,
+                    )
+                except ValidationError as exc:
+                    self.add_error("recurrence_end_date", exc)
+        else:
+            cleaned_data["recurrence_end_date"] = None
 
         start_time = cleaned_data.get("start_time")
         end_time = cleaned_data.get("end_time")
@@ -924,10 +974,12 @@ class ReservationRequestForm(BootstrapModelForm):
             )
             for option in self.pricing_options["block_slots"]
         ]
-        self.fields["block_slot"].choices = [
-            ("", "Selecciona un bloque"),
-            *block_choices,
-        ]
+        block_slot_field = self.fields["block_slot"]
+        if isinstance(block_slot_field, forms.ChoiceField):
+            block_slot_field.choices = [
+                ("", "Selecciona un bloque"),
+                *block_choices,
+            ]
 
         start_points: list[time] = []
         end_points: list[time] = []

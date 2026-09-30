@@ -50,6 +50,7 @@ from apps.scheduling.models import (
     AvailabilityException,
     AvailabilityRule,
     Reservation,
+    ReservationBatch,
     Weekday,
     rule_weekdays,
 )
@@ -63,7 +64,8 @@ from apps.scheduling.services import (
 from apps.scheduling.services.reservation_service import (
     cancel_reservation,
     confirm_reservation,
-    create_reservation,
+    create_reservation_batch,
+    preview_reservation_batch,
 )
 from apps.vault.services.document_service import (
     get_document_field_for_object,
@@ -961,6 +963,7 @@ class ReservationListView(LoginRequiredMixin, ListView):
 
     def get_queryset(self) -> QuerySet[Reservation]:
         queryset = Reservation.objects.filter(is_deleted=False).select_related(
+            "batch",
             "room",
             "room__clinic",
             "room__owner",
@@ -1019,6 +1022,7 @@ class ReservationDetailView(LoginRequiredMixin, DetailView):
 
     def get_queryset(self) -> QuerySet[Reservation]:
         queryset = Reservation.objects.filter(is_deleted=False).select_related(
+            "batch",
             "room",
             "room__clinic",
             "tenant_doctor",
@@ -1042,6 +1046,32 @@ class ReservationDetailView(LoginRequiredMixin, DetailView):
         context["access_status"] = get_access_status_for_reservation(reservation)
         context["related_documents"] = get_documents_for_object(reservation)
         context["document_upload_field"] = get_document_field_for_object(reservation)
+        return context
+
+
+class ReservationBatchDetailView(LoginRequiredMixin, DetailView):
+    template_name = "scheduling/reservation_batch_detail.html"
+    context_object_name = "reservation_batch"
+
+    def get_queryset(self) -> QuerySet[ReservationBatch]:
+        queryset = ReservationBatch.objects.filter(is_deleted=False).select_related(
+            "room",
+            "room__clinic",
+            "room__owner",
+            "tenant_doctor",
+            "tenant_doctor__user",
+            "cancellation_policy",
+        )
+        return scope_queryset_for_user(queryset, self.request.user)
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        reservation_batch = context["reservation_batch"]
+        context["page_title"] = "Grupo de reservaciones"
+        context["reservations"] = reservation_batch.reservations.select_related(
+            "room",
+            "tenant_doctor",
+        ).order_by("date", "start_time")
         return context
 
 
@@ -1073,22 +1103,43 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
         context["back_label"] = self._back_label()
         context["back_url"] = self._back_url()
         context["reservation_pricing_options"] = form.pricing_options
+        context.setdefault("batch_preview", None)
         return context
 
     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
         form = self.get_form()
         if form.is_valid():
+            if request.POST.get("action") == "preview":
+                return self.preview(form)
             return self.form_valid(form)
         return self.form_invalid(form)
 
-    def form_valid(self, form: ReservationRequestForm) -> HttpResponse:
+    def preview(self, form: ReservationRequestForm) -> HttpResponse:
         try:
-            reservation = create_reservation(
+            batch_preview = preview_reservation_batch(
                 room=form.cleaned_data["room"],
                 tenant_doctor=form.cleaned_data["tenant_doctor"],
-                reservation_date=form.cleaned_data["date"],
+                start_date=form.cleaned_data["date"],
                 start_time=form.cleaned_data["start_time"],
                 end_time=form.cleaned_data["end_time"],
+                recurrence_end_date=form.cleaned_data["recurrence_end_date"],
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        return self.render_to_response(
+            self.get_context_data(form=form, batch_preview=batch_preview)
+        )
+
+    def form_valid(self, form: ReservationRequestForm) -> HttpResponse:
+        try:
+            reservation_batch = create_reservation_batch(
+                room=form.cleaned_data["room"],
+                tenant_doctor=form.cleaned_data["tenant_doctor"],
+                start_date=form.cleaned_data["date"],
+                start_time=form.cleaned_data["start_time"],
+                end_time=form.cleaned_data["end_time"],
+                recurrence_end_date=form.cleaned_data["recurrence_end_date"],
                 notes=form.cleaned_data["notes"],
                 actor=cast(Model, self.request.user),
             )
@@ -1099,8 +1150,14 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
             form.add_error(None, exc)
             return self.form_invalid(form)
 
-        messages.success(self.request, "Reservación solicitada.")
-        return redirect("reservation_detail", pk=reservation.pk)
+        if reservation_batch.occurrence_count == 1:
+            messages.success(self.request, "Reservación solicitada.")
+        else:
+            messages.success(
+                self.request,
+                f"Se solicitaron {reservation_batch.occurrence_count} reservaciones.",
+            )
+        return redirect("reservation_batch_detail", pk=reservation_batch.pk)
 
     def _source(self) -> str:
         source = self.request.POST.get("source") or self.request.GET.get("source")

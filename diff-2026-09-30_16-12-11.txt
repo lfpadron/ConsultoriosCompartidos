@@ -1,0 +1,1649 @@
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index a5a78ad..7cec435 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -121,9 +121,7 @@ def access_level_allows(current: str, required: str) -> bool:
+ def get_user_screen_access_map(user: Any) -> dict[str, str]:
+     roles = get_user_roles(user)
+     screen_keys = [definition.key for definition in SCREEN_DEFINITIONS]
+-    result: dict[str, str] = {
+-        key: ScreenAccessLevel.NONE for key in screen_keys
+-    }
++    result: dict[str, str] = {key: ScreenAccessLevel.NONE for key in screen_keys}
+     if not roles:
+         return result
+ 
+@@ -256,7 +254,7 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
+         return queryset.filter(clinic__in=clinics)
+     if model_label == "billing.CancellationPenaltyRule":
+         return queryset.filter(policy__clinic__in=clinics)
+-    if model_label == "scheduling.Reservation":
++    if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
+         return queryset.filter(room__clinic__in=clinics)
+     if model_label == "finance.Statement":
+         return queryset.filter(reservation__room__clinic__in=clinics)
+@@ -285,7 +283,7 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
+         return queryset.filter(pk=owner.pk)
+     if model_label == "catalog.ConsultingRoom":
+         return queryset.filter(owner=owner)
+-    if model_label == "scheduling.Reservation":
++    if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
+         return queryset.filter(room__owner=owner)
+     if model_label == "finance.Statement":
+         return queryset.filter(reservation__room__owner=owner)
+@@ -343,7 +341,7 @@ def _scope_tenant_doctor_queryset(
+         return queryset.filter(pk=tenant_doctor.pk)
+     if model_label == "catalog.ConsultingRoom" and assigned_rooms.exists():
+         return queryset.filter(pk__in=assigned_rooms.values("pk"))
+-    if model_label == "scheduling.Reservation":
++    if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "finance.Statement":
+         return queryset.filter(reservation__tenant_doctor=tenant_doctor)
+@@ -353,10 +351,14 @@ def _scope_tenant_doctor_queryset(
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "billing.TenantSubscription":
+         return queryset.filter(tenant_doctor=tenant_doctor)
+-    if model_label in {
+-        "billing.RoomFixedFeeRule",
+-        "billing.RoomMonthlyFee",
+-    } and assigned_rooms.exists():
++    if (
++        model_label
++        in {
++            "billing.RoomFixedFeeRule",
++            "billing.RoomMonthlyFee",
++        }
++        and assigned_rooms.exists()
++    ):
+         return queryset.filter(room__in=assigned_rooms)
+     if model_label == "billing.CancellationPolicy" and assigned_rooms.exists():
+         return queryset.filter(
+@@ -394,7 +396,7 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
+         return queryset.filter(pk__in=owners.values("pk"))
+     if model_label == "catalog.ConsultingRoom":
+         return queryset.filter(owner__in=owners)
+-    if model_label == "scheduling.Reservation":
++    if model_label in {"scheduling.Reservation", "scheduling.ReservationBatch"}:
+         return queryset.filter(room__owner__in=owners)
+     if model_label == "finance.Statement":
+         return queryset.filter(reservation__room__owner__in=owners)
+diff --git a/apps/scheduling/admin.py b/apps/scheduling/admin.py
+index 915c565..4f47640 100644
+--- a/apps/scheduling/admin.py
++++ b/apps/scheduling/admin.py
+@@ -6,6 +6,7 @@ from apps.scheduling.models import (
+     AvailabilityException,
+     AvailabilityRule,
+     Reservation,
++    ReservationBatch,
+     Weekday,
+     rule_weekdays,
+ )
+@@ -58,3 +59,24 @@ class ReservationAdmin(admin.ModelAdmin):
+     )
+     list_filter = ("status", "room__clinic")
+     search_fields = ("room__name", "tenant_doctor__display_name", "notes")
++
++
++@admin.register(ReservationBatch)
++class ReservationBatchAdmin(admin.ModelAdmin):
++    list_display = (
++        "reference",
++        "room",
++        "tenant_doctor",
++        "batch_type",
++        "occurrence_count",
++        "tariff_final",
++        "currency",
++        "status",
++    )
++    list_filter = ("batch_type", "status", "room__clinic")
++    search_fields = (
++        "reference",
++        "room__name",
++        "tenant_doctor__display_name",
++        "tenant_doctor__user__email",
++    )
+diff --git a/apps/scheduling/forms.py b/apps/scheduling/forms.py
+index f0d390a..72bd26f 100644
+--- a/apps/scheduling/forms.py
++++ b/apps/scheduling/forms.py
+@@ -5,6 +5,7 @@ from decimal import Decimal
+ from typing import Any, cast
+ 
+ from django import forms
++from django.core.exceptions import ValidationError
+ from django.db.models import QuerySet
+ 
+ from apps.catalog.models import (
+@@ -38,6 +39,9 @@ from apps.scheduling.models import (
+     Weekday,
+ )
+ from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
++from apps.scheduling.services.reservation_service import (
++    generate_weekly_occurrence_dates,
++)
+ 
+ TIME_CHOICE_STEP_MINUTES = 30
+ MIN_HOURLY_RESERVATION_MINUTES = 60
+@@ -188,7 +192,9 @@ def _unique_time_choices(values: list[time], empty_label: str) -> list[tuple[str
+ 
+ 
+ def _price_type_label(price_type: str | None) -> str:
+-    return dict(PriceType.choices).get(price_type, "Sin tarifa")
++    if price_type is None:
++        return "Sin tarifa"
++    return str(dict(PriceType.choices).get(price_type, "Sin tarifa"))
+ 
+ 
+ def _discount_display(discount: Any | None, percentage: Decimal) -> str:
+@@ -501,6 +507,25 @@ class ReservationFilterForm(OperationalFilterForm):
+ 
+ 
+ class ReservationRequestForm(BootstrapModelForm):
++    BOOKING_TYPE_SINGLE = "single"
++    BOOKING_TYPE_WEEKLY = "weekly"
++    BOOKING_TYPE_CHOICES = (
++        (BOOKING_TYPE_SINGLE, "Única"),
++        (BOOKING_TYPE_WEEKLY, "Semanal"),
++    )
++
++    booking_type = forms.ChoiceField(
++        label="Tipo de reservación",
++        choices=BOOKING_TYPE_CHOICES,
++        initial=BOOKING_TYPE_SINGLE,
++        required=False,
++        widget=forms.RadioSelect,
++    )
++    recurrence_end_date = forms.DateField(
++        label="Repetir semanalmente hasta",
++        required=False,
++        widget=forms.DateInput(attrs={"type": "date"}),
++    )
+     clinic_info = forms.CharField(
+         label="Texto informativo de la clínica",
+         required=False,
+@@ -643,6 +668,31 @@ class ReservationRequestForm(BootstrapModelForm):
+         if not room or not reservation_date:
+             return cleaned_data
+ 
++        booking_type = cleaned_data.get("booking_type") or self.BOOKING_TYPE_SINGLE
++        cleaned_data["booking_type"] = booking_type
++        recurrence_end_date = cleaned_data.get("recurrence_end_date")
++        if booking_type == self.BOOKING_TYPE_WEEKLY:
++            if recurrence_end_date is None:
++                self.add_error(
++                    "recurrence_end_date",
++                    "Indica hasta qué fecha se repetirá la reservación.",
++                )
++            elif recurrence_end_date < reservation_date + timedelta(days=7):
++                self.add_error(
++                    "recurrence_end_date",
++                    "La fecha debe incluir al menos una repetición semanal.",
++                )
++            else:
++                try:
++                    generate_weekly_occurrence_dates(
++                        start_date=reservation_date,
++                        end_date=recurrence_end_date,
++                    )
++                except ValidationError as exc:
++                    self.add_error("recurrence_end_date", exc)
++        else:
++            cleaned_data["recurrence_end_date"] = None
++
+         start_time = cleaned_data.get("start_time")
+         end_time = cleaned_data.get("end_time")
+         block_slot = cleaned_data.get("block_slot")
+@@ -924,10 +974,12 @@ class ReservationRequestForm(BootstrapModelForm):
+             )
+             for option in self.pricing_options["block_slots"]
+         ]
+-        self.fields["block_slot"].choices = [
+-            ("", "Selecciona un bloque"),
+-            *block_choices,
+-        ]
++        block_slot_field = self.fields["block_slot"]
++        if isinstance(block_slot_field, forms.ChoiceField):
++            block_slot_field.choices = [
++                ("", "Selecciona un bloque"),
++                *block_choices,
++            ]
+ 
+         start_points: list[time] = []
+         end_points: list[time] = []
+diff --git a/apps/scheduling/models.py b/apps/scheduling/models.py
+index eb28a16..3f44bcb 100644
+--- a/apps/scheduling/models.py
++++ b/apps/scheduling/models.py
+@@ -1,5 +1,6 @@
+ """Scheduling models prepared for availability and calendar rules."""
+ 
++import uuid
+ from dataclasses import dataclass
+ from datetime import date, time
+ from decimal import Decimal
+@@ -10,6 +11,7 @@ from django.db import models
+ from django.utils import timezone
+ from django.utils.translation import gettext_lazy as _
+ 
++from apps.core.constants import DEFAULT_CURRENCY
+ from apps.core.models import BaseModel
+ 
+ 
+@@ -229,7 +231,185 @@ ACTIVE_RESERVATION_STATUSES = {
+ }
+ 
+ 
++class ReservationBatchType(models.TextChoices):
++    SINGLE = "single", _("Única")
++    RECURRING = "recurring", _("Repetitiva")
++
++
++class ReservationBatchStatus(models.TextChoices):
++    REQUESTED = "requested", _("Por confirmar")
++    CONFIRMED = "confirmed", _("Confirmada")
++    PARTIALLY_CANCELLED = "partially_cancelled", _("Cancelada parcialmente")
++    CANCELLED = "cancelled", _("Cancelada")
++    EXPIRED = "expired", _("Vencida")
++
++
++class ReservationDeadlinePolicy(models.TextChoices):
++    PENDING_CONFIGURATION = "pending_configuration", _("Pendiente de configurar")
++    HOURS_BEFORE = "hours_before", _("Horas antes")
++    PREVIOUS_DAY = "previous_day", _("Día calendario anterior")
++    EXCEPTION_HOURS = "exception_hours", _("Excepción: horas antes")
++
++
++def generate_reservation_batch_reference() -> str:
++    return uuid.uuid4().hex[:12].upper()
++
++
++class ReservationBatch(BaseModel):
++    reference = models.CharField(
++        _("referencia"),
++        max_length=12,
++        unique=True,
++        default=generate_reservation_batch_reference,
++        editable=False,
++    )
++    room = models.ForeignKey(
++        "catalog.ConsultingRoom",
++        on_delete=models.PROTECT,
++        related_name="reservation_batches",
++        verbose_name=_("consultorio"),
++    )
++    tenant_doctor = models.ForeignKey(
++        "catalog.TenantDoctorProfile",
++        on_delete=models.PROTECT,
++        related_name="reservation_batches",
++        verbose_name=_("médico arrendatario"),
++    )
++    batch_type = models.CharField(
++        _("tipo de reservación"),
++        max_length=12,
++        choices=ReservationBatchType.choices,
++        default=ReservationBatchType.SINGLE,
++    )
++    status = models.CharField(
++        _("estado"),
++        max_length=24,
++        choices=ReservationBatchStatus.choices,
++        default=ReservationBatchStatus.REQUESTED,
++    )
++    recurrence_rule = models.JSONField(
++        _("regla de recurrencia"),
++        default=dict,
++        blank=True,
++    )
++    occurrence_count = models.PositiveSmallIntegerField(
++        _("número de ocurrencias"),
++        default=1,
++    )
++    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
++    tariff_total = models.DecimalField(
++        _("tarifa total"),
++        max_digits=12,
++        decimal_places=2,
++        default=Decimal("0.00"),
++    )
++    tariff_final = models.DecimalField(
++        _("tarifa final"),
++        max_digits=12,
++        decimal_places=2,
++        default=Decimal("0.00"),
++    )
++    payment_deadline_at = models.DateTimeField(
++        _("fecha límite de pago"),
++        blank=True,
++        null=True,
++    )
++    deadline_policy = models.CharField(
++        _("política de vencimiento"),
++        max_length=32,
++        choices=ReservationDeadlinePolicy.choices,
++        default=ReservationDeadlinePolicy.PENDING_CONFIGURATION,
++    )
++    deadline_policy_snapshot = models.JSONField(
++        _("snapshot de política de vencimiento"),
++        default=dict,
++        blank=True,
++    )
++    cancellation_policy = models.ForeignKey(
++        "billing.CancellationPolicy",
++        on_delete=models.PROTECT,
++        related_name="reservation_batches",
++        verbose_name=_("política de cancelación aceptada"),
++        blank=True,
++        null=True,
++    )
++    cancellation_policy_snapshot = models.JSONField(
++        _("snapshot de política de cancelación"),
++        default=dict,
++        blank=True,
++    )
++    cancellation_terms_accepted_at = models.DateTimeField(
++        _("términos de cancelación aceptados en"),
++        blank=True,
++        null=True,
++    )
++    payment_proof_submitted_at = models.DateTimeField(
++        _("comprobante enviado en"),
++        blank=True,
++        null=True,
++    )
++    expired_at = models.DateTimeField(_("vencida en"), blank=True, null=True)
++    requested_at = models.DateTimeField(_("solicitada en"), default=timezone.now)
++    notes = models.TextField(_("notas"), blank=True)
++
++    class Meta:
++        verbose_name = _("grupo de reservaciones")
++        verbose_name_plural = _("grupos de reservaciones")
++        ordering = ("-requested_at", "reference")
++        constraints = [
++            models.CheckConstraint(
++                condition=models.Q(occurrence_count__gte=1),
++                name="scheduling_batch_occurrence_count_positive",
++            ),
++            models.CheckConstraint(
++                condition=models.Q(tariff_total__gte=0),
++                name="scheduling_batch_tariff_total_nonnegative",
++            ),
++            models.CheckConstraint(
++                condition=models.Q(tariff_final__gte=0),
++                name="scheduling_batch_tariff_final_nonnegative",
++            ),
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.reference} - {self.room}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if self.occurrence_count < 1:
++            errors["occurrence_count"] = _("Debe existir al menos una ocurrencia.")
++        if self.tariff_total < Decimal("0.00"):
++            errors["tariff_total"] = _("La tarifa total no puede ser negativa.")
++        if self.tariff_final < Decimal("0.00"):
++            errors["tariff_final"] = _("La tarifa final no puede ser negativa.")
++        if self.room_id and self.cancellation_policy_id:
++            policy = self.cancellation_policy
++            if policy is not None and policy.clinic_id != self.room.clinic_id:
++                errors["cancellation_policy"] = _(
++                    "La política debe pertenecer a la clínica del consultorio."
++                )
++            elif policy is not None and policy.room_id not in {None, self.room_id}:
++                errors["cancellation_policy"] = _(
++                    "La política no corresponde al consultorio seleccionado."
++                )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
+ class Reservation(BaseModel):
++    batch = models.ForeignKey(
++        ReservationBatch,
++        on_delete=models.PROTECT,
++        related_name="reservations",
++        verbose_name=_("grupo de reservaciones"),
++        blank=True,
++        null=True,
++    )
+     room = models.ForeignKey(
+         "catalog.ConsultingRoom",
+         on_delete=models.PROTECT,
+@@ -294,6 +474,21 @@ class Reservation(BaseModel):
+         if self.start_time >= self.end_time:
+             errors["end_time"] = _("La hora fin debe ser mayor que la hora inicio.")
+ 
++        if self.batch_id:
++            batch = self.batch
++            if batch is not None and self.room_id and batch.room_id != self.room_id:
++                errors["batch"] = _(
++                    "El grupo y la reservación deben pertenecer al mismo consultorio."
++                )
++            if (
++                batch is not None
++                and self.tenant_doctor_id
++                and batch.tenant_doctor_id != self.tenant_doctor_id
++            ):
++                errors["batch"] = _(
++                    "El grupo y la reservación deben pertenecer al mismo médico."
++                )
++
+         if self.room_id and self.status in ACTIVE_RESERVATION_STATUSES:
+             overlaps = Reservation.objects.filter(
+                 room_id=self.room_id,
+diff --git a/apps/scheduling/services/reservation_service.py b/apps/scheduling/services/reservation_service.py
+index 9921b72..015f67e 100644
+--- a/apps/scheduling/services/reservation_service.py
++++ b/apps/scheduling/services/reservation_service.py
+@@ -1,28 +1,292 @@
+ """Reservation workflow services."""
+ 
+-from datetime import date, time
++from dataclasses import dataclass
++from datetime import date, time, timedelta
++from decimal import Decimal
+ from typing import Any, cast
+ 
+ from django.conf import settings
+ from django.core.exceptions import ValidationError
+ from django.core.mail import send_mail
+ from django.db import transaction
+-from django.db.models import Model
++from django.db.models import Model, Q
+ from django.utils import timezone
+ 
+ from apps.astrotrace.services import record_event
++from apps.billing.models import CancellationPolicy
+ from apps.catalog.models import ConsultingRoom, TenantDoctorProfile, TenantDoctorStatus
+ from apps.finance.models import PriceType, StatementStatus
++from apps.finance.services.discount_service import calculate_discount_quote
+ from apps.finance.services.pricing_engine import (
++    BlockPrice,
+     PricingConfigurationError,
+     calculate_block_price,
+ )
+ from apps.finance.services.statement_engine import generate_statement_for_reservation
+-from apps.scheduling.models import Reservation, ReservationStatus
++from apps.scheduling.models import (
++    Reservation,
++    ReservationBatch,
++    ReservationBatchStatus,
++    ReservationBatchType,
++    ReservationStatus,
++)
+ from apps.scheduling.services import BLOCK_STATUS_FREE, generate_availability_blocks
+ 
++MAX_RECURRING_OCCURRENCES = 53
++
++
++@dataclass(frozen=True)
++class ReservationOccurrencePreview:
++    reservation_date: date
++    start_time: time
++    end_time: time
++    tariff_total: Decimal | None
++    tariff_final: Decimal | None
++    currency: str
++    conflict: bool
++    message: str = ""
++
++
++@dataclass(frozen=True)
++class ReservationBatchPreview:
++    occurrences: tuple[ReservationOccurrencePreview, ...]
++    tariff_total: Decimal
++    tariff_final: Decimal
++    currency: str
++
++    @property
++    def has_conflicts(self) -> bool:
++        return any(occurrence.conflict for occurrence in self.occurrences)
++
++
++def generate_weekly_occurrence_dates(
++    *,
++    start_date: date,
++    end_date: date | None,
++) -> list[date]:
++    if end_date is None or end_date == start_date:
++        return [start_date]
++    if end_date < start_date:
++        raise ValidationError(
++            {
++                "recurrence_end_date": (
++                    "La fecha fin no puede ser menor que la fecha inicial."
++                )
++            }
++        )
++    if end_date > start_date + timedelta(days=366):
++        raise ValidationError(
++            {"recurrence_end_date": "La recurrencia no puede exceder un año."}
++        )
++
++    dates: list[date] = []
++    current = start_date
++    while current <= end_date:
++        dates.append(current)
++        if len(dates) > MAX_RECURRING_OCCURRENCES:
++            raise ValidationError(
++                {
++                    "recurrence_end_date": (
++                        "La recurrencia no puede exceder 53 ocurrencias."
++                    )
++                }
++            )
++        current += timedelta(days=7)
++    return dates
++
++
++def preview_reservation_batch(
++    *,
++    room: ConsultingRoom,
++    tenant_doctor: TenantDoctorProfile,
++    start_date: date,
++    start_time: time,
++    end_time: time,
++    recurrence_end_date: date | None = None,
++) -> ReservationBatchPreview:
++    _validate_tenant_doctor_is_authorized(tenant_doctor)
++    _validate_tenant_doctor_room_assignment(tenant_doctor, room)
++
++    dates = generate_weekly_occurrence_dates(
++        start_date=start_date,
++        end_date=recurrence_end_date,
++    )
++    occurrences: list[ReservationOccurrencePreview] = []
++    tariff_total = Decimal("0.00")
++    tariff_final = Decimal("0.00")
++    batch_currency = ""
++    for reservation_date in dates:
++        try:
++            pricing = _validate_available_block(
++                room,
++                reservation_date,
++                start_time,
++                end_time,
++            )
++            if pricing.applied_rule is None or pricing.subtotal is None:
++                raise ValidationError(
++                    "No hay tarifa configurada para el horario solicitado."
++                )
++            quote = calculate_discount_quote(
++                room=room,
++                tenant_doctor=tenant_doctor,
++                rate_rule=pricing.applied_rule,
++                reservation_date=reservation_date,
++                tariff_total=pricing.subtotal,
++            )
++            if batch_currency and batch_currency != pricing.currency:
++                raise ValidationError(
++                    "Todas las ocurrencias del grupo deben usar la misma moneda."
++                )
++            batch_currency = pricing.currency
++            tariff_total += pricing.subtotal
++            tariff_final += quote.tariff_final
++            occurrences.append(
++                ReservationOccurrencePreview(
++                    reservation_date=reservation_date,
++                    start_time=start_time,
++                    end_time=end_time,
++                    tariff_total=pricing.subtotal,
++                    tariff_final=quote.tariff_final,
++                    currency=pricing.currency,
++                    conflict=False,
++                )
++            )
++        except (ValidationError, PricingConfigurationError) as exc:
++            occurrences.append(
++                ReservationOccurrencePreview(
++                    reservation_date=reservation_date,
++                    start_time=start_time,
++                    end_time=end_time,
++                    tariff_total=None,
++                    tariff_final=None,
++                    currency=batch_currency or "MXN",
++                    conflict=True,
++                    message=_validation_error_text(exc),
++                )
++            )
++
++    return ReservationBatchPreview(
++        occurrences=tuple(occurrences),
++        tariff_total=tariff_total,
++        tariff_final=tariff_final,
++        currency=batch_currency or "MXN",
++    )
++
+ 
+ @transaction.atomic
++def create_reservation_batch(
++    *,
++    room: ConsultingRoom,
++    tenant_doctor: TenantDoctorProfile,
++    start_date: date,
++    start_time: time,
++    end_time: time,
++    recurrence_end_date: date | None = None,
++    notes: str = "",
++    actor: Model | None = None,
++) -> ReservationBatch:
++    locked_room = (
++        ConsultingRoom.objects.select_for_update()
++        .select_related("clinic", "owner", "owner__user")
++        .get(pk=room.pk)
++    )
++    preview = preview_reservation_batch(
++        room=locked_room,
++        tenant_doctor=tenant_doctor,
++        start_date=start_date,
++        start_time=start_time,
++        end_time=end_time,
++        recurrence_end_date=recurrence_end_date,
++    )
++    if preview.has_conflicts:
++        conflicts = [
++            f"{occurrence.reservation_date:%d/%m/%Y}: {occurrence.message}"
++            for occurrence in preview.occurrences
++            if occurrence.conflict
++        ]
++        raise ValidationError(
++            {
++                "__all__": [
++                    "No se creó ninguna reservación porque el grupo tiene conflictos.",
++                    *conflicts,
++                ]
++            }
++        )
++
++    occurrence_dates = [
++        occurrence.reservation_date for occurrence in preview.occurrences
++    ]
++    batch_type = (
++        ReservationBatchType.RECURRING
++        if len(occurrence_dates) > 1
++        else ReservationBatchType.SINGLE
++    )
++    cancellation_policy = _active_cancellation_policy(locked_room)
++    accepted_at = timezone.now() if cancellation_policy is not None else None
++    batch = ReservationBatch(
++        room=locked_room,
++        tenant_doctor=tenant_doctor,
++        batch_type=batch_type,
++        status=ReservationBatchStatus.REQUESTED,
++        recurrence_rule=_recurrence_rule(occurrence_dates),
++        occurrence_count=len(occurrence_dates),
++        currency=preview.currency,
++        tariff_total=preview.tariff_total,
++        tariff_final=preview.tariff_final,
++        cancellation_policy=cancellation_policy,
++        cancellation_policy_snapshot=_cancellation_policy_snapshot(cancellation_policy),
++        cancellation_terms_accepted_at=accepted_at,
++        notes=notes,
++    )
++    if actor is not None:
++        batch.created_by = cast(Any, actor)
++        batch.updated_by = cast(Any, actor)
++    batch.save()
++
++    reservations: list[Reservation] = []
++    for occurrence in preview.occurrences:
++        reservation = _create_reservation_occurrence(
++            batch=batch,
++            room=locked_room,
++            tenant_doctor=tenant_doctor,
++            reservation_date=occurrence.reservation_date,
++            start_time=occurrence.start_time,
++            end_time=occurrence.end_time,
++            notes=notes,
++            actor=actor,
++        )
++        reservations.append(reservation)
++
++    actual_tariff_total = sum(
++        (reservation.tariff_total for reservation in reservations),
++        Decimal("0.00"),
++    )
++    actual_tariff_final = sum(
++        (reservation.tariff_final for reservation in reservations),
++        Decimal("0.00"),
++    )
++    if (
++        batch.tariff_total != actual_tariff_total
++        or batch.tariff_final != actual_tariff_final
++    ):
++        batch.tariff_total = actual_tariff_total
++        batch.tariff_final = actual_tariff_final
++        batch.save(update_fields=["tariff_total", "tariff_final", "updated_at"])
++
++    record_event(
++        event_type="reservation_batch.created",
++        object_label=str(batch),
++        actor=actor,
++        payload=_batch_payload(batch),
++    )
++    if batch.batch_type == ReservationBatchType.SINGLE:
++        _send_reservation_confirmation_email(reservations[0])
++    else:
++        _send_reservation_batch_registered_email(batch, reservations)
++    return batch
++
++
+ def create_reservation(
+     *,
+     room: ConsultingRoom,
+@@ -33,11 +297,32 @@ def create_reservation(
+     notes: str = "",
+     actor: Model | None = None,
+ ) -> Reservation:
+-    _validate_tenant_doctor_is_authorized(tenant_doctor)
+-    _validate_tenant_doctor_room_assignment(tenant_doctor, room)
+-    _validate_available_block(room, reservation_date, start_time, end_time)
++    batch = create_reservation_batch(
++        room=room,
++        tenant_doctor=tenant_doctor,
++        start_date=reservation_date,
++        start_time=start_time,
++        end_time=end_time,
++        notes=notes,
++        actor=actor,
++    )
++    return batch.reservations.get()
++
++
++def _create_reservation_occurrence(
++    *,
++    batch: ReservationBatch,
++    room: ConsultingRoom,
++    tenant_doctor: TenantDoctorProfile,
++    reservation_date: date,
++    start_time: time,
++    end_time: time,
++    notes: str,
++    actor: Model | None,
++) -> Reservation:
+ 
+     reservation = Reservation(
++        batch=batch,
+         room=room,
+         tenant_doctor=tenant_doctor,
+         date=reservation_date,
+@@ -71,7 +356,6 @@ def create_reservation(
+             "hash": statement.calculation_hash,
+         },
+     )
+-    _send_reservation_confirmation_email(reservation)
+     return reservation
+ 
+ 
+@@ -120,6 +404,7 @@ def cancel_reservation(
+             "reason": reason,
+         },
+     )
++    _refresh_batch_status(reservation.batch, actor=actor)
+     return reservation
+ 
+ 
+@@ -140,6 +425,7 @@ def confirm_reservation(
+         actor=actor,
+         payload=_reservation_payload(reservation, level="operativo"),
+     )
++    _refresh_batch_status(reservation.batch, actor=actor)
+     return reservation
+ 
+ 
+@@ -168,7 +454,7 @@ def _validate_available_block(
+     reservation_date: date,
+     start_time: time,
+     end_time: time,
+-) -> None:
++) -> BlockPrice:
+     if start_time >= end_time:
+         raise ValidationError({"end_time": "La hora fin debe ser mayor."})
+ 
+@@ -208,6 +494,167 @@ def _validate_available_block(
+         raise ValidationError(
+             {"start_time": "La tarifa por bloque requiere reservar el bloque completo."}
+         )
++    return pricing
++
++
++def _validation_error_text(exc: ValidationError | PricingConfigurationError) -> str:
++    if isinstance(exc, ValidationError):
++        if hasattr(exc, "message_dict"):
++            return "; ".join(
++                str(message)
++                for messages in exc.message_dict.values()
++                for message in messages
++            )
++        return "; ".join(str(message) for message in exc.messages)
++    return str(exc)
++
++
++def _active_cancellation_policy(room: ConsultingRoom) -> CancellationPolicy | None:
++    today = timezone.localdate()
++    queryset = (
++        CancellationPolicy.objects.filter(
++            clinic=room.clinic,
++            is_active=True,
++            is_deleted=False,
++            start_date__lte=today,
++        )
++        .filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
++        .prefetch_related("penalty_rules")
++    )
++    room_policy = queryset.filter(room=room).order_by("-start_date", "-version").first()
++    if room_policy is not None:
++        return room_policy
++    return (
++        queryset.filter(room__isnull=True).order_by("-start_date", "-version").first()
++    )
++
++
++def _cancellation_policy_snapshot(
++    policy: CancellationPolicy | None,
++) -> dict[str, Any]:
++    if policy is None:
++        return {}
++    return {
++        "id": str(policy.pk),
++        "name": policy.name,
++        "version": policy.version,
++        "clinic_id": str(policy.clinic_id),
++        "room_id": str(policy.room_id) if policy.room_id else None,
++        "start_date": policy.start_date.isoformat(),
++        "end_date": policy.end_date.isoformat() if policy.end_date else None,
++        "penalties": [
++            {
++                "days_before": penalty.days_before,
++                "percentage": str(penalty.percentage),
++            }
++            for penalty in policy.penalty_rules.filter(
++                is_active=True,
++                is_deleted=False,
++            ).order_by("days_before")
++        ],
++    }
++
++
++def _recurrence_rule(occurrence_dates: list[date]) -> dict[str, Any]:
++    if len(occurrence_dates) <= 1:
++        return {}
++    return {
++        "frequency": "weekly",
++        "interval": 1,
++        "weekday": occurrence_dates[0].weekday(),
++        "start_date": occurrence_dates[0].isoformat(),
++        "end_date": occurrence_dates[-1].isoformat(),
++        "occurrence_count": len(occurrence_dates),
++    }
++
++
++def _batch_payload(batch: ReservationBatch) -> dict[str, Any]:
++    return {
++        "model": batch._meta.label,
++        "id": str(batch.pk),
++        "reference": batch.reference,
++        "level": "operativo_financiero",
++        "room_id": str(batch.room_id),
++        "tenant_doctor_id": str(batch.tenant_doctor_id),
++        "batch_type": batch.batch_type,
++        "status": batch.status,
++        "occurrence_count": batch.occurrence_count,
++        "tariff_total": str(batch.tariff_total),
++        "tariff_final": str(batch.tariff_final),
++        "currency": batch.currency,
++        "deadline_policy": batch.deadline_policy,
++        "cancellation_policy_id": (
++            str(batch.cancellation_policy_id) if batch.cancellation_policy_id else None
++        ),
++    }
++
++
++def _refresh_batch_status(
++    batch: ReservationBatch | None,
++    *,
++    actor: Model | None,
++) -> None:
++    if batch is None:
++        return
++    statuses = list(batch.reservations.values_list("status", flat=True))
++    if statuses and all(status == ReservationStatus.CANCELLED for status in statuses):
++        new_status = ReservationBatchStatus.CANCELLED
++    elif ReservationStatus.CANCELLED in statuses:
++        new_status = ReservationBatchStatus.PARTIALLY_CANCELLED
++    elif statuses and all(status == ReservationStatus.CONFIRMED for status in statuses):
++        new_status = ReservationBatchStatus.CONFIRMED
++    else:
++        new_status = ReservationBatchStatus.REQUESTED
++
++    if batch.status == new_status:
++        return
++    previous_status = batch.status
++    batch.status = new_status
++    if actor is not None:
++        batch.updated_by = cast(Any, actor)
++    batch.save(update_fields=["status", "updated_by", "updated_at"])
++    record_event(
++        event_type="reservation_batch.status_changed",
++        object_label=str(batch),
++        actor=actor,
++        payload={
++            **_batch_payload(batch),
++            "previous_status": previous_status,
++        },
++    )
++
++
++def _send_reservation_batch_registered_email(
++    batch: ReservationBatch,
++    reservations: list[Reservation],
++) -> None:
++    owner = batch.room.owner
++    recipients = [
++        batch.tenant_doctor.user.email,
++        owner.user.email if owner else "",
++    ]
++    recipient_list = list(dict.fromkeys(email for email in recipients if email))
++    if not recipient_list:
++        return
++
++    first = reservations[0]
++    last = reservations[-1]
++    room_label = batch.room.number.strip() or batch.room.name
++    message = (
++        f"Estimado Dr. {batch.tenant_doctor}, se registraron "
++        f"{batch.occurrence_count} reservaciones semanales para el consultorio "
++        f"{room_label}, del {first.date:%d/%m/%Y} al {last.date:%d/%m/%Y}, "
++        f"de las {first.start_time:%H:%M} hasta las {first.end_time:%H:%M}. "
++        f"Total: {batch.tariff_final} {batch.currency}. "
++        f"Referencia: {batch.reference}."
++    )
++    send_mail(
++        subject=f"Consultorio {room_label}, reservaciones registradas",
++        message=message,
++        from_email=settings.DEFAULT_FROM_EMAIL,
++        recipient_list=recipient_list,
++        fail_silently=True,
++    )
+ 
+ 
+ def _send_reservation_confirmation_email(reservation: Reservation) -> None:
+@@ -235,7 +682,8 @@ def _send_reservation_confirmation_email(reservation: Reservation) -> None:
+     )
+ 
+ 
+-def _reservation_payload(reservation: Reservation, *, level: str) -> dict[str, str]:
++def _reservation_payload(reservation: Reservation, *, level: str) -> dict[str, Any]:
++    batch = reservation.batch if reservation.batch_id else None
+     return {
+         "model": reservation._meta.label,
+         "id": str(reservation.pk),
+@@ -246,4 +694,6 @@ def _reservation_payload(reservation: Reservation, *, level: str) -> dict[str, s
+         "start_time": reservation.start_time.isoformat(),
+         "end_time": reservation.end_time.isoformat(),
+         "status": reservation.status,
++        "batch_id": str(reservation.batch_id) if batch is not None else None,
++        "batch_reference": batch.reference if batch is not None else None,
+     }
+diff --git a/apps/scheduling/urls.py b/apps/scheduling/urls.py
+index 93ce397..8b09992 100644
+--- a/apps/scheduling/urls.py
++++ b/apps/scheduling/urls.py
+@@ -72,6 +72,11 @@ urlpatterns = [
+         views.ReservationRequestView.as_view(),
+         name="reservation_request",
+     ),
++    path(
++        "reservaciones/grupos/<uuid:pk>/",
++        views.ReservationBatchDetailView.as_view(),
++        name="reservation_batch_detail",
++    ),
+     path(
+         "reservaciones/<uuid:pk>/",
+         views.ReservationDetailView.as_view(),
+diff --git a/apps/scheduling/views.py b/apps/scheduling/views.py
+index 501394d..9527292 100644
+--- a/apps/scheduling/views.py
++++ b/apps/scheduling/views.py
+@@ -50,6 +50,7 @@ from apps.scheduling.models import (
+     AvailabilityException,
+     AvailabilityRule,
+     Reservation,
++    ReservationBatch,
+     Weekday,
+     rule_weekdays,
+ )
+@@ -63,7 +64,8 @@ from apps.scheduling.services import (
+ from apps.scheduling.services.reservation_service import (
+     cancel_reservation,
+     confirm_reservation,
+-    create_reservation,
++    create_reservation_batch,
++    preview_reservation_batch,
+ )
+ from apps.vault.services.document_service import (
+     get_document_field_for_object,
+@@ -961,6 +963,7 @@ class ReservationListView(LoginRequiredMixin, ListView):
+ 
+     def get_queryset(self) -> QuerySet[Reservation]:
+         queryset = Reservation.objects.filter(is_deleted=False).select_related(
++            "batch",
+             "room",
+             "room__clinic",
+             "room__owner",
+@@ -1019,6 +1022,7 @@ class ReservationDetailView(LoginRequiredMixin, DetailView):
+ 
+     def get_queryset(self) -> QuerySet[Reservation]:
+         queryset = Reservation.objects.filter(is_deleted=False).select_related(
++            "batch",
+             "room",
+             "room__clinic",
+             "tenant_doctor",
+@@ -1045,6 +1049,32 @@ class ReservationDetailView(LoginRequiredMixin, DetailView):
+         return context
+ 
+ 
++class ReservationBatchDetailView(LoginRequiredMixin, DetailView):
++    template_name = "scheduling/reservation_batch_detail.html"
++    context_object_name = "reservation_batch"
++
++    def get_queryset(self) -> QuerySet[ReservationBatch]:
++        queryset = ReservationBatch.objects.filter(is_deleted=False).select_related(
++            "room",
++            "room__clinic",
++            "room__owner",
++            "tenant_doctor",
++            "tenant_doctor__user",
++            "cancellation_policy",
++        )
++        return scope_queryset_for_user(queryset, self.request.user)
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        reservation_batch = context["reservation_batch"]
++        context["page_title"] = "Grupo de reservaciones"
++        context["reservations"] = reservation_batch.reservations.select_related(
++            "room",
++            "tenant_doctor",
++        ).order_by("date", "start_time")
++        return context
++
++
+ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+     template_name = "scheduling/reservation_form.html"
+     form_class = ReservationRequestForm
+@@ -1073,22 +1103,43 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+         context["back_label"] = self._back_label()
+         context["back_url"] = self._back_url()
+         context["reservation_pricing_options"] = form.pricing_options
++        context.setdefault("batch_preview", None)
+         return context
+ 
+     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+         form = self.get_form()
+         if form.is_valid():
++            if request.POST.get("action") == "preview":
++                return self.preview(form)
+             return self.form_valid(form)
+         return self.form_invalid(form)
+ 
++    def preview(self, form: ReservationRequestForm) -> HttpResponse:
++        try:
++            batch_preview = preview_reservation_batch(
++                room=form.cleaned_data["room"],
++                tenant_doctor=form.cleaned_data["tenant_doctor"],
++                start_date=form.cleaned_data["date"],
++                start_time=form.cleaned_data["start_time"],
++                end_time=form.cleaned_data["end_time"],
++                recurrence_end_date=form.cleaned_data["recurrence_end_date"],
++            )
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        return self.render_to_response(
++            self.get_context_data(form=form, batch_preview=batch_preview)
++        )
++
+     def form_valid(self, form: ReservationRequestForm) -> HttpResponse:
+         try:
+-            reservation = create_reservation(
++            reservation_batch = create_reservation_batch(
+                 room=form.cleaned_data["room"],
+                 tenant_doctor=form.cleaned_data["tenant_doctor"],
+-                reservation_date=form.cleaned_data["date"],
++                start_date=form.cleaned_data["date"],
+                 start_time=form.cleaned_data["start_time"],
+                 end_time=form.cleaned_data["end_time"],
++                recurrence_end_date=form.cleaned_data["recurrence_end_date"],
+                 notes=form.cleaned_data["notes"],
+                 actor=cast(Model, self.request.user),
+             )
+@@ -1099,8 +1150,14 @@ class ReservationRequestView(LoginRequiredMixin, FormMixin, TemplateView):
+             form.add_error(None, exc)
+             return self.form_invalid(form)
+ 
+-        messages.success(self.request, "Reservación solicitada.")
+-        return redirect("reservation_detail", pk=reservation.pk)
++        if reservation_batch.occurrence_count == 1:
++            messages.success(self.request, "Reservación solicitada.")
++        else:
++            messages.success(
++                self.request,
++                f"Se solicitaron {reservation_batch.occurrence_count} reservaciones.",
++            )
++        return redirect("reservation_batch_detail", pk=reservation_batch.pk)
+ 
+     def _source(self) -> str:
+         source = self.request.POST.get("source") or self.request.GET.get("source")
+diff --git a/templates/scheduling/reservation_detail.html b/templates/scheduling/reservation_detail.html
+index e488cae..a49f28a 100644
+--- a/templates/scheduling/reservation_detail.html
++++ b/templates/scheduling/reservation_detail.html
+@@ -38,6 +38,13 @@
+       <dl class="row mb-0">
+         <dt class="col-sm-4 col-lg-3 text-secondary">Consultorio</dt>
+         <dd class="col-sm-8 col-lg-9">{{ reservation.room }}</dd>
++        {% if reservation.batch %}
++          <dt class="col-sm-4 col-lg-3 text-secondary">Grupo</dt>
++          <dd class="col-sm-8 col-lg-9">
++            <a href="{% url 'reservation_batch_detail' reservation.batch.pk %}">{{ reservation.batch.reference }}</a>
++            · {{ reservation.batch.get_batch_type_display }}
++          </dd>
++        {% endif %}
+         <dt class="col-sm-4 col-lg-3 text-secondary">Médico arrendatario</dt>
+         <dd class="col-sm-8 col-lg-9">{{ reservation.tenant_doctor }}</dd>
+         <dt class="col-sm-4 col-lg-3 text-secondary">Fecha</dt>
+diff --git a/templates/scheduling/reservation_form.html b/templates/scheduling/reservation_form.html
+index 5194875..23d776d 100644
+--- a/templates/scheduling/reservation_form.html
++++ b/templates/scheduling/reservation_form.html
+@@ -27,6 +27,29 @@
+       <div id="reservation-discount-message" class="alert alert-info {% if not form.discount_message %}d-none{% endif %}" role="alert">{{ form.discount_message }}</div>
+ 
+       <div class="row g-3">
++        <div class="col-md-6">
++          <fieldset>
++            <legend class="form-label">{{ form.booking_type.label }}</legend>
++            <div class="d-flex flex-wrap gap-3">
++              {% for option in form.booking_type %}
++                <div class="form-check">
++                  {{ option.tag }}
++                  <label class="form-check-label" for="{{ option.id_for_label }}">{{ option.choice_label }}</label>
++                </div>
++              {% endfor %}
++            </div>
++          </fieldset>
++          {% for error in form.booking_type.errors %}
++            <div class="invalid-feedback d-block">{{ error }}</div>
++          {% endfor %}
++        </div>
++        <div id="recurrence-end-field" class="col-md-6">
++          <label class="form-label" for="{{ form.recurrence_end_date.id_for_label }}">{{ form.recurrence_end_date.label }}</label>
++          {{ form.recurrence_end_date }}
++          {% for error in form.recurrence_end_date.errors %}
++            <div class="invalid-feedback d-block">{{ error }}</div>
++          {% endfor %}
++        </div>
+         <div class="col-md-6">
+           <label class="form-label" for="{{ form.room.id_for_label }}">{{ form.room.label }}</label>
+           {{ form.room }}
+@@ -115,12 +138,78 @@
+         </div>
+       </div>
+ 
++      {% if batch_preview %}
++        <div class="border-top mt-4 pt-4">
++          <div class="d-flex flex-column flex-md-row justify-content-between gap-2 mb-3">
++            <div>
++              <h2 class="h5 mb-1">Previsualización</h2>
++              <div class="text-secondary">{{ batch_preview.occurrences|length }} fecha{{ batch_preview.occurrences|length|pluralize:"s" }}</div>
++            </div>
++            <div class="text-md-end">
++              <div class="text-secondary small">Tarifa final del grupo</div>
++              <div class="fs-5 fw-semibold">{{ batch_preview.tariff_final }} {{ batch_preview.currency }}</div>
++            </div>
++          </div>
++          {% if batch_preview.has_conflicts %}
++            <div class="alert alert-warning" role="alert">
++              Hay conflictos en una o más fechas. No se creará ninguna reservación hasta corregirlos.
++            </div>
++          {% else %}
++            <div class="alert alert-success" role="status">
++              Todas las fechas están disponibles. El grupo se volverá a validar al solicitarlo.
++            </div>
++          {% endif %}
++          <div class="table-responsive">
++            <table class="table table-sm align-middle mb-0">
++              <thead>
++                <tr>
++                  <th>Fecha</th>
++                  <th>Horario</th>
++                  <th>Tarifa</th>
++                  <th>Tarifa final</th>
++                  <th>Estado</th>
++                </tr>
++              </thead>
++              <tbody>
++                {% for occurrence in batch_preview.occurrences %}
++                  <tr>
++                    <td>{{ occurrence.reservation_date|date:"d/m/Y" }}</td>
++                    <td>{{ occurrence.start_time|time:"H:i" }} - {{ occurrence.end_time|time:"H:i" }}</td>
++                    <td>{% if occurrence.tariff_total != None %}{{ occurrence.tariff_total }} {{ occurrence.currency }}{% else %}-{% endif %}</td>
++                    <td>{% if occurrence.tariff_final != None %}{{ occurrence.tariff_final }} {{ occurrence.currency }}{% else %}-{% endif %}</td>
++                    <td>
++                      {% if occurrence.conflict %}
++                        <span class="badge text-bg-warning">{{ occurrence.message }}</span>
++                      {% else %}
++                        <span class="badge text-bg-success">Disponible</span>
++                      {% endif %}
++                    </td>
++                  </tr>
++                {% endfor %}
++              </tbody>
++              <tfoot>
++                <tr class="fw-semibold">
++                  <td colspan="2">Total</td>
++                  <td>{{ batch_preview.tariff_total }} {{ batch_preview.currency }}</td>
++                  <td>{{ batch_preview.tariff_final }} {{ batch_preview.currency }}</td>
++                  <td></td>
++                </tr>
++              </tfoot>
++            </table>
++          </div>
++        </div>
++      {% endif %}
++
+       <div class="d-flex justify-content-end gap-2 mt-4">
+         <a class="btn btn-outline-secondary" hx-boost="false" href="{{ back_url }}">
+           <i class="bi bi-x-lg me-1"></i>
+           Cancelar
+         </a>
+-        <button class="btn btn-primary" type="submit">
++        <button class="btn btn-outline-primary" type="submit" name="action" value="preview">
++          <i class="bi bi-eye me-1"></i>
++          Previsualizar
++        </button>
++        <button class="btn btn-primary" type="submit" name="action" value="create" {% if batch_preview.has_conflicts %}disabled{% endif %}>
+           <i class="bi bi-calendar-plus me-1"></i>
+           Solicitar
+         </button>
+@@ -132,6 +221,15 @@
+       (() => {
+         const dataElement = document.getElementById("reservation-pricing-options");
+         if (!dataElement) return;
++        const bookingTypeFields = document.querySelectorAll("[name=booking_type]");
++        const recurrenceEndField = document.getElementById("recurrence-end-field");
++        const toggleRecurrenceEnd = () => {
++          const selected = document.querySelector("[name=booking_type]:checked");
++          if (!recurrenceEndField || !selected) return;
++          recurrenceEndField.classList.toggle("d-none", selected.value !== "weekly");
++        };
++        bookingTypeFields.forEach((field) => field.addEventListener("change", toggleRecurrenceEnd));
++        toggleRecurrenceEnd();
+         const options = JSON.parse(dataElement.textContent);
+         const blockField = document.getElementById("id_block_slot");
+         const startField = document.getElementById("id_start_time");
+diff --git a/templates/scheduling/reservation_list.html b/templates/scheduling/reservation_list.html
+index aaaf50b..2fe9543 100644
+--- a/templates/scheduling/reservation_list.html
++++ b/templates/scheduling/reservation_list.html
+@@ -64,6 +64,7 @@
+       <table class="table table-hover align-middle">
+         <thead>
+           <tr>
++            <th>Grupo</th>
+             <th>Consultorio</th>
+             <th>Médico</th>
+             <th>Fecha</th>
+@@ -75,6 +76,13 @@
+         <tbody>
+           {% for reservation in reservations %}
+             <tr>
++              <td>
++                {% if reservation.batch %}
++                  <a href="{% url 'reservation_batch_detail' reservation.batch.pk %}">{{ reservation.batch.reference }}</a>
++                {% else %}
++                  -
++                {% endif %}
++              </td>
+               <td>{{ reservation.room }}</td>
+               <td>{{ reservation.tenant_doctor }}</td>
+               <td>{{ reservation.date|date:"d/m/Y" }}</td>
+@@ -88,7 +96,7 @@
+             </tr>
+           {% empty %}
+             <tr>
+-              <td colspan="6" class="text-center text-secondary py-5">Sin reservaciones.</td>
++              <td colspan="7" class="text-center text-secondary py-5">Sin reservaciones.</td>
+             </tr>
+           {% endfor %}
+         </tbody>
+diff --git a/tests/test_reservations.py b/tests/test_reservations.py
+index ceebee5..54351b2 100644
+--- a/tests/test_reservations.py
++++ b/tests/test_reservations.py
+@@ -1,15 +1,18 @@
++import importlib
+ import re
+ from datetime import date, time, timedelta
+ from decimal import Decimal
+ from typing import Any
+ 
+ import pytest
++from django.apps import apps as django_apps
+ from django.contrib.auth import get_user_model
+ from django.core import mail
+ from django.core.exceptions import ValidationError
+ from django.utils import timezone
+ 
+ from apps.astrotrace.models import TraceEvent
++from apps.billing.models import CancellationPenaltyRule, CancellationPolicy
+ from apps.catalog.models import (
+     Clinic,
+     ConsultingRoom,
+@@ -29,6 +32,10 @@ from apps.finance.services.statement_engine import calculate_statement_hash
+ from apps.scheduling.models import (
+     AvailabilityException,
+     AvailabilityRule,
++    Reservation,
++    ReservationBatch,
++    ReservationBatchStatus,
++    ReservationBatchType,
+     ReservationStatus,
+     Weekday,
+ )
+@@ -36,6 +43,9 @@ from apps.scheduling.services.reservation_service import (
+     cancel_reservation,
+     confirm_reservation,
+     create_reservation,
++    create_reservation_batch,
++    generate_weekly_occurrence_dates,
++    preview_reservation_batch,
+ )
+ 
+ 
+@@ -139,6 +149,186 @@ def test_create_valid_reservation_generates_statement_and_events() -> None:
+     assert TraceEvent.objects.filter(event_type="statement.generated").exists()
+ 
+ 
++def test_generate_weekly_occurrence_dates_includes_each_week() -> None:
++    assert generate_weekly_occurrence_dates(
++        start_date=date(2026, 6, 29),
++        end_date=date(2026, 7, 20),
++    ) == [
++        date(2026, 6, 29),
++        date(2026, 7, 6),
++        date(2026, 7, 13),
++        date(2026, 7, 20),
++    ]
++
++
++@pytest.mark.django_db
++def test_create_reservation_batch_creates_all_occurrences_and_totals() -> None:
++    room = create_room("Consultorio Repetitivo")
++    doctor = create_tenant_doctor("doctor-repetitivo@example.com")
++    create_availability(room)
++    create_rate(room)
++
++    batch = create_reservation_batch(
++        room=room,
++        tenant_doctor=doctor,
++        start_date=date(2026, 6, 29),
++        start_time=time(8, 0),
++        end_time=time(13, 0),
++        recurrence_end_date=date(2026, 7, 13),
++    )
++
++    assert batch.batch_type == ReservationBatchType.RECURRING
++    assert batch.occurrence_count == 3
++    assert batch.tariff_total == Decimal("1125.00")
++    assert batch.tariff_final == Decimal("1125.00")
++    assert list(batch.reservations.values_list("date", flat=True)) == [
++        date(2026, 6, 29),
++        date(2026, 7, 6),
++        date(2026, 7, 13),
++    ]
++    assert Statement.objects.filter(reservation__batch=batch).count() == 3
++    assert TraceEvent.objects.filter(
++        event_type="reservation_batch.created",
++        object_label__contains=batch.reference,
++    ).exists()
++
++
++@pytest.mark.django_db
++def test_reservation_batch_is_all_or_nothing_when_one_date_conflicts() -> None:
++    room = create_room("Consultorio Conflicto Grupo")
++    first_doctor = create_tenant_doctor("doctor-conflicto-previo@example.com")
++    recurring_doctor = create_tenant_doctor("doctor-conflicto-grupo@example.com")
++    create_availability(room)
++    create_rate(room)
++    create_reservation(
++        room=room,
++        tenant_doctor=first_doctor,
++        reservation_date=date(2026, 7, 6),
++        start_time=time(8, 0),
++        end_time=time(13, 0),
++    )
++    existing_batches = ReservationBatch.objects.count()
++    existing_reservations = Reservation.objects.count()
++
++    preview = preview_reservation_batch(
++        room=room,
++        tenant_doctor=recurring_doctor,
++        start_date=date(2026, 6, 29),
++        start_time=time(8, 0),
++        end_time=time(13, 0),
++        recurrence_end_date=date(2026, 7, 13),
++    )
++    with pytest.raises(ValidationError):
++        create_reservation_batch(
++            room=room,
++            tenant_doctor=recurring_doctor,
++            start_date=date(2026, 6, 29),
++            start_time=time(8, 0),
++            end_time=time(13, 0),
++            recurrence_end_date=date(2026, 7, 13),
++        )
++
++    assert preview.has_conflicts
++    assert preview.occurrences[1].conflict
++    assert ReservationBatch.objects.count() == existing_batches
++    assert Reservation.objects.count() == existing_reservations
++
++
++@pytest.mark.django_db
++def test_reservation_batch_snapshots_active_cancellation_policy() -> None:
++    room = create_room("Consultorio Política Grupo")
++    doctor = create_tenant_doctor("doctor-politica-grupo@example.com")
++    create_availability(room)
++    create_rate(room)
++    policy = CancellationPolicy.objects.create(
++        clinic=room.clinic,
++        room=room,
++        name="Cancelación consultorio",
++        start_date=date(2026, 1, 1),
++    )
++    CancellationPenaltyRule.objects.create(
++        policy=policy,
++        days_before=0,
++        percentage=Decimal("100.0"),
++    )
++
++    batch = create_reservation_batch(
++        room=room,
++        tenant_doctor=doctor,
++        start_date=date(2026, 6, 29),
++        start_time=time(8, 0),
++        end_time=time(13, 0),
++    )
++
++    assert batch.cancellation_policy == policy
++    assert batch.cancellation_terms_accepted_at is not None
++    assert batch.cancellation_policy_snapshot["name"] == "Cancelación consultorio"
++    assert batch.cancellation_policy_snapshot["penalties"] == [
++        {"days_before": 0, "percentage": "100.0"}
++    ]
++
++
++@pytest.mark.django_db
++def test_cancelling_occurrences_updates_batch_status() -> None:
++    room = create_room("Consultorio Estado Grupo")
++    doctor = create_tenant_doctor("doctor-estado-grupo@example.com")
++    create_availability(room)
++    create_rate(room)
++    batch = create_reservation_batch(
++        room=room,
++        tenant_doctor=doctor,
++        start_date=date(2026, 6, 29),
++        start_time=time(8, 0),
++        end_time=time(13, 0),
++        recurrence_end_date=date(2026, 7, 6),
++    )
++    reservations = list(batch.reservations.order_by("date"))
++
++    cancel_reservation(reservation=reservations[0], reason="Primera fecha")
++    batch.refresh_from_db()
++    assert batch.status == ReservationBatchStatus.PARTIALLY_CANCELLED
++
++    cancel_reservation(reservation=reservations[1], reason="Segunda fecha")
++    batch.refresh_from_db()
++    assert batch.status == ReservationBatchStatus.CANCELLED
++    assert (
++        TraceEvent.objects.filter(event_type="reservation_batch.status_changed").count()
++        == 2
++    )
++
++
++@pytest.mark.django_db
++def test_reservation_batch_data_migration_is_reversible() -> None:
++    room = create_room("Consultorio Histórico")
++    doctor = create_tenant_doctor("doctor-historico@example.com")
++    reservation = Reservation.objects.create(
++        room=room,
++        tenant_doctor=doctor,
++        date=date(2026, 6, 29),
++        start_time=time(8, 0),
++        end_time=time(9, 0),
++        tariff_total=Decimal("75.00"),
++        tariff_final=Decimal("75.00"),
++    )
++    migration = importlib.import_module(
++        "apps.scheduling.migrations.0007_backfill_reservation_batches"
++    )
++
++    migration.backfill_reservation_batches(django_apps, None)
++    reservation.refresh_from_db()
++
++    assert reservation.batch is not None
++    assert reservation.batch.batch_type == ReservationBatchType.SINGLE
++    assert reservation.batch.recurrence_rule["legacy"] is True
++    batch_id = reservation.batch_id
++
++    migration.reverse_backfill_reservation_batches(django_apps, None)
++    reservation.refresh_from_db()
++
++    assert reservation.batch_id is None
++    assert not ReservationBatch.objects.filter(pk=batch_id).exists()
++
++
+ @pytest.mark.django_db
+ def test_reject_reservation_outside_availability() -> None:
+     room = create_room()
+@@ -305,9 +495,7 @@ def test_calendar_shows_reservation_request_button(client: Any) -> None:
+     client.force_login(user)
+ 
+     target_date = future_monday()
+-    response = client.get(
+-        f"/calendario/?week={target_date.isoformat()}&room={room.pk}"
+-    )
++    response = client.get(f"/calendario/?week={target_date.isoformat()}&room={room.pk}")
+ 
+     assert response.status_code == 200
+     assert "Solicitar reservación" in response.content.decode()
+@@ -742,6 +930,77 @@ def test_create_reservation_from_ui(client: Any) -> None:
+     assert Statement.objects.filter(reservation__notes="Solicitud desde UI").exists()
+ 
+ 
++@pytest.mark.django_db
++def test_reservation_request_previews_and_creates_weekly_batch(client: Any) -> None:
++    user = create_user("ui-grupo@example.com")
++    room = create_room("Consultorio Grupo UI")
++    doctor = create_tenant_doctor("doctor-grupo-ui@example.com")
++    create_availability(room)
++    create_rate(room)
++    client.force_login(user)
++    payload = {
++        "room": str(room.pk),
++        "tenant_doctor": str(doctor.pk),
++        "date": "2026-06-29",
++        "start_time": "08:00",
++        "end_time": "13:00",
++        "booking_type": "weekly",
++        "recurrence_end_date": "2026-07-13",
++        "notes": "Todos los lunes",
++    }
++
++    preview_response = client.post(
++        "/reservaciones/solicitar/",
++        {**payload, "action": "preview"},
++    )
++
++    preview_content = preview_response.content.decode()
++    assert preview_response.status_code == 200
++    assert "Previsualización" in preview_content
++    assert "29/06/2026" in preview_content
++    assert "06/07/2026" in preview_content
++    assert "13/07/2026" in preview_content
++    assert "1125.00 MXN" in preview_content
++    assert not ReservationBatch.objects.filter(notes="Todos los lunes").exists()
++
++    create_response = client.post(
++        "/reservaciones/solicitar/",
++        {**payload, "action": "create"},
++    )
++
++    batch = ReservationBatch.objects.get(notes="Todos los lunes")
++    assert create_response.status_code == 302
++    assert create_response.url == f"/reservaciones/grupos/{batch.pk}/"
++    assert batch.reservations.count() == 3
++
++
++@pytest.mark.django_db
++def test_reservation_batch_detail_lists_occurrences(client: Any) -> None:
++    user = create_user("detalle-grupo@example.com")
++    room = create_room("Consultorio Detalle Grupo")
++    doctor = create_tenant_doctor("doctor-detalle-grupo@example.com")
++    create_availability(room)
++    create_rate(room)
++    batch = create_reservation_batch(
++        room=room,
++        tenant_doctor=doctor,
++        start_date=date(2026, 6, 29),
++        start_time=time(8, 0),
++        end_time=time(13, 0),
++        recurrence_end_date=date(2026, 7, 6),
++    )
++    client.force_login(user)
++
++    response = client.get(f"/reservaciones/grupos/{batch.pk}/")
++
++    content = response.content.decode()
++    assert response.status_code == 200
++    assert batch.reference in content
++    assert "29/06/2026" in content
++    assert "06/07/2026" in content
++    assert "750.00 MXN" in content
++
++
+ @pytest.mark.django_db
+ def test_create_reservation_applies_best_discount_to_statement_and_reservation() -> (
+     None
