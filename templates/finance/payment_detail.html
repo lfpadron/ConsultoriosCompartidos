@@ -130,6 +130,26 @@
       </div>
     {% endif %}
 
+    {% if credit_applications %}
+      <div class="status-panel p-3 p-lg-4">
+        <h2 class="h5 mb-3">Saldo a favor aplicado</h2>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle mb-0">
+            <thead><tr><th>Origen</th><th>Estado</th><th class="text-end">Importe</th></tr></thead>
+            <tbody>
+              {% for application in credit_applications %}
+                <tr>
+                  <td><a hx-boost="false" href="{% url 'reservation_cancellation_detail' application.credit.cancellation_case_id %}">Cancelación {{ application.credit.cancellation_case_id }}</a></td>
+                  <td>{{ application.get_status_display }}</td>
+                  <td class="text-end">{{ application.amount }} {{ payment.currency }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {% endif %}
+
     {% include "vault/_related_documents.html" with document_parent=payment %}
   </section>
 {% endblock %}

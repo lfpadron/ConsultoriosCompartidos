@@ -269,6 +269,16 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
         ).distinct()
     if model_label == "finance.PaymentAllocation":
         return queryset.filter(reservation__room__clinic__in=clinics)
+    if model_label == "finance.CancellationCase":
+        return queryset.filter(batch__room__clinic__in=clinics)
+    if model_label == "finance.CancellationItem":
+        return queryset.filter(reservation__room__clinic__in=clinics)
+    if model_label == "finance.TenantCredit":
+        return queryset.filter(cancellation_case__batch__room__clinic__in=clinics)
+    if model_label == "finance.TenantCreditApplication":
+        return queryset.filter(
+            credit__cancellation_case__batch__room__clinic__in=clinics
+        )
     if model_label == "finance.Settlement":
         return queryset.filter(room__clinic__in=clinics)
     if model_label == "vault.DocumentAsset":
@@ -343,6 +353,14 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
         ).distinct()
     if model_label == "finance.PaymentAllocation":
         return queryset.filter(reservation__room__owner=owner)
+    if model_label == "finance.CancellationCase":
+        return queryset.filter(batch__room__owner=owner)
+    if model_label == "finance.CancellationItem":
+        return queryset.filter(reservation__room__owner=owner)
+    if model_label == "finance.TenantCredit":
+        return queryset.filter(cancellation_case__batch__room__owner=owner)
+    if model_label == "finance.TenantCreditApplication":
+        return queryset.filter(credit__cancellation_case__batch__room__owner=owner)
     if model_label == "vault.DocumentAsset":
         return queryset.filter(
             Q(owner=owner)
@@ -408,6 +426,12 @@ def _scope_tenant_doctor_queryset(
         return queryset.filter(tenant_doctor=tenant_doctor)
     if model_label == "finance.PaymentAllocation":
         return queryset.filter(reservation__tenant_doctor=tenant_doctor)
+    if model_label in {"finance.CancellationCase", "finance.TenantCredit"}:
+        return queryset.filter(tenant_doctor=tenant_doctor)
+    if model_label == "finance.CancellationItem":
+        return queryset.filter(reservation__tenant_doctor=tenant_doctor)
+    if model_label == "finance.TenantCreditApplication":
+        return queryset.filter(credit__tenant_doctor=tenant_doctor)
     if model_label == "vault.DocumentAsset":
         return queryset.filter(
             Q(tenant_doctor=tenant_doctor)
@@ -477,6 +501,16 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
         ).distinct()
     if model_label == "finance.PaymentAllocation":
         return queryset.filter(reservation__room__owner__in=owners)
+    if model_label == "finance.CancellationCase":
+        return queryset.filter(batch__room__owner__in=owners)
+    if model_label == "finance.CancellationItem":
+        return queryset.filter(reservation__room__owner__in=owners)
+    if model_label == "finance.TenantCredit":
+        return queryset.filter(cancellation_case__batch__room__owner__in=owners)
+    if model_label == "finance.TenantCreditApplication":
+        return queryset.filter(
+            credit__cancellation_case__batch__room__owner__in=owners
+        )
     if model_label == "finance.Settlement":
         return queryset.filter(owner__in=owners)
     if model_label == "vault.DocumentAsset":

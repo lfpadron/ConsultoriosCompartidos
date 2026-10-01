@@ -20,6 +20,10 @@ from apps.finance.models import (
     PaymentStatus,
     Statement,
     StatementStatus,
+    TenantCredit,
+    TenantCreditApplication,
+    TenantCreditApplicationStatus,
+    TenantCreditStatus,
 )
 from apps.finance.services.settlement_service import generate_settlement_for_reservation
 from apps.scheduling.models import (
@@ -67,6 +71,11 @@ def register_payment(
 ) -> Payment:
     """Preserve the legacy one-reservation registration flow."""
 
+    if method == PaymentMethod.CREDIT:
+        raise ValidationError(
+            {"method": "El saldo a favor sólo puede aplicarse a un grupo."}
+        )
+
     statement = _current_statement_for_reservation(reservation)
     payment = Payment(
         reservation=reservation,
@@ -109,12 +118,15 @@ def submit_batch_payment(
     method: str,
     reference: str,
     receipt: Any,
+    credit_amount: Decimal = Decimal("0.00"),
     payment_date: date | None = None,
     currency: str = "",
     notes: str = "",
     actor: Model | None = None,
 ) -> Payment:
     """Submit one receipt and allocate it over every payable occurrence."""
+
+    credit_amount = credit_amount or Decimal("0.00")
 
     locked_batch = (
         ReservationBatch.objects.select_for_update()
@@ -134,8 +146,6 @@ def submit_batch_payment(
         raise ValidationError(
             {"batch": "La fecha límite para enviar el comprobante ya venció."}
         )
-    if not receipt:
-        raise ValidationError({"receipt": "El comprobante es obligatorio."})
     if Payment.objects.filter(
         batch=locked_batch,
         status__in=(PaymentStatus.REGISTERED, PaymentStatus.VALIDATED),
@@ -179,6 +189,21 @@ def submit_batch_payment(
                 )
             }
         )
+    maximum_credit = min(amount, required_total)
+    if credit_amount < Decimal("0.00") or credit_amount > maximum_credit:
+        raise ValidationError(
+            {"credit_amount": "El saldo aplicado no es válido para este pago."}
+        )
+    cash_amount = amount - credit_amount
+    if cash_amount > Decimal("0.00") and not receipt:
+        raise ValidationError({"receipt": "El comprobante es obligatorio."})
+    if cash_amount == Decimal("0.00"):
+        method = PaymentMethod.CREDIT
+        reference = reference.strip() or f"SALDO-{locked_batch.reference}"
+    elif method == PaymentMethod.CREDIT:
+        raise ValidationError(
+            {"method": "Selecciona el método usado para pagar el importe restante."}
+        )
     requested_currency = currency or locked_batch.currency
     if requested_currency != locked_batch.currency:
         raise ValidationError({"currency": "La moneda debe coincidir con el grupo."})
@@ -200,12 +225,18 @@ def submit_batch_payment(
         method=method,
         reference=reference,
         payment_date=payment_date or timezone.localdate(),
-        receipt=receipt,
         status=PaymentStatus.REGISTERED,
         notes=notes,
     )
+    if receipt:
+        payment.receipt = receipt
     _set_audit_users(payment, actor, created=True)
     payment.save()
+    _reserve_tenant_credit(
+        payment=payment,
+        amount=credit_amount,
+        actor=actor,
+    )
 
     for reservation in payable:
         statement = statements[reservation.pk]
@@ -367,6 +398,7 @@ def _validate_batch_payment(payment: Payment, *, actor: Model | None) -> None:
         payment.validated_by = cast(Any, actor)
     _set_audit_users(payment, actor)
     payment.save()
+    _apply_reserved_credit(payment, actor=actor)
     record_event(
         event_type="payment.validated",
         object_label=str(payment),
@@ -424,6 +456,7 @@ def reject_payment(
     locked_payment.rejected_reason = reason
     _set_audit_users(locked_payment, actor)
     locked_payment.save()
+    _release_reserved_credit(locked_payment, actor=actor)
     _reset_batch_after_unsuccessful_submission(locked_payment, actor=actor)
 
     payload = {**_payment_payload(locked_payment, actor=actor), "reason": reason}
@@ -464,6 +497,7 @@ def cancel_payment(
     locked_payment.status = PaymentStatus.CANCELLED
     _set_audit_users(locked_payment, actor)
     locked_payment.save()
+    _release_reserved_credit(locked_payment, actor=actor)
     _reset_batch_after_unsuccessful_submission(locked_payment, actor=actor)
 
     record_event(
@@ -684,6 +718,104 @@ def _create_allocation(
     return allocation
 
 
+def _reserve_tenant_credit(
+    *,
+    payment: Payment,
+    amount: Decimal,
+    actor: Model | None,
+) -> None:
+    remaining = amount
+    if remaining <= Decimal("0.00"):
+        return
+    credits = TenantCredit.objects.select_for_update().filter(
+        tenant_doctor=payment.tenant_doctor,
+        currency=payment.currency,
+        status=TenantCreditStatus.ACTIVE,
+        remaining_amount__gt=0,
+        is_deleted=False,
+    ).order_by("created_at", "pk")
+    for credit in credits:
+        applied_amount = min(credit.remaining_amount, remaining)
+        credit.remaining_amount -= applied_amount
+        credit.status = (
+            TenantCreditStatus.EXHAUSTED
+            if credit.remaining_amount == Decimal("0.00")
+            else TenantCreditStatus.ACTIVE
+        )
+        _set_audit_users(credit, actor)
+        credit.save()
+        application = TenantCreditApplication(
+            credit=credit,
+            payment=payment,
+            amount=applied_amount,
+            status=TenantCreditApplicationStatus.RESERVED,
+        )
+        _set_audit_users(application, actor, created=True)
+        application.save()
+        record_event(
+            event_type="tenant_credit.reserved",
+            object_label=str(application),
+            actor=actor,
+            payload=_credit_application_payload(application, actor=actor),
+        )
+        remaining -= applied_amount
+        if remaining == Decimal("0.00"):
+            break
+    if remaining > Decimal("0.00"):
+        raise ValidationError(
+            {"credit_amount": "El saldo a favor disponible es insuficiente."}
+        )
+
+
+def _apply_reserved_credit(payment: Payment, *, actor: Model | None) -> None:
+    applications = TenantCreditApplication.objects.select_for_update().filter(
+        payment=payment,
+        status=TenantCreditApplicationStatus.RESERVED,
+        is_deleted=False,
+    )
+    now = timezone.now()
+    for application in applications:
+        application.status = TenantCreditApplicationStatus.APPLIED
+        application.applied_at = now
+        _set_audit_users(application, actor)
+        application.save()
+        record_event(
+            event_type="tenant_credit.applied",
+            object_label=str(application),
+            actor=actor,
+            payload=_credit_application_payload(application, actor=actor),
+        )
+
+
+def _release_reserved_credit(payment: Payment, *, actor: Model | None) -> None:
+    applications = (
+        TenantCreditApplication.objects.select_for_update()
+        .filter(
+            payment=payment,
+            status=TenantCreditApplicationStatus.RESERVED,
+            is_deleted=False,
+        )
+        .select_related("credit")
+    )
+    now = timezone.now()
+    for application in applications:
+        credit = TenantCredit.objects.select_for_update().get(pk=application.credit_id)
+        credit.remaining_amount += application.amount
+        credit.status = TenantCreditStatus.ACTIVE
+        _set_audit_users(credit, actor)
+        credit.save()
+        application.status = TenantCreditApplicationStatus.RELEASED
+        application.released_at = now
+        _set_audit_users(application, actor)
+        application.save()
+        record_event(
+            event_type="tenant_credit.released",
+            object_label=str(application),
+            actor=actor,
+            payload=_credit_application_payload(application, actor=actor),
+        )
+
+
 def _set_audit_users(
     instance: Any,
     actor: Model | None,
@@ -744,6 +876,13 @@ def _send_batch_confirmation_email(
 
 
 def _payment_payload(payment: Payment, *, actor: Model | None) -> dict[str, str]:
+    credit_amount = payment.credit_applications.filter(
+        status__in=(
+            TenantCreditApplicationStatus.RESERVED,
+            TenantCreditApplicationStatus.APPLIED,
+        ),
+        is_deleted=False,
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
     payload = {
         "model": payment._meta.label,
         "id": str(payment.pk),
@@ -757,6 +896,7 @@ def _payment_payload(payment: Payment, *, actor: Model | None) -> dict[str, str]
         "method": payment.method,
         "reference": payment.reference,
         "status": payment.status,
+        "credit_amount": str(credit_amount),
         "actor_id": str(actor.pk) if actor is not None else "",
     }
     if payment.reservation is not None:
@@ -778,6 +918,23 @@ def _allocation_payload(
         "reservation_id": str(allocation.reservation_id),
         "statement_id": str(allocation.statement_id),
         "amount": str(allocation.amount),
+        "level": "financiero",
+        "actor_id": str(actor.pk) if actor is not None else "",
+    }
+
+
+def _credit_application_payload(
+    application: TenantCreditApplication,
+    *,
+    actor: Model | None,
+) -> dict[str, str]:
+    return {
+        "model": application._meta.label,
+        "id": str(application.pk),
+        "credit_id": str(application.credit_id),
+        "payment_id": str(application.payment_id),
+        "amount": str(application.amount),
+        "status": application.status,
         "level": "financiero",
         "actor_id": str(actor.pk) if actor is not None else "",
     }

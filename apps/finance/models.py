@@ -352,6 +352,7 @@ class PaymentMethod(models.TextChoices):
     CASH = "efectivo", _("Efectivo")
     CARD = "tarjeta", _("Tarjeta")
     DEPOSIT = "depósito", _("Depósito")
+    CREDIT = "saldo_favor", _("Saldo a favor")
     OTHER = "otro", _("Otro")
 
 
@@ -598,6 +599,393 @@ class PaymentAllocation(BaseModel):
                 errors["reservation"] = _(
                     "La reservación no pertenece al grupo del pago."
                 )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class CancellationCaseStatus(models.TextChoices):
+    PENDING = "pendiente", _("Pendiente de resolución")
+    RESOLVED = "resuelta", _("Resuelta")
+    NO_REFUND = "sin_devolucion", _("Sin devolución")
+
+
+class CancellationResolutionMethod(models.TextChoices):
+    NOT_APPLICABLE = "no_aplica", _("No aplica")
+    MANUAL_REFUND = "devolucion_manual", _("Devolución manual")
+    FUTURE_CREDIT = "saldo_favor", _("Saldo a favor")
+
+
+class CancellationCase(BaseModel):
+    batch = models.ForeignKey(
+        "scheduling.ReservationBatch",
+        on_delete=models.PROTECT,
+        related_name="cancellation_cases",
+        verbose_name=_("grupo de reservaciones"),
+        blank=True,
+        null=True,
+    )
+    tenant_doctor = models.ForeignKey(
+        "catalog.TenantDoctorProfile",
+        on_delete=models.PROTECT,
+        related_name="cancellation_cases",
+        verbose_name=_("médico arrendatario"),
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="requested_cancellation_cases",
+        verbose_name=_("solicitada por"),
+        blank=True,
+        null=True,
+    )
+    managed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="managed_cancellation_cases",
+        verbose_name=_("gestionada por"),
+        blank=True,
+        null=True,
+    )
+    status = models.CharField(
+        _("estado"),
+        max_length=24,
+        choices=CancellationCaseStatus.choices,
+        default=CancellationCaseStatus.PENDING,
+    )
+    resolution_method = models.CharField(
+        _("forma de resolución"),
+        max_length=24,
+        choices=CancellationResolutionMethod.choices,
+        default=CancellationResolutionMethod.NOT_APPLICABLE,
+    )
+    reason = models.TextField(_("motivo"))
+    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
+    total_paid = models.DecimalField(
+        _("total pagado"), max_digits=12, decimal_places=2, default=0
+    )
+    penalty_amount = models.DecimalField(
+        _("penalización"), max_digits=12, decimal_places=2, default=0
+    )
+    refundable_amount = models.DecimalField(
+        _("importe a devolver"), max_digits=12, decimal_places=2, default=0
+    )
+    refund_reference = models.CharField(
+        _("referencia de devolución"), max_length=160, blank=True
+    )
+    refund_date = models.DateField(_("fecha de devolución"), blank=True, null=True)
+    refund_receipt = models.FileField(
+        _("comprobante de devolución"),
+        upload_to="refund-receipts/",
+        blank=True,
+        null=True,
+    )
+    requested_at = models.DateTimeField(_("solicitada en"), default=timezone.now)
+    resolved_at = models.DateTimeField(_("resuelta en"), blank=True, null=True)
+    notes = models.TextField(_("notas"), blank=True)
+
+    class Meta:
+        verbose_name = _("expediente de cancelación")
+        verbose_name_plural = _("expedientes de cancelación")
+        ordering = ("-requested_at",)
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(total_paid__gte=0),
+                name="finance_cancellation_total_paid_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(penalty_amount__gte=0),
+                name="finance_cancellation_penalty_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(refundable_amount__gte=0),
+                name="finance_cancellation_refundable_nonnegative",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        reference = self.batch.reference if self.batch else str(self.pk)
+        return f"Cancelación {reference} - {self.get_status_display()}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if not self.reason.strip():
+            errors["reason"] = _("El motivo es obligatorio.")
+        if self.total_paid < Decimal("0.00"):
+            errors["total_paid"] = _("El total pagado no puede ser negativo.")
+        if self.penalty_amount < Decimal("0.00"):
+            errors["penalty_amount"] = _("La penalización no puede ser negativa.")
+        if self.refundable_amount < Decimal("0.00"):
+            errors["refundable_amount"] = _(
+                "El importe a devolver no puede ser negativo."
+            )
+        if self.penalty_amount + self.refundable_amount != self.total_paid:
+            errors["refundable_amount"] = _(
+                "La penalización y la devolución deben sumar el total pagado."
+            )
+        if self.status == CancellationCaseStatus.RESOLVED:
+            if self.resolution_method == CancellationResolutionMethod.NOT_APPLICABLE:
+                errors["resolution_method"] = _(
+                    "Selecciona la forma en que se resolvió la cancelación."
+                )
+            if self.resolved_at is None:
+                errors["resolved_at"] = _("Registra la fecha de resolución.")
+        if (
+            self.resolution_method == CancellationResolutionMethod.MANUAL_REFUND
+            and self.status == CancellationCaseStatus.RESOLVED
+        ):
+            if not self.refund_reference.strip():
+                errors["refund_reference"] = _(
+                    "La referencia de devolución es obligatoria."
+                )
+            if not self.refund_receipt:
+                errors["refund_receipt"] = _(
+                    "El comprobante de devolución es obligatorio."
+                )
+            if self.refund_date is None:
+                errors["refund_date"] = _(
+                    "La fecha de devolución es obligatoria."
+                )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class CancellationItem(BaseModel):
+    cancellation_case = models.ForeignKey(
+        CancellationCase,
+        on_delete=models.PROTECT,
+        related_name="items",
+        verbose_name=_("expediente"),
+    )
+    reservation = models.OneToOneField(
+        "scheduling.Reservation",
+        on_delete=models.PROTECT,
+        related_name="cancellation_item",
+        verbose_name=_("reservación"),
+    )
+    cancellation_policy = models.ForeignKey(
+        "billing.CancellationPolicy",
+        on_delete=models.PROTECT,
+        related_name="cancellation_items",
+        verbose_name=_("política aplicada"),
+        blank=True,
+        null=True,
+    )
+    policy_snapshot = models.JSONField(
+        _("snapshot de política"),
+        default=dict,
+        blank=True,
+    )
+    days_before = models.PositiveSmallIntegerField(_("días naturales antes"))
+    penalty_percentage = models.DecimalField(
+        _("porcentaje de penalización"), max_digits=4, decimal_places=1, default=0
+    )
+    paid_amount = models.DecimalField(
+        _("importe pagado"), max_digits=12, decimal_places=2, default=0
+    )
+    penalty_amount = models.DecimalField(
+        _("penalización"), max_digits=12, decimal_places=2, default=0
+    )
+    refundable_amount = models.DecimalField(
+        _("importe a devolver"), max_digits=12, decimal_places=2, default=0
+    )
+    cancelled_at = models.DateTimeField(_("cancelada en"), default=timezone.now)
+
+    class Meta:
+        verbose_name = _("partida de cancelación")
+        verbose_name_plural = _("partidas de cancelación")
+        ordering = ("reservation__date", "reservation__start_time")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(penalty_percentage__gte=0)
+                & models.Q(penalty_percentage__lte=100),
+                name="finance_cancellation_item_percentage_range",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(paid_amount__gte=0)
+                & models.Q(penalty_amount__gte=0)
+                & models.Q(refundable_amount__gte=0),
+                name="finance_cancellation_item_amounts_nonnegative",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.reservation} - devolución {self.refundable_amount}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        percentage_out_of_range = self.penalty_percentage < Decimal(
+            "0.0"
+        ) or self.penalty_percentage > Decimal("100.0")
+        if percentage_out_of_range:
+            errors["penalty_percentage"] = _(
+                "La penalización debe estar entre 0% y 100%."
+            )
+        if self.penalty_amount + self.refundable_amount != self.paid_amount:
+            errors["refundable_amount"] = _(
+                "La penalización y la devolución deben sumar el importe pagado."
+            )
+        if self.reservation_id and self.cancellation_case_id:
+            case = self.cancellation_case
+            if self.reservation.tenant_doctor_id != case.tenant_doctor_id:
+                errors["reservation"] = _(
+                    "La reservación no corresponde al médico del expediente."
+                )
+            if case.batch_id and self.reservation.batch_id != case.batch_id:
+                errors["reservation"] = _(
+                    "La reservación no pertenece al grupo del expediente."
+                )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class TenantCreditStatus(models.TextChoices):
+    ACTIVE = "activo", _("Activo")
+    EXHAUSTED = "agotado", _("Agotado")
+    CANCELLED = "cancelado", _("Cancelado")
+
+
+class TenantCredit(BaseModel):
+    cancellation_case = models.OneToOneField(
+        CancellationCase,
+        on_delete=models.PROTECT,
+        related_name="tenant_credit",
+        verbose_name=_("expediente de cancelación"),
+    )
+    tenant_doctor = models.ForeignKey(
+        "catalog.TenantDoctorProfile",
+        on_delete=models.PROTECT,
+        related_name="credits",
+        verbose_name=_("médico arrendatario"),
+    )
+    original_amount = models.DecimalField(
+        _("importe original"), max_digits=12, decimal_places=2
+    )
+    remaining_amount = models.DecimalField(
+        _("saldo disponible"), max_digits=12, decimal_places=2
+    )
+    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
+    status = models.CharField(
+        _("estado"),
+        max_length=16,
+        choices=TenantCreditStatus.choices,
+        default=TenantCreditStatus.ACTIVE,
+    )
+
+    class Meta:
+        verbose_name = _("saldo a favor")
+        verbose_name_plural = _("saldos a favor")
+        ordering = ("created_at",)
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(original_amount__gt=0),
+                name="finance_tenant_credit_original_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(remaining_amount__gte=0),
+                name="finance_tenant_credit_remaining_nonnegative",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.tenant_doctor}: {self.remaining_amount} {self.currency}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if self.original_amount <= Decimal("0.00"):
+            errors["original_amount"] = _("El importe original debe ser positivo.")
+        if self.remaining_amount < Decimal("0.00"):
+            errors["remaining_amount"] = _("El saldo no puede ser negativo.")
+        if self.remaining_amount > self.original_amount:
+            errors["remaining_amount"] = _(
+                "El saldo no puede exceder el importe original."
+            )
+        if self.cancellation_case_id and self.tenant_doctor_id:
+            if self.cancellation_case.tenant_doctor_id != self.tenant_doctor_id:
+                errors["tenant_doctor"] = _(
+                    "El médico no corresponde al expediente de cancelación."
+                )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class TenantCreditApplicationStatus(models.TextChoices):
+    RESERVED = "reservado", _("Reservado")
+    APPLIED = "aplicado", _("Aplicado")
+    RELEASED = "liberado", _("Liberado")
+
+
+class TenantCreditApplication(BaseModel):
+    credit = models.ForeignKey(
+        TenantCredit,
+        on_delete=models.PROTECT,
+        related_name="applications",
+        verbose_name=_("saldo a favor"),
+    )
+    payment = models.ForeignKey(
+        Payment,
+        on_delete=models.PROTECT,
+        related_name="credit_applications",
+        verbose_name=_("pago"),
+    )
+    amount = models.DecimalField(_("importe aplicado"), max_digits=12, decimal_places=2)
+    status = models.CharField(
+        _("estado"),
+        max_length=16,
+        choices=TenantCreditApplicationStatus.choices,
+        default=TenantCreditApplicationStatus.RESERVED,
+    )
+    applied_at = models.DateTimeField(_("aplicado en"), blank=True, null=True)
+    released_at = models.DateTimeField(_("liberado en"), blank=True, null=True)
+
+    class Meta:
+        verbose_name = _("aplicación de saldo a favor")
+        verbose_name_plural = _("aplicaciones de saldo a favor")
+        ordering = ("created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("credit", "payment"),
+                name="finance_credit_application_unique_payment",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(amount__gt=0),
+                name="finance_credit_application_amount_positive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.credit} -> {self.payment}: {self.amount}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if self.amount <= Decimal("0.00"):
+            errors["amount"] = _("El importe aplicado debe ser positivo.")
+        if self.credit_id and self.payment_id:
+            if self.credit.tenant_doctor_id != self.payment.tenant_doctor_id:
+                errors["payment"] = _(
+                    "El pago y el saldo deben pertenecer al mismo médico."
+                )
+            if self.credit.currency != self.payment.currency:
+                errors["payment"] = _("La moneda del saldo debe coincidir con el pago.")
         if errors:
             raise ValidationError(errors)
 

@@ -3,12 +3,16 @@
 from django.contrib import admin
 
 from apps.finance.models import (
+    CancellationCase,
+    CancellationItem,
     Payment,
     PaymentAllocation,
     RateRule,
     RoomRateDiscount,
     Settlement,
     Statement,
+    TenantCredit,
+    TenantCreditApplication,
     TenantDoctorDiscount,
 )
 
@@ -117,6 +121,51 @@ class PaymentAllocationAdmin(admin.ModelAdmin):
         "payment__reference",
         "reservation__room__name",
     )
+
+
+@admin.register(CancellationCase)
+class CancellationCaseAdmin(admin.ModelAdmin):
+    list_display = (
+        "batch",
+        "tenant_doctor",
+        "status",
+        "resolution_method",
+        "penalty_amount",
+        "refundable_amount",
+        "requested_at",
+    )
+    list_filter = ("status", "resolution_method", "currency")
+    search_fields = ("batch__reference", "tenant_doctor__display_name")
+
+
+@admin.register(CancellationItem)
+class CancellationItemAdmin(admin.ModelAdmin):
+    list_display = (
+        "reservation",
+        "days_before",
+        "penalty_percentage",
+        "paid_amount",
+        "refundable_amount",
+    )
+
+
+@admin.register(TenantCredit)
+class TenantCreditAdmin(admin.ModelAdmin):
+    list_display = (
+        "tenant_doctor",
+        "original_amount",
+        "remaining_amount",
+        "currency",
+        "status",
+    )
+    list_filter = ("status", "currency")
+    search_fields = ("tenant_doctor__display_name", "tenant_doctor__user__email")
+
+
+@admin.register(TenantCreditApplication)
+class TenantCreditApplicationAdmin(admin.ModelAdmin):
+    list_display = ("credit", "payment", "amount", "status")
+    list_filter = ("status",)
 
 
 @admin.register(Settlement)

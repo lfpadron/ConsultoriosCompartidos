@@ -33,9 +33,12 @@ from apps.finance.services.pricing_engine import (
     calculate_block_price,
 )
 from apps.scheduling.models import (
+    ACTIVE_RESERVATION_STATUSES,
     AvailabilityException,
     AvailabilityRule,
     Reservation,
+    ReservationBatch,
+    ReservationBatchType,
     ReservationPaymentPolicy,
     Weekday,
 )
@@ -1197,3 +1200,67 @@ class ReservationCancelForm(forms.Form):
         label="Motivo de cancelación",
         widget=forms.Textarea(attrs={"rows": 3, "class": "form-control"}),
     )
+
+
+class ReservationBatchCancelForm(forms.Form):
+    reservations = forms.ModelMultipleChoiceField(
+        label="Fechas a cancelar",
+        queryset=Reservation.objects.none(),
+        widget=forms.CheckboxSelectMultiple,
+    )
+    reason = forms.CharField(
+        label="Motivo de cancelación",
+        widget=forms.Textarea(attrs={"rows": 3, "class": "form-control"}),
+    )
+
+    def __init__(
+        self,
+        *args: Any,
+        batch: ReservationBatch,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.batch = batch
+        queryset = batch.reservations.filter(
+            status__in=ACTIVE_RESERVATION_STATUSES,
+            is_deleted=False,
+        ).select_related("room")
+        set_model_queryset(self.fields["reservations"], queryset.order_by("date"))
+        self.fields["reservations"].initial = list(
+            queryset.values_list("pk", flat=True)
+        )
+        if batch.batch_type == ReservationBatchType.SINGLE:
+            self.fields["reservations"].disabled = True
+            self.fields["reservations"].help_text = (
+                "Las reservaciones únicas se cancelan completas."
+            )
+
+    def clean_reservations(self) -> QuerySet[Reservation]:
+        reservations = self.cleaned_data["reservations"]
+        if self.batch.batch_type == ReservationBatchType.SINGLE:
+            return self.batch.reservations.filter(
+                status__in=ACTIVE_RESERVATION_STATUSES,
+                is_deleted=False,
+            )
+        if not reservations.exists():
+            raise forms.ValidationError("Selecciona al menos una fecha.")
+        return reservations
+
+
+class ManualRefundForm(forms.Form):
+    reference = forms.CharField(label="Referencia de transferencia", max_length=160)
+    refund_date = forms.DateField(
+        label="Fecha de devolución",
+        widget=forms.DateInput(attrs={"type": "date"}),
+    )
+    receipt = forms.FileField(label="Comprobante de transferencia")
+    notes = forms.CharField(
+        label="Notas",
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 3}),
+    )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        style_form_fields(self.fields)
+        self.fields["refund_date"].initial = date.today

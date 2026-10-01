@@ -44,6 +44,7 @@ from apps.finance.models import (
     Settlement,
     TenantDoctorDiscount,
 )
+from apps.finance.services.cancellation_service import available_credit_for_tenant
 from apps.finance.services.payment_service import (
     cancel_payment,
     get_payment_summary_for_batch,
@@ -628,6 +629,8 @@ class PaymentDetailView(LoginRequiredMixin, DetailView):
                 "allocations",
                 "allocations__reservation",
                 "allocations__statement",
+                "credit_applications",
+                "credit_applications__credit",
             )
         )
         return scope_queryset_for_user(queryset, self.request.user)
@@ -651,6 +654,9 @@ class PaymentDetailView(LoginRequiredMixin, DetailView):
             )
             context["payment_room"] = payment.reservation.room
         context["can_review_payment"] = _user_can_review_payments(self.request.user)
+        context["credit_applications"] = payment.credit_applications.filter(
+            is_deleted=False
+        ).select_related("credit")
         context["related_documents"] = get_documents_for_object(payment)
         context["document_upload_field"] = get_document_field_for_object(payment)
         return context
@@ -759,6 +765,10 @@ class BatchPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
         summary = get_payment_summary_for_batch(batch)
         kwargs["required_total"] = summary.total_to_pay
         kwargs["currency"] = summary.currency
+        kwargs["available_credit"] = available_credit_for_tenant(
+            tenant_doctor=batch.tenant_doctor,
+            currency=summary.currency,
+        )
         return kwargs
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
@@ -767,6 +777,10 @@ class BatchPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
         context["page_title"] = "Enviar comprobante de pago"
         context["reservation_batch"] = batch
         context["payment_summary"] = get_payment_summary_for_batch(batch)
+        context["available_credit"] = available_credit_for_tenant(
+            tenant_doctor=batch.tenant_doctor,
+            currency=batch.currency,
+        )
         return context
 
     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
@@ -786,6 +800,7 @@ class BatchPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
                 reference=form.cleaned_data["reference"],
                 payment_date=form.cleaned_data["payment_date"],
                 receipt=form.cleaned_data["receipt"],
+                credit_amount=form.cleaned_data["credit_amount"],
                 notes=form.cleaned_data["notes"],
                 actor=cast(Model, self.request.user),
             )

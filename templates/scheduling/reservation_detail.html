@@ -19,7 +19,7 @@
             <i class="bi bi-diagram-3 me-1"></i>
             Timeline
           </a>
-          {% if current_screen_can_edit %}
+          {% if current_screen_can_edit and reservation.status != "cancelada" and reservation.status != "finalizada" %}
             <a class="btn btn-outline-primary" href="{% url 'reservation_confirm' reservation.pk %}">
               <i class="bi bi-check2-circle me-1"></i>
               Confirmar
@@ -44,6 +44,10 @@
             <a href="{% url 'reservation_batch_detail' reservation.batch.pk %}">{{ reservation.batch.reference }}</a>
             · {{ reservation.batch.get_batch_type_display }}
           </dd>
+        {% endif %}
+        {% if reservation.cancellation_item %}
+          <dt class="col-sm-4 col-lg-3 text-secondary">Cancelación</dt>
+          <dd class="col-sm-8 col-lg-9"><a hx-boost="false" href="{% url 'reservation_cancellation_detail' reservation.cancellation_item.cancellation_case_id %}">Ver expediente</a></dd>
         {% endif %}
         <dt class="col-sm-4 col-lg-3 text-secondary">Médico arrendatario</dt>
         <dd class="col-sm-8 col-lg-9">{{ reservation.tenant_doctor }}</dd>

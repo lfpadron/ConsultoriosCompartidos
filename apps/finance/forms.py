@@ -21,6 +21,7 @@ from apps.core.form_utils import (
 from apps.core.permissions import scope_queryset_for_user
 from apps.finance.models import (
     Payment,
+    PaymentMethod,
     PaymentStatus,
     RateRule,
     RoomRateDiscount,
@@ -346,23 +347,38 @@ class PaymentRegistrationForm(BootstrapModelForm):
 
 
 class BatchPaymentSubmissionForm(PaymentRegistrationForm):
+    credit_amount = forms.DecimalField(
+        label="Saldo a favor a aplicar",
+        required=False,
+        min_value=Decimal("0.00"),
+        decimal_places=2,
+        max_digits=12,
+        initial=Decimal("0.00"),
+    )
+
     def __init__(
         self,
         *args: Any,
         required_total: Decimal,
         currency: str,
+        available_credit: Decimal = Decimal("0.00"),
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.required_total = required_total
+        self.available_credit = available_credit
         amount_field = self.fields["amount"]
         amount_field.initial = required_total
         amount_field.widget.attrs["min"] = f"{required_total:.2f}"
         self.fields["currency"].initial = currency
         self.fields["currency"].widget.attrs["readonly"] = True
-        self.fields["receipt"].required = True
+        self.fields["credit_amount"].widget.attrs["max"] = f"{available_credit:.2f}"
+        self.fields["credit_amount"].help_text = (
+            f"Disponible: {available_credit:.2f} {currency}."
+        )
+        self.fields["receipt"].required = False
         self.fields["receipt"].help_text = (
-            "Adjunta un comprobante que cubra el total del grupo."
+            "Obligatorio cuando una parte del total se paga fuera del saldo a favor."
         )
 
     def clean_amount(self) -> Decimal:
@@ -378,6 +394,36 @@ class BatchPaymentSubmissionForm(PaymentRegistrationForm):
         if currency != self.fields["currency"].initial:
             raise forms.ValidationError("La moneda debe coincidir con el grupo.")
         return currency
+
+    def clean(self) -> dict[str, Any]:
+        cleaned_data = super().clean() or {}
+        amount = cleaned_data.get("amount")
+        credit_amount = cleaned_data.get("credit_amount") or Decimal("0.00")
+        cleaned_data["credit_amount"] = credit_amount
+        if amount is None:
+            return cleaned_data
+        maximum_credit = min(amount, self.required_total, self.available_credit)
+        if credit_amount > maximum_credit:
+            self.add_error(
+                "credit_amount",
+                f"Sólo hay {self.available_credit:.2f} disponibles para aplicar.",
+            )
+            return cleaned_data
+        cash_amount = amount - credit_amount
+        if cash_amount > Decimal("0.00"):
+            if not cleaned_data.get("receipt"):
+                self.add_error("receipt", "El comprobante es obligatorio.")
+            if cleaned_data.get("method") == PaymentMethod.CREDIT:
+                self.add_error(
+                    "method",
+                    "Selecciona el método usado para pagar el importe restante.",
+                )
+        else:
+            cleaned_data["method"] = PaymentMethod.CREDIT
+            cleaned_data["reference"] = (
+                cleaned_data.get("reference") or "Aplicación de saldo a favor"
+            )
+        return cleaned_data
 
 
 class PaymentRejectForm(forms.Form):

@@ -1,0 +1,1583 @@
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index c66d21d..93c7aaa 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -269,6 +269,16 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
+         ).distinct()
+     if model_label == "finance.PaymentAllocation":
+         return queryset.filter(reservation__room__clinic__in=clinics)
++    if model_label == "finance.CancellationCase":
++        return queryset.filter(batch__room__clinic__in=clinics)
++    if model_label == "finance.CancellationItem":
++        return queryset.filter(reservation__room__clinic__in=clinics)
++    if model_label == "finance.TenantCredit":
++        return queryset.filter(cancellation_case__batch__room__clinic__in=clinics)
++    if model_label == "finance.TenantCreditApplication":
++        return queryset.filter(
++            credit__cancellation_case__batch__room__clinic__in=clinics
++        )
+     if model_label == "finance.Settlement":
+         return queryset.filter(room__clinic__in=clinics)
+     if model_label == "vault.DocumentAsset":
+@@ -343,6 +353,14 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
+         ).distinct()
+     if model_label == "finance.PaymentAllocation":
+         return queryset.filter(reservation__room__owner=owner)
++    if model_label == "finance.CancellationCase":
++        return queryset.filter(batch__room__owner=owner)
++    if model_label == "finance.CancellationItem":
++        return queryset.filter(reservation__room__owner=owner)
++    if model_label == "finance.TenantCredit":
++        return queryset.filter(cancellation_case__batch__room__owner=owner)
++    if model_label == "finance.TenantCreditApplication":
++        return queryset.filter(credit__cancellation_case__batch__room__owner=owner)
+     if model_label == "vault.DocumentAsset":
+         return queryset.filter(
+             Q(owner=owner)
+@@ -408,6 +426,12 @@ def _scope_tenant_doctor_queryset(
+         return queryset.filter(tenant_doctor=tenant_doctor)
+     if model_label == "finance.PaymentAllocation":
+         return queryset.filter(reservation__tenant_doctor=tenant_doctor)
++    if model_label in {"finance.CancellationCase", "finance.TenantCredit"}:
++        return queryset.filter(tenant_doctor=tenant_doctor)
++    if model_label == "finance.CancellationItem":
++        return queryset.filter(reservation__tenant_doctor=tenant_doctor)
++    if model_label == "finance.TenantCreditApplication":
++        return queryset.filter(credit__tenant_doctor=tenant_doctor)
+     if model_label == "vault.DocumentAsset":
+         return queryset.filter(
+             Q(tenant_doctor=tenant_doctor)
+@@ -477,6 +501,16 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
+         ).distinct()
+     if model_label == "finance.PaymentAllocation":
+         return queryset.filter(reservation__room__owner__in=owners)
++    if model_label == "finance.CancellationCase":
++        return queryset.filter(batch__room__owner__in=owners)
++    if model_label == "finance.CancellationItem":
++        return queryset.filter(reservation__room__owner__in=owners)
++    if model_label == "finance.TenantCredit":
++        return queryset.filter(cancellation_case__batch__room__owner__in=owners)
++    if model_label == "finance.TenantCreditApplication":
++        return queryset.filter(
++            credit__cancellation_case__batch__room__owner__in=owners
++        )
+     if model_label == "finance.Settlement":
+         return queryset.filter(owner__in=owners)
+     if model_label == "vault.DocumentAsset":
+diff --git a/apps/finance/admin.py b/apps/finance/admin.py
+index 954947c..4b83e0a 100644
+--- a/apps/finance/admin.py
++++ b/apps/finance/admin.py
+@@ -3,12 +3,16 @@
+ from django.contrib import admin
+ 
+ from apps.finance.models import (
++    CancellationCase,
++    CancellationItem,
+     Payment,
+     PaymentAllocation,
+     RateRule,
+     RoomRateDiscount,
+     Settlement,
+     Statement,
++    TenantCredit,
++    TenantCreditApplication,
+     TenantDoctorDiscount,
+ )
+ 
+@@ -119,6 +123,51 @@ class PaymentAllocationAdmin(admin.ModelAdmin):
+     )
+ 
+ 
++@admin.register(CancellationCase)
++class CancellationCaseAdmin(admin.ModelAdmin):
++    list_display = (
++        "batch",
++        "tenant_doctor",
++        "status",
++        "resolution_method",
++        "penalty_amount",
++        "refundable_amount",
++        "requested_at",
++    )
++    list_filter = ("status", "resolution_method", "currency")
++    search_fields = ("batch__reference", "tenant_doctor__display_name")
++
++
++@admin.register(CancellationItem)
++class CancellationItemAdmin(admin.ModelAdmin):
++    list_display = (
++        "reservation",
++        "days_before",
++        "penalty_percentage",
++        "paid_amount",
++        "refundable_amount",
++    )
++
++
++@admin.register(TenantCredit)
++class TenantCreditAdmin(admin.ModelAdmin):
++    list_display = (
++        "tenant_doctor",
++        "original_amount",
++        "remaining_amount",
++        "currency",
++        "status",
++    )
++    list_filter = ("status", "currency")
++    search_fields = ("tenant_doctor__display_name", "tenant_doctor__user__email")
++
++
++@admin.register(TenantCreditApplication)
++class TenantCreditApplicationAdmin(admin.ModelAdmin):
++    list_display = ("credit", "payment", "amount", "status")
++    list_filter = ("status",)
++
++
+ @admin.register(Settlement)
+ class SettlementAdmin(admin.ModelAdmin):
+     list_display = (
+diff --git a/apps/finance/forms.py b/apps/finance/forms.py
+index b3128f1..fd4b0ef 100644
+--- a/apps/finance/forms.py
++++ b/apps/finance/forms.py
+@@ -21,6 +21,7 @@ from apps.core.form_utils import (
+ from apps.core.permissions import scope_queryset_for_user
+ from apps.finance.models import (
+     Payment,
++    PaymentMethod,
+     PaymentStatus,
+     RateRule,
+     RoomRateDiscount,
+@@ -346,23 +347,38 @@ class PaymentRegistrationForm(BootstrapModelForm):
+ 
+ 
+ class BatchPaymentSubmissionForm(PaymentRegistrationForm):
++    credit_amount = forms.DecimalField(
++        label="Saldo a favor a aplicar",
++        required=False,
++        min_value=Decimal("0.00"),
++        decimal_places=2,
++        max_digits=12,
++        initial=Decimal("0.00"),
++    )
++
+     def __init__(
+         self,
+         *args: Any,
+         required_total: Decimal,
+         currency: str,
++        available_credit: Decimal = Decimal("0.00"),
+         **kwargs: Any,
+     ) -> None:
+         super().__init__(*args, **kwargs)
+         self.required_total = required_total
++        self.available_credit = available_credit
+         amount_field = self.fields["amount"]
+         amount_field.initial = required_total
+         amount_field.widget.attrs["min"] = f"{required_total:.2f}"
+         self.fields["currency"].initial = currency
+         self.fields["currency"].widget.attrs["readonly"] = True
+-        self.fields["receipt"].required = True
++        self.fields["credit_amount"].widget.attrs["max"] = f"{available_credit:.2f}"
++        self.fields["credit_amount"].help_text = (
++            f"Disponible: {available_credit:.2f} {currency}."
++        )
++        self.fields["receipt"].required = False
+         self.fields["receipt"].help_text = (
+-            "Adjunta un comprobante que cubra el total del grupo."
++            "Obligatorio cuando una parte del total se paga fuera del saldo a favor."
+         )
+ 
+     def clean_amount(self) -> Decimal:
+@@ -379,6 +395,36 @@ class BatchPaymentSubmissionForm(PaymentRegistrationForm):
+             raise forms.ValidationError("La moneda debe coincidir con el grupo.")
+         return currency
+ 
++    def clean(self) -> dict[str, Any]:
++        cleaned_data = super().clean() or {}
++        amount = cleaned_data.get("amount")
++        credit_amount = cleaned_data.get("credit_amount") or Decimal("0.00")
++        cleaned_data["credit_amount"] = credit_amount
++        if amount is None:
++            return cleaned_data
++        maximum_credit = min(amount, self.required_total, self.available_credit)
++        if credit_amount > maximum_credit:
++            self.add_error(
++                "credit_amount",
++                f"Sólo hay {self.available_credit:.2f} disponibles para aplicar.",
++            )
++            return cleaned_data
++        cash_amount = amount - credit_amount
++        if cash_amount > Decimal("0.00"):
++            if not cleaned_data.get("receipt"):
++                self.add_error("receipt", "El comprobante es obligatorio.")
++            if cleaned_data.get("method") == PaymentMethod.CREDIT:
++                self.add_error(
++                    "method",
++                    "Selecciona el método usado para pagar el importe restante.",
++                )
++        else:
++            cleaned_data["method"] = PaymentMethod.CREDIT
++            cleaned_data["reference"] = (
++                cleaned_data.get("reference") or "Aplicación de saldo a favor"
++            )
++        return cleaned_data
++
+ 
+ class PaymentRejectForm(forms.Form):
+     reason = forms.CharField(
+diff --git a/apps/finance/models.py b/apps/finance/models.py
+index 2d70a7e..75cbda5 100644
+--- a/apps/finance/models.py
++++ b/apps/finance/models.py
+@@ -352,6 +352,7 @@ class PaymentMethod(models.TextChoices):
+     CASH = "efectivo", _("Efectivo")
+     CARD = "tarjeta", _("Tarjeta")
+     DEPOSIT = "depósito", _("Depósito")
++    CREDIT = "saldo_favor", _("Saldo a favor")
+     OTHER = "otro", _("Otro")
+ 
+ 
+@@ -606,6 +607,393 @@ class PaymentAllocation(BaseModel):
+         super().save(*args, **kwargs)
+ 
+ 
++class CancellationCaseStatus(models.TextChoices):
++    PENDING = "pendiente", _("Pendiente de resolución")
++    RESOLVED = "resuelta", _("Resuelta")
++    NO_REFUND = "sin_devolucion", _("Sin devolución")
++
++
++class CancellationResolutionMethod(models.TextChoices):
++    NOT_APPLICABLE = "no_aplica", _("No aplica")
++    MANUAL_REFUND = "devolucion_manual", _("Devolución manual")
++    FUTURE_CREDIT = "saldo_favor", _("Saldo a favor")
++
++
++class CancellationCase(BaseModel):
++    batch = models.ForeignKey(
++        "scheduling.ReservationBatch",
++        on_delete=models.PROTECT,
++        related_name="cancellation_cases",
++        verbose_name=_("grupo de reservaciones"),
++        blank=True,
++        null=True,
++    )
++    tenant_doctor = models.ForeignKey(
++        "catalog.TenantDoctorProfile",
++        on_delete=models.PROTECT,
++        related_name="cancellation_cases",
++        verbose_name=_("médico arrendatario"),
++    )
++    requested_by = models.ForeignKey(
++        settings.AUTH_USER_MODEL,
++        on_delete=models.SET_NULL,
++        related_name="requested_cancellation_cases",
++        verbose_name=_("solicitada por"),
++        blank=True,
++        null=True,
++    )
++    managed_by = models.ForeignKey(
++        settings.AUTH_USER_MODEL,
++        on_delete=models.SET_NULL,
++        related_name="managed_cancellation_cases",
++        verbose_name=_("gestionada por"),
++        blank=True,
++        null=True,
++    )
++    status = models.CharField(
++        _("estado"),
++        max_length=24,
++        choices=CancellationCaseStatus.choices,
++        default=CancellationCaseStatus.PENDING,
++    )
++    resolution_method = models.CharField(
++        _("forma de resolución"),
++        max_length=24,
++        choices=CancellationResolutionMethod.choices,
++        default=CancellationResolutionMethod.NOT_APPLICABLE,
++    )
++    reason = models.TextField(_("motivo"))
++    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
++    total_paid = models.DecimalField(
++        _("total pagado"), max_digits=12, decimal_places=2, default=0
++    )
++    penalty_amount = models.DecimalField(
++        _("penalización"), max_digits=12, decimal_places=2, default=0
++    )
++    refundable_amount = models.DecimalField(
++        _("importe a devolver"), max_digits=12, decimal_places=2, default=0
++    )
++    refund_reference = models.CharField(
++        _("referencia de devolución"), max_length=160, blank=True
++    )
++    refund_date = models.DateField(_("fecha de devolución"), blank=True, null=True)
++    refund_receipt = models.FileField(
++        _("comprobante de devolución"),
++        upload_to="refund-receipts/",
++        blank=True,
++        null=True,
++    )
++    requested_at = models.DateTimeField(_("solicitada en"), default=timezone.now)
++    resolved_at = models.DateTimeField(_("resuelta en"), blank=True, null=True)
++    notes = models.TextField(_("notas"), blank=True)
++
++    class Meta:
++        verbose_name = _("expediente de cancelación")
++        verbose_name_plural = _("expedientes de cancelación")
++        ordering = ("-requested_at",)
++        constraints = [
++            models.CheckConstraint(
++                condition=models.Q(total_paid__gte=0),
++                name="finance_cancellation_total_paid_nonnegative",
++            ),
++            models.CheckConstraint(
++                condition=models.Q(penalty_amount__gte=0),
++                name="finance_cancellation_penalty_nonnegative",
++            ),
++            models.CheckConstraint(
++                condition=models.Q(refundable_amount__gte=0),
++                name="finance_cancellation_refundable_nonnegative",
++            ),
++        ]
++
++    def __str__(self) -> str:
++        reference = self.batch.reference if self.batch else str(self.pk)
++        return f"Cancelación {reference} - {self.get_status_display()}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if not self.reason.strip():
++            errors["reason"] = _("El motivo es obligatorio.")
++        if self.total_paid < Decimal("0.00"):
++            errors["total_paid"] = _("El total pagado no puede ser negativo.")
++        if self.penalty_amount < Decimal("0.00"):
++            errors["penalty_amount"] = _("La penalización no puede ser negativa.")
++        if self.refundable_amount < Decimal("0.00"):
++            errors["refundable_amount"] = _(
++                "El importe a devolver no puede ser negativo."
++            )
++        if self.penalty_amount + self.refundable_amount != self.total_paid:
++            errors["refundable_amount"] = _(
++                "La penalización y la devolución deben sumar el total pagado."
++            )
++        if self.status == CancellationCaseStatus.RESOLVED:
++            if self.resolution_method == CancellationResolutionMethod.NOT_APPLICABLE:
++                errors["resolution_method"] = _(
++                    "Selecciona la forma en que se resolvió la cancelación."
++                )
++            if self.resolved_at is None:
++                errors["resolved_at"] = _("Registra la fecha de resolución.")
++        if (
++            self.resolution_method == CancellationResolutionMethod.MANUAL_REFUND
++            and self.status == CancellationCaseStatus.RESOLVED
++        ):
++            if not self.refund_reference.strip():
++                errors["refund_reference"] = _(
++                    "La referencia de devolución es obligatoria."
++                )
++            if not self.refund_receipt:
++                errors["refund_receipt"] = _(
++                    "El comprobante de devolución es obligatorio."
++                )
++            if self.refund_date is None:
++                errors["refund_date"] = _(
++                    "La fecha de devolución es obligatoria."
++                )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
++class CancellationItem(BaseModel):
++    cancellation_case = models.ForeignKey(
++        CancellationCase,
++        on_delete=models.PROTECT,
++        related_name="items",
++        verbose_name=_("expediente"),
++    )
++    reservation = models.OneToOneField(
++        "scheduling.Reservation",
++        on_delete=models.PROTECT,
++        related_name="cancellation_item",
++        verbose_name=_("reservación"),
++    )
++    cancellation_policy = models.ForeignKey(
++        "billing.CancellationPolicy",
++        on_delete=models.PROTECT,
++        related_name="cancellation_items",
++        verbose_name=_("política aplicada"),
++        blank=True,
++        null=True,
++    )
++    policy_snapshot = models.JSONField(
++        _("snapshot de política"),
++        default=dict,
++        blank=True,
++    )
++    days_before = models.PositiveSmallIntegerField(_("días naturales antes"))
++    penalty_percentage = models.DecimalField(
++        _("porcentaje de penalización"), max_digits=4, decimal_places=1, default=0
++    )
++    paid_amount = models.DecimalField(
++        _("importe pagado"), max_digits=12, decimal_places=2, default=0
++    )
++    penalty_amount = models.DecimalField(
++        _("penalización"), max_digits=12, decimal_places=2, default=0
++    )
++    refundable_amount = models.DecimalField(
++        _("importe a devolver"), max_digits=12, decimal_places=2, default=0
++    )
++    cancelled_at = models.DateTimeField(_("cancelada en"), default=timezone.now)
++
++    class Meta:
++        verbose_name = _("partida de cancelación")
++        verbose_name_plural = _("partidas de cancelación")
++        ordering = ("reservation__date", "reservation__start_time")
++        constraints = [
++            models.CheckConstraint(
++                condition=models.Q(penalty_percentage__gte=0)
++                & models.Q(penalty_percentage__lte=100),
++                name="finance_cancellation_item_percentage_range",
++            ),
++            models.CheckConstraint(
++                condition=models.Q(paid_amount__gte=0)
++                & models.Q(penalty_amount__gte=0)
++                & models.Q(refundable_amount__gte=0),
++                name="finance_cancellation_item_amounts_nonnegative",
++            ),
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.reservation} - devolución {self.refundable_amount}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        percentage_out_of_range = self.penalty_percentage < Decimal(
++            "0.0"
++        ) or self.penalty_percentage > Decimal("100.0")
++        if percentage_out_of_range:
++            errors["penalty_percentage"] = _(
++                "La penalización debe estar entre 0% y 100%."
++            )
++        if self.penalty_amount + self.refundable_amount != self.paid_amount:
++            errors["refundable_amount"] = _(
++                "La penalización y la devolución deben sumar el importe pagado."
++            )
++        if self.reservation_id and self.cancellation_case_id:
++            case = self.cancellation_case
++            if self.reservation.tenant_doctor_id != case.tenant_doctor_id:
++                errors["reservation"] = _(
++                    "La reservación no corresponde al médico del expediente."
++                )
++            if case.batch_id and self.reservation.batch_id != case.batch_id:
++                errors["reservation"] = _(
++                    "La reservación no pertenece al grupo del expediente."
++                )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
++class TenantCreditStatus(models.TextChoices):
++    ACTIVE = "activo", _("Activo")
++    EXHAUSTED = "agotado", _("Agotado")
++    CANCELLED = "cancelado", _("Cancelado")
++
++
++class TenantCredit(BaseModel):
++    cancellation_case = models.OneToOneField(
++        CancellationCase,
++        on_delete=models.PROTECT,
++        related_name="tenant_credit",
++        verbose_name=_("expediente de cancelación"),
++    )
++    tenant_doctor = models.ForeignKey(
++        "catalog.TenantDoctorProfile",
++        on_delete=models.PROTECT,
++        related_name="credits",
++        verbose_name=_("médico arrendatario"),
++    )
++    original_amount = models.DecimalField(
++        _("importe original"), max_digits=12, decimal_places=2
++    )
++    remaining_amount = models.DecimalField(
++        _("saldo disponible"), max_digits=12, decimal_places=2
++    )
++    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
++    status = models.CharField(
++        _("estado"),
++        max_length=16,
++        choices=TenantCreditStatus.choices,
++        default=TenantCreditStatus.ACTIVE,
++    )
++
++    class Meta:
++        verbose_name = _("saldo a favor")
++        verbose_name_plural = _("saldos a favor")
++        ordering = ("created_at",)
++        constraints = [
++            models.CheckConstraint(
++                condition=models.Q(original_amount__gt=0),
++                name="finance_tenant_credit_original_positive",
++            ),
++            models.CheckConstraint(
++                condition=models.Q(remaining_amount__gte=0),
++                name="finance_tenant_credit_remaining_nonnegative",
++            ),
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.tenant_doctor}: {self.remaining_amount} {self.currency}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if self.original_amount <= Decimal("0.00"):
++            errors["original_amount"] = _("El importe original debe ser positivo.")
++        if self.remaining_amount < Decimal("0.00"):
++            errors["remaining_amount"] = _("El saldo no puede ser negativo.")
++        if self.remaining_amount > self.original_amount:
++            errors["remaining_amount"] = _(
++                "El saldo no puede exceder el importe original."
++            )
++        if self.cancellation_case_id and self.tenant_doctor_id:
++            if self.cancellation_case.tenant_doctor_id != self.tenant_doctor_id:
++                errors["tenant_doctor"] = _(
++                    "El médico no corresponde al expediente de cancelación."
++                )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
++class TenantCreditApplicationStatus(models.TextChoices):
++    RESERVED = "reservado", _("Reservado")
++    APPLIED = "aplicado", _("Aplicado")
++    RELEASED = "liberado", _("Liberado")
++
++
++class TenantCreditApplication(BaseModel):
++    credit = models.ForeignKey(
++        TenantCredit,
++        on_delete=models.PROTECT,
++        related_name="applications",
++        verbose_name=_("saldo a favor"),
++    )
++    payment = models.ForeignKey(
++        Payment,
++        on_delete=models.PROTECT,
++        related_name="credit_applications",
++        verbose_name=_("pago"),
++    )
++    amount = models.DecimalField(_("importe aplicado"), max_digits=12, decimal_places=2)
++    status = models.CharField(
++        _("estado"),
++        max_length=16,
++        choices=TenantCreditApplicationStatus.choices,
++        default=TenantCreditApplicationStatus.RESERVED,
++    )
++    applied_at = models.DateTimeField(_("aplicado en"), blank=True, null=True)
++    released_at = models.DateTimeField(_("liberado en"), blank=True, null=True)
++
++    class Meta:
++        verbose_name = _("aplicación de saldo a favor")
++        verbose_name_plural = _("aplicaciones de saldo a favor")
++        ordering = ("created_at",)
++        constraints = [
++            models.UniqueConstraint(
++                fields=("credit", "payment"),
++                name="finance_credit_application_unique_payment",
++            ),
++            models.CheckConstraint(
++                condition=models.Q(amount__gt=0),
++                name="finance_credit_application_amount_positive",
++            ),
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.credit} -> {self.payment}: {self.amount}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if self.amount <= Decimal("0.00"):
++            errors["amount"] = _("El importe aplicado debe ser positivo.")
++        if self.credit_id and self.payment_id:
++            if self.credit.tenant_doctor_id != self.payment.tenant_doctor_id:
++                errors["payment"] = _(
++                    "El pago y el saldo deben pertenecer al mismo médico."
++                )
++            if self.credit.currency != self.payment.currency:
++                errors["payment"] = _("La moneda del saldo debe coincidir con el pago.")
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
+ class SettlementStatus(models.TextChoices):
+     PENDING = "pendiente", _("Pendiente")
+     CALCULATED = "calculada", _("Calculada")
+diff --git a/apps/finance/services/payment_service.py b/apps/finance/services/payment_service.py
+index 9511a5f..c516b59 100644
+--- a/apps/finance/services/payment_service.py
++++ b/apps/finance/services/payment_service.py
+@@ -20,6 +20,10 @@ from apps.finance.models import (
+     PaymentStatus,
+     Statement,
+     StatementStatus,
++    TenantCredit,
++    TenantCreditApplication,
++    TenantCreditApplicationStatus,
++    TenantCreditStatus,
+ )
+ from apps.finance.services.settlement_service import generate_settlement_for_reservation
+ from apps.scheduling.models import (
+@@ -67,6 +71,11 @@ def register_payment(
+ ) -> Payment:
+     """Preserve the legacy one-reservation registration flow."""
+ 
++    if method == PaymentMethod.CREDIT:
++        raise ValidationError(
++            {"method": "El saldo a favor sólo puede aplicarse a un grupo."}
++        )
++
+     statement = _current_statement_for_reservation(reservation)
+     payment = Payment(
+         reservation=reservation,
+@@ -109,6 +118,7 @@ def submit_batch_payment(
+     method: str,
+     reference: str,
+     receipt: Any,
++    credit_amount: Decimal = Decimal("0.00"),
+     payment_date: date | None = None,
+     currency: str = "",
+     notes: str = "",
+@@ -116,6 +126,8 @@ def submit_batch_payment(
+ ) -> Payment:
+     """Submit one receipt and allocate it over every payable occurrence."""
+ 
++    credit_amount = credit_amount or Decimal("0.00")
++
+     locked_batch = (
+         ReservationBatch.objects.select_for_update()
+         .select_related("room", "room__owner", "tenant_doctor", "tenant_doctor__user")
+@@ -134,8 +146,6 @@ def submit_batch_payment(
+         raise ValidationError(
+             {"batch": "La fecha límite para enviar el comprobante ya venció."}
+         )
+-    if not receipt:
+-        raise ValidationError({"receipt": "El comprobante es obligatorio."})
+     if Payment.objects.filter(
+         batch=locked_batch,
+         status__in=(PaymentStatus.REGISTERED, PaymentStatus.VALIDATED),
+@@ -179,6 +189,21 @@ def submit_batch_payment(
+                 )
+             }
+         )
++    maximum_credit = min(amount, required_total)
++    if credit_amount < Decimal("0.00") or credit_amount > maximum_credit:
++        raise ValidationError(
++            {"credit_amount": "El saldo aplicado no es válido para este pago."}
++        )
++    cash_amount = amount - credit_amount
++    if cash_amount > Decimal("0.00") and not receipt:
++        raise ValidationError({"receipt": "El comprobante es obligatorio."})
++    if cash_amount == Decimal("0.00"):
++        method = PaymentMethod.CREDIT
++        reference = reference.strip() or f"SALDO-{locked_batch.reference}"
++    elif method == PaymentMethod.CREDIT:
++        raise ValidationError(
++            {"method": "Selecciona el método usado para pagar el importe restante."}
++        )
+     requested_currency = currency or locked_batch.currency
+     if requested_currency != locked_batch.currency:
+         raise ValidationError({"currency": "La moneda debe coincidir con el grupo."})
+@@ -200,12 +225,18 @@ def submit_batch_payment(
+         method=method,
+         reference=reference,
+         payment_date=payment_date or timezone.localdate(),
+-        receipt=receipt,
+         status=PaymentStatus.REGISTERED,
+         notes=notes,
+     )
++    if receipt:
++        payment.receipt = receipt
+     _set_audit_users(payment, actor, created=True)
+     payment.save()
++    _reserve_tenant_credit(
++        payment=payment,
++        amount=credit_amount,
++        actor=actor,
++    )
+ 
+     for reservation in payable:
+         statement = statements[reservation.pk]
+@@ -367,6 +398,7 @@ def _validate_batch_payment(payment: Payment, *, actor: Model | None) -> None:
+         payment.validated_by = cast(Any, actor)
+     _set_audit_users(payment, actor)
+     payment.save()
++    _apply_reserved_credit(payment, actor=actor)
+     record_event(
+         event_type="payment.validated",
+         object_label=str(payment),
+@@ -424,6 +456,7 @@ def reject_payment(
+     locked_payment.rejected_reason = reason
+     _set_audit_users(locked_payment, actor)
+     locked_payment.save()
++    _release_reserved_credit(locked_payment, actor=actor)
+     _reset_batch_after_unsuccessful_submission(locked_payment, actor=actor)
+ 
+     payload = {**_payment_payload(locked_payment, actor=actor), "reason": reason}
+@@ -464,6 +497,7 @@ def cancel_payment(
+     locked_payment.status = PaymentStatus.CANCELLED
+     _set_audit_users(locked_payment, actor)
+     locked_payment.save()
++    _release_reserved_credit(locked_payment, actor=actor)
+     _reset_batch_after_unsuccessful_submission(locked_payment, actor=actor)
+ 
+     record_event(
+@@ -684,6 +718,104 @@ def _create_allocation(
+     return allocation
+ 
+ 
++def _reserve_tenant_credit(
++    *,
++    payment: Payment,
++    amount: Decimal,
++    actor: Model | None,
++) -> None:
++    remaining = amount
++    if remaining <= Decimal("0.00"):
++        return
++    credits = TenantCredit.objects.select_for_update().filter(
++        tenant_doctor=payment.tenant_doctor,
++        currency=payment.currency,
++        status=TenantCreditStatus.ACTIVE,
++        remaining_amount__gt=0,
++        is_deleted=False,
++    ).order_by("created_at", "pk")
++    for credit in credits:
++        applied_amount = min(credit.remaining_amount, remaining)
++        credit.remaining_amount -= applied_amount
++        credit.status = (
++            TenantCreditStatus.EXHAUSTED
++            if credit.remaining_amount == Decimal("0.00")
++            else TenantCreditStatus.ACTIVE
++        )
++        _set_audit_users(credit, actor)
++        credit.save()
++        application = TenantCreditApplication(
++            credit=credit,
++            payment=payment,
++            amount=applied_amount,
++            status=TenantCreditApplicationStatus.RESERVED,
++        )
++        _set_audit_users(application, actor, created=True)
++        application.save()
++        record_event(
++            event_type="tenant_credit.reserved",
++            object_label=str(application),
++            actor=actor,
++            payload=_credit_application_payload(application, actor=actor),
++        )
++        remaining -= applied_amount
++        if remaining == Decimal("0.00"):
++            break
++    if remaining > Decimal("0.00"):
++        raise ValidationError(
++            {"credit_amount": "El saldo a favor disponible es insuficiente."}
++        )
++
++
++def _apply_reserved_credit(payment: Payment, *, actor: Model | None) -> None:
++    applications = TenantCreditApplication.objects.select_for_update().filter(
++        payment=payment,
++        status=TenantCreditApplicationStatus.RESERVED,
++        is_deleted=False,
++    )
++    now = timezone.now()
++    for application in applications:
++        application.status = TenantCreditApplicationStatus.APPLIED
++        application.applied_at = now
++        _set_audit_users(application, actor)
++        application.save()
++        record_event(
++            event_type="tenant_credit.applied",
++            object_label=str(application),
++            actor=actor,
++            payload=_credit_application_payload(application, actor=actor),
++        )
++
++
++def _release_reserved_credit(payment: Payment, *, actor: Model | None) -> None:
++    applications = (
++        TenantCreditApplication.objects.select_for_update()
++        .filter(
++            payment=payment,
++            status=TenantCreditApplicationStatus.RESERVED,
++            is_deleted=False,
++        )
++        .select_related("credit")
++    )
++    now = timezone.now()
++    for application in applications:
++        credit = TenantCredit.objects.select_for_update().get(pk=application.credit_id)
++        credit.remaining_amount += application.amount
++        credit.status = TenantCreditStatus.ACTIVE
++        _set_audit_users(credit, actor)
++        credit.save()
++        application.status = TenantCreditApplicationStatus.RELEASED
++        application.released_at = now
++        _set_audit_users(application, actor)
++        application.save()
++        record_event(
++            event_type="tenant_credit.released",
++            object_label=str(application),
++            actor=actor,
++            payload=_credit_application_payload(application, actor=actor),
++        )
++
++
+ def _set_audit_users(
+     instance: Any,
+     actor: Model | None,
+@@ -744,6 +876,13 @@ def _send_batch_confirmation_email(
+ 
+ 
+ def _payment_payload(payment: Payment, *, actor: Model | None) -> dict[str, str]:
++    credit_amount = payment.credit_applications.filter(
++        status__in=(
++            TenantCreditApplicationStatus.RESERVED,
++            TenantCreditApplicationStatus.APPLIED,
++        ),
++        is_deleted=False,
++    ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+     payload = {
+         "model": payment._meta.label,
+         "id": str(payment.pk),
+@@ -757,6 +896,7 @@ def _payment_payload(payment: Payment, *, actor: Model | None) -> dict[str, str]
+         "method": payment.method,
+         "reference": payment.reference,
+         "status": payment.status,
++        "credit_amount": str(credit_amount),
+         "actor_id": str(actor.pk) if actor is not None else "",
+     }
+     if payment.reservation is not None:
+@@ -781,3 +921,20 @@ def _allocation_payload(
+         "level": "financiero",
+         "actor_id": str(actor.pk) if actor is not None else "",
+     }
++
++
++def _credit_application_payload(
++    application: TenantCreditApplication,
++    *,
++    actor: Model | None,
++) -> dict[str, str]:
++    return {
++        "model": application._meta.label,
++        "id": str(application.pk),
++        "credit_id": str(application.credit_id),
++        "payment_id": str(application.payment_id),
++        "amount": str(application.amount),
++        "status": application.status,
++        "level": "financiero",
++        "actor_id": str(actor.pk) if actor is not None else "",
++    }
+diff --git a/apps/finance/views.py b/apps/finance/views.py
+index 57aa58d..aa50f71 100644
+--- a/apps/finance/views.py
++++ b/apps/finance/views.py
+@@ -44,6 +44,7 @@ from apps.finance.models import (
+     Settlement,
+     TenantDoctorDiscount,
+ )
++from apps.finance.services.cancellation_service import available_credit_for_tenant
+ from apps.finance.services.payment_service import (
+     cancel_payment,
+     get_payment_summary_for_batch,
+@@ -628,6 +629,8 @@ class PaymentDetailView(LoginRequiredMixin, DetailView):
+                 "allocations",
+                 "allocations__reservation",
+                 "allocations__statement",
++                "credit_applications",
++                "credit_applications__credit",
+             )
+         )
+         return scope_queryset_for_user(queryset, self.request.user)
+@@ -651,6 +654,9 @@ class PaymentDetailView(LoginRequiredMixin, DetailView):
+             )
+             context["payment_room"] = payment.reservation.room
+         context["can_review_payment"] = _user_can_review_payments(self.request.user)
++        context["credit_applications"] = payment.credit_applications.filter(
++            is_deleted=False
++        ).select_related("credit")
+         context["related_documents"] = get_documents_for_object(payment)
+         context["document_upload_field"] = get_document_field_for_object(payment)
+         return context
+@@ -759,6 +765,10 @@ class BatchPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
+         summary = get_payment_summary_for_batch(batch)
+         kwargs["required_total"] = summary.total_to_pay
+         kwargs["currency"] = summary.currency
++        kwargs["available_credit"] = available_credit_for_tenant(
++            tenant_doctor=batch.tenant_doctor,
++            currency=summary.currency,
++        )
+         return kwargs
+ 
+     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+@@ -767,6 +777,10 @@ class BatchPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
+         context["page_title"] = "Enviar comprobante de pago"
+         context["reservation_batch"] = batch
+         context["payment_summary"] = get_payment_summary_for_batch(batch)
++        context["available_credit"] = available_credit_for_tenant(
++            tenant_doctor=batch.tenant_doctor,
++            currency=batch.currency,
++        )
+         return context
+ 
+     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+@@ -786,6 +800,7 @@ class BatchPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
+                 reference=form.cleaned_data["reference"],
+                 payment_date=form.cleaned_data["payment_date"],
+                 receipt=form.cleaned_data["receipt"],
++                credit_amount=form.cleaned_data["credit_amount"],
+                 notes=form.cleaned_data["notes"],
+                 actor=cast(Model, self.request.user),
+             )
+diff --git a/apps/identity/screen_registry.py b/apps/identity/screen_registry.py
+index b1c1774..c87d26d 100644
+--- a/apps/identity/screen_registry.py
++++ b/apps/identity/screen_registry.py
+@@ -204,6 +204,9 @@ EDIT_ROUTE_NAMES = {
+     "rate_deactivate",
+     "reservation_request",
+     "reservation_cancel",
++    "reservation_batch_cancel",
++    "reservation_cancellation_refund",
++    "reservation_cancellation_credit",
+     "reservation_confirm",
+     "room_rate_discount_create",
+     "room_rate_discount_toggle",
+diff --git a/apps/scheduling/forms.py b/apps/scheduling/forms.py
+index 81c1735..d3f92c5 100644
+--- a/apps/scheduling/forms.py
++++ b/apps/scheduling/forms.py
+@@ -33,9 +33,12 @@ from apps.finance.services.pricing_engine import (
+     calculate_block_price,
+ )
+ from apps.scheduling.models import (
++    ACTIVE_RESERVATION_STATUSES,
+     AvailabilityException,
+     AvailabilityRule,
+     Reservation,
++    ReservationBatch,
++    ReservationBatchType,
+     ReservationPaymentPolicy,
+     Weekday,
+ )
+@@ -1197,3 +1200,67 @@ class ReservationCancelForm(forms.Form):
+         label="Motivo de cancelación",
+         widget=forms.Textarea(attrs={"rows": 3, "class": "form-control"}),
+     )
++
++
++class ReservationBatchCancelForm(forms.Form):
++    reservations = forms.ModelMultipleChoiceField(
++        label="Fechas a cancelar",
++        queryset=Reservation.objects.none(),
++        widget=forms.CheckboxSelectMultiple,
++    )
++    reason = forms.CharField(
++        label="Motivo de cancelación",
++        widget=forms.Textarea(attrs={"rows": 3, "class": "form-control"}),
++    )
++
++    def __init__(
++        self,
++        *args: Any,
++        batch: ReservationBatch,
++        **kwargs: Any,
++    ) -> None:
++        super().__init__(*args, **kwargs)
++        self.batch = batch
++        queryset = batch.reservations.filter(
++            status__in=ACTIVE_RESERVATION_STATUSES,
++            is_deleted=False,
++        ).select_related("room")
++        set_model_queryset(self.fields["reservations"], queryset.order_by("date"))
++        self.fields["reservations"].initial = list(
++            queryset.values_list("pk", flat=True)
++        )
++        if batch.batch_type == ReservationBatchType.SINGLE:
++            self.fields["reservations"].disabled = True
++            self.fields["reservations"].help_text = (
++                "Las reservaciones únicas se cancelan completas."
++            )
++
++    def clean_reservations(self) -> QuerySet[Reservation]:
++        reservations = self.cleaned_data["reservations"]
++        if self.batch.batch_type == ReservationBatchType.SINGLE:
++            return self.batch.reservations.filter(
++                status__in=ACTIVE_RESERVATION_STATUSES,
++                is_deleted=False,
++            )
++        if not reservations.exists():
++            raise forms.ValidationError("Selecciona al menos una fecha.")
++        return reservations
++
++
++class ManualRefundForm(forms.Form):
++    reference = forms.CharField(label="Referencia de transferencia", max_length=160)
++    refund_date = forms.DateField(
++        label="Fecha de devolución",
++        widget=forms.DateInput(attrs={"type": "date"}),
++    )
++    receipt = forms.FileField(label="Comprobante de transferencia")
++    notes = forms.CharField(
++        label="Notas",
++        required=False,
++        widget=forms.Textarea(attrs={"rows": 3}),
++    )
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        super().__init__(*args, **kwargs)
++        style_form_fields(self.fields)
++        self.fields["refund_date"].initial = date.today
+diff --git a/apps/scheduling/urls.py b/apps/scheduling/urls.py
+index 50ce74a..ff4907d 100644
+--- a/apps/scheduling/urls.py
++++ b/apps/scheduling/urls.py
+@@ -87,6 +87,31 @@ urlpatterns = [
+         views.ReservationRequestView.as_view(),
+         name="reservation_request",
+     ),
++    path(
++        "reservaciones/cancelaciones/",
++        views.ReservationCancellationListView.as_view(),
++        name="reservation_cancellations",
++    ),
++    path(
++        "reservaciones/cancelaciones/<uuid:pk>/",
++        views.ReservationCancellationDetailView.as_view(),
++        name="reservation_cancellation_detail",
++    ),
++    path(
++        "reservaciones/cancelaciones/<uuid:pk>/devolucion/",
++        views.ReservationCancellationRefundView.as_view(),
++        name="reservation_cancellation_refund",
++    ),
++    path(
++        "reservaciones/cancelaciones/<uuid:pk>/saldo-favor/",
++        views.ReservationCancellationCreditView.as_view(),
++        name="reservation_cancellation_credit",
++    ),
++    path(
++        "reservaciones/grupos/<uuid:pk>/cancelar/",
++        views.ReservationBatchCancelView.as_view(),
++        name="reservation_batch_cancel",
++    ),
+     path(
+         "reservaciones/grupos/<uuid:pk>/excepcion-vencimiento/",
+         views.PaymentDeadlineExceptionCreateView.as_view(),
+diff --git a/apps/scheduling/views.py b/apps/scheduling/views.py
+index 841a789..9bf427d 100644
+--- a/apps/scheduling/views.py
++++ b/apps/scheduling/views.py
+@@ -12,7 +12,12 @@ from django.core.paginator import Paginator
+ from django.db import transaction
+ from django.db.models import Count, Model, Q, QuerySet
+ from django.forms import ModelForm
+-from django.http import HttpRequest, HttpResponse
++from django.http import (
++    HttpRequest,
++    HttpResponse,
++    HttpResponseBase,
++    HttpResponseForbidden,
++)
+ from django.shortcuts import get_object_or_404, redirect
+ from django.urls import reverse
+ from django.utils import timezone
+@@ -29,7 +34,18 @@ from apps.core.permissions import (
+     scope_queryset_for_user,
+ )
+ from apps.core.templatetags.clinic_time import format_time_for_clinic
+-from apps.finance.models import RateRule, StatementStatus
++from apps.finance.models import (
++    CancellationCase,
++    CancellationCaseStatus,
++    RateRule,
++    StatementStatus,
++)
++from apps.finance.services.cancellation_service import (
++    calculate_cancellation_quote,
++    create_cancellation_case,
++    resolve_with_future_credit,
++    resolve_with_manual_refund,
++)
+ from apps.finance.services.payment_service import (
+     get_payment_summary_for_batch,
+     get_payment_summary_for_reservation,
+@@ -49,8 +65,10 @@ from apps.scheduling.forms import (
+     AvailabilityRuleForm,
+     AvailabilityTariffBlockForm,
+     AvailabilityTariffFilterForm,
++    ManualRefundForm,
+     OperationalFilterForm,
+     PaymentDeadlineExceptionForm,
++    ReservationBatchCancelForm,
+     ReservationCancelForm,
+     ReservationFilterForm,
+     ReservationPaymentPolicyForm,
+@@ -63,6 +81,7 @@ from apps.scheduling.models import (
+     Reservation,
+     ReservationBatch,
+     ReservationBatchStatus,
++    ReservationBatchType,
+     ReservationDeadlinePolicy,
+     ReservationPaymentPolicy,
+     Weekday,
+@@ -80,7 +99,6 @@ from apps.scheduling.services.deadline_service import (
+     calculate_payment_deadline,
+ )
+ from apps.scheduling.services.reservation_service import (
+-    cancel_reservation,
+     confirm_reservation,
+     create_reservation_batch,
+     preview_reservation_batch,
+@@ -1449,25 +1467,238 @@ class ReservationCancelView(LoginRequiredMixin, FormMixin, TemplateView):
+     form_class = ReservationCancelForm
+ 
+     def get_reservation(self) -> Reservation:
+-        return Reservation.objects.get(pk=self.kwargs["pk"], is_deleted=False)
++        queryset = Reservation.objects.filter(is_deleted=False).select_related(
++            "batch",
++            "room",
++            "room__clinic",
++            "tenant_doctor",
++        )
++        return get_object_or_404(
++            scope_queryset_for_user(queryset, self.request.user),
++            pk=self.kwargs["pk"],
++        )
+ 
+     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+         context = super().get_context_data(**kwargs)
+         context["page_title"] = "Cancelar reservación"
+-        context["reservation"] = self.get_reservation()
++        reservation = self.get_reservation()
++        context["reservation"] = reservation
++        try:
++            context["cancellation_quote"] = calculate_cancellation_quote(
++                reservations=[reservation]
++            )
++        except ValidationError as exc:
++            context["cancellation_error"] = "; ".join(exc.messages)
+         return context
+ 
+     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+         form = self.get_form()
+         if form.is_valid():
+-            reservation = cancel_reservation(
+-                reservation=self.get_reservation(),
++            try:
++                cancellation_case = create_cancellation_case(
++                    reservations=[self.get_reservation()],
++                    reason=form.cleaned_data["reason"],
++                    actor=cast(Model, request.user),
++                )
++            except ValidationError as exc:
++                form.add_error(None, exc)
++                return self.form_invalid(form)
++            messages.success(request, "Reservación cancelada y expediente generado.")
++            return redirect(
++                "reservation_cancellation_detail",
++                pk=cancellation_case.pk,
++            )
++        return self.form_invalid(form)
++
++
++class ReservationBatchCancelView(LoginRequiredMixin, FormMixin, TemplateView):
++    template_name = "scheduling/reservation_batch_cancel.html"
++    form_class = ReservationBatchCancelForm
++
++    def get_batch(self) -> ReservationBatch:
++        queryset = ReservationBatch.objects.filter(is_deleted=False).select_related(
++            "room",
++            "room__clinic",
++            "tenant_doctor",
++        )
++        return get_object_or_404(
++            scope_queryset_for_user(queryset, self.request.user),
++            pk=self.kwargs["pk"],
++        )
++
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["batch"] = self.get_batch()
++        return kwargs
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        batch = self.get_batch()
++        context["page_title"] = "Cancelar fechas del grupo"
++        context["reservation_batch"] = batch
++        context["is_recurring"] = batch.batch_type == ReservationBatchType.RECURRING
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        form = self.get_form()
++        if not form.is_valid():
++            return self.form_invalid(form)
++        try:
++            cancellation_case = create_cancellation_case(
++                reservations=list(form.cleaned_data["reservations"]),
+                 reason=form.cleaned_data["reason"],
+                 actor=cast(Model, request.user),
+             )
+-            messages.success(request, "Reservación cancelada.")
+-            return redirect("reservation_detail", pk=reservation.pk)
+-        return self.form_invalid(form)
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        messages.success(request, "Cancelación registrada.")
++        return redirect("reservation_cancellation_detail", pk=cancellation_case.pk)
++
++
++class ReservationCancellationListView(LoginRequiredMixin, ListView):
++    template_name = "scheduling/reservation_cancellation_list.html"
++    context_object_name = "cancellation_cases"
++    paginate_by = 30
++
++    def get_queryset(self) -> QuerySet[CancellationCase]:
++        queryset = CancellationCase.objects.filter(is_deleted=False).select_related(
++            "batch",
++            "batch__room",
++            "tenant_doctor",
++            "requested_by",
++            "managed_by",
++        )
++        status = self.request.GET.get("status", "")
++        if status in CancellationCaseStatus.values:
++            queryset = queryset.filter(status=status)
++        return scope_queryset_for_user(queryset, self.request.user)
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Cancelaciones"
++        context["status_choices"] = CancellationCaseStatus.choices
++        context["selected_status"] = self.request.GET.get("status", "")
++        return context
++
++
++class ReservationCancellationDetailView(LoginRequiredMixin, DetailView):
++    template_name = "scheduling/reservation_cancellation_detail.html"
++    context_object_name = "cancellation_case"
++
++    def get_queryset(self) -> QuerySet[CancellationCase]:
++        queryset = CancellationCase.objects.filter(is_deleted=False).select_related(
++            "batch",
++            "batch__room",
++            "tenant_doctor",
++            "requested_by",
++            "managed_by",
++        ).prefetch_related("items", "items__reservation")
++        return scope_queryset_for_user(queryset, self.request.user)
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        cancellation_case = context["cancellation_case"]
++        context["page_title"] = "Expediente de cancelación"
++        context["can_resolve"] = _user_can_manage_cancellations(self.request.user)
++        context["can_issue_credit"] = (
++            cancellation_case.batch is not None
++            and cancellation_case.batch.batch_type == ReservationBatchType.RECURRING
++        )
++        return context
++
++
++class CancellationAdminMixin:
++    def dispatch(
++        self,
++        request: HttpRequest,
++        *args: Any,
++        **kwargs: Any,
++    ) -> HttpResponseBase:
++        if not _user_can_manage_cancellations(request.user):
++            return HttpResponseForbidden(
++                "Sólo un administrador puede resolver cancelaciones."
++            )
++        return super().dispatch(request, *args, **kwargs)  # type: ignore[misc]
++
++    def get_cancellation_case(self) -> CancellationCase:
++        queryset = CancellationCase.objects.filter(is_deleted=False).select_related(
++            "batch",
++            "batch__room",
++            "tenant_doctor",
++            "tenant_doctor__user",
++        )
++        return get_object_or_404(
++            scope_queryset_for_user(queryset, self.request.user),  # type: ignore[attr-defined]
++            pk=self.kwargs["pk"],  # type: ignore[attr-defined]
++        )
++
++
++class ReservationCancellationRefundView(
++    LoginRequiredMixin,
++    CancellationAdminMixin,
++    FormMixin,
++    TemplateView,
++):
++    template_name = "scheduling/reservation_cancellation_refund.html"
++    form_class = ManualRefundForm
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Registrar devolución"
++        context["cancellation_case"] = self.get_cancellation_case()
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        form = self.get_form()
++        if not form.is_valid():
++            return self.form_invalid(form)
++        try:
++            cancellation_case = resolve_with_manual_refund(
++                cancellation_case=self.get_cancellation_case(),
++                reference=form.cleaned_data["reference"],
++                refund_date=form.cleaned_data["refund_date"],
++                receipt=form.cleaned_data["receipt"],
++                notes=form.cleaned_data["notes"],
++                actor=cast(Model, request.user),
++            )
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        messages.success(request, "Devolución registrada y expediente cerrado.")
++        return redirect("reservation_cancellation_detail", pk=cancellation_case.pk)
++
++
++class ReservationCancellationCreditView(
++    LoginRequiredMixin,
++    CancellationAdminMixin,
++    TemplateView,
++):
++    template_name = "scheduling/reservation_cancellation_credit.html"
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Generar saldo a favor"
++        context["cancellation_case"] = self.get_cancellation_case()
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        try:
++            cancellation_case, _credit = resolve_with_future_credit(
++                cancellation_case=self.get_cancellation_case(),
++                actor=cast(Model, request.user),
++            )
++        except ValidationError as exc:
++            messages.error(request, "; ".join(exc.messages))
++            return redirect("reservation_cancellation_detail", pk=self.kwargs["pk"])
++        messages.success(request, "Saldo a favor generado y expediente cerrado.")
++        return redirect("reservation_cancellation_detail", pk=cancellation_case.pk)
++
++
++def _user_can_manage_cancellations(user: Any) -> bool:
++    return bool(
++        get_user_roles(user).intersection({UserRole.SUPERADMIN, UserRole.ADMIN})
++    )
+ 
+ 
+ class ReservationConfirmView(LoginRequiredMixin, TemplateView):
+diff --git a/templates/finance/batch_payment_form.html b/templates/finance/batch_payment_form.html
+index b778f9a..4b8ae5f 100644
+--- a/templates/finance/batch_payment_form.html
++++ b/templates/finance/batch_payment_form.html
+@@ -24,6 +24,12 @@
+             <div class="fs-5 fw-semibold">{{ reservation_batch.occurrence_count }}</div>
+           </div>
+         </div>
++        <div class="col-md-4">
++          <div class="border rounded-2 p-3 h-100">
++            <div class="text-secondary small">Saldo a favor disponible</div>
++            <div class="fs-5 fw-semibold">{{ available_credit }} {{ payment_summary.currency }}</div>
++          </div>
++        </div>
+         <div class="col-md-4">
+           <div class="border rounded-2 p-3 h-100">
+             <div class="text-secondary small">Total a pagar</div>
+@@ -64,7 +70,7 @@
+           </a>
+           <button class="btn btn-primary" type="submit">
+             <i class="bi bi-cloud-arrow-up me-1"></i>
+-            Enviar comprobante
++            Enviar pago
+           </button>
+         </div>
+       </form>
+diff --git a/templates/finance/payment_detail.html b/templates/finance/payment_detail.html
+index 8359bad..08fcb54 100644
+--- a/templates/finance/payment_detail.html
++++ b/templates/finance/payment_detail.html
+@@ -130,6 +130,26 @@
+       </div>
+     {% endif %}
+ 
++    {% if credit_applications %}
++      <div class="status-panel p-3 p-lg-4">
++        <h2 class="h5 mb-3">Saldo a favor aplicado</h2>
++        <div class="table-responsive">
++          <table class="table table-hover align-middle mb-0">
++            <thead><tr><th>Origen</th><th>Estado</th><th class="text-end">Importe</th></tr></thead>
++            <tbody>
++              {% for application in credit_applications %}
++                <tr>
++                  <td><a hx-boost="false" href="{% url 'reservation_cancellation_detail' application.credit.cancellation_case_id %}">Cancelación {{ application.credit.cancellation_case_id }}</a></td>
++                  <td>{{ application.get_status_display }}</td>
++                  <td class="text-end">{{ application.amount }} {{ payment.currency }}</td>
++                </tr>
++              {% endfor %}
++            </tbody>
++          </table>
++        </div>
++      </div>
++    {% endif %}
++
+     {% include "vault/_related_documents.html" with document_parent=payment %}
+   </section>
+ {% endblock %}
+diff --git a/templates/scheduling/reservation_batch_detail.html b/templates/scheduling/reservation_batch_detail.html
+index e7a7f27..afbd6da 100644
+--- a/templates/scheduling/reservation_batch_detail.html
++++ b/templates/scheduling/reservation_batch_detail.html
+@@ -17,6 +17,12 @@
+               Enviar comprobante
+             </a>
+           {% endif %}
++          {% if current_screen_can_edit and reservation_batch.status != "cancelled" and reservation_batch.status != "expired" %}
++            <a class="btn btn-outline-danger" hx-boost="false" href="{% url 'reservation_batch_cancel' reservation_batch.pk %}">
++              <i class="bi bi-x-circle me-1"></i>
++              Cancelar fechas
++            </a>
++          {% endif %}
+           <a class="btn btn-outline-secondary" href="{% url 'reservations' %}">
+             <i class="bi bi-arrow-left me-1"></i>
+             Volver a reservaciones
+diff --git a/templates/scheduling/reservation_cancel.html b/templates/scheduling/reservation_cancel.html
+index 80cfcd4..bce379d 100644
+--- a/templates/scheduling/reservation_cancel.html
++++ b/templates/scheduling/reservation_cancel.html
+@@ -1,13 +1,31 @@
+ {% extends "base.html" %}
+ 
+ {% block content %}
+-  <section id="reservation-content" class="status-panel p-3 p-lg-4">
++  <section id="reservation-content" class="d-flex flex-column gap-3">
++    <div class="status-panel p-3 p-lg-4">
+     <div class="mb-4">
+       <p class="text-uppercase text-secondary small fw-semibold mb-2">Cancelación</p>
+       <h1 class="h4 mb-2">Cancelar reservación</h1>
+       <p class="text-secondary mb-0">{{ reservation }}</p>
+     </div>
+ 
++    </div>
++
++    {% if cancellation_error %}
++      <div class="alert alert-danger mb-0" role="alert">{{ cancellation_error }}</div>
++    {% elif cancellation_quote %}
++      <div class="status-panel p-3 p-lg-4">
++        <h2 class="h5 mb-3">Cálculo de cancelación</h2>
++        <div class="row g-3">
++          <div class="col-md-4"><div class="border rounded-2 p-3"><div class="small text-secondary">Pagado</div><div class="fs-5 fw-semibold">{{ cancellation_quote.total_paid }} {{ cancellation_quote.currency }}</div></div></div>
++          <div class="col-md-4"><div class="border rounded-2 p-3"><div class="small text-secondary">Penalización</div><div class="fs-5 fw-semibold">{{ cancellation_quote.penalty_amount }} {{ cancellation_quote.currency }}</div></div></div>
++          <div class="col-md-4"><div class="border rounded-2 p-3"><div class="small text-secondary">A devolver</div><div class="fs-5 fw-semibold">{{ cancellation_quote.refundable_amount }} {{ cancellation_quote.currency }}</div></div></div>
++        </div>
++        {% with item=cancellation_quote.items.0 %}<div class="text-secondary mt-3">Regla aplicada: {{ item.penalty_percentage }}% por cancelar con {{ item.days_before }} día(s) de anticipación.</div>{% endwith %}
++      </div>
++    {% endif %}
++
++    <div class="status-panel p-3 p-lg-4">
+     <form method="post" novalidate>
+       {% csrf_token %}
+       {{ form.non_field_errors }}
+@@ -23,11 +41,12 @@
+           <i class="bi bi-arrow-left me-1"></i>
+           Volver
+         </a>
+-        <button class="btn btn-danger" type="submit">
++        <button class="btn btn-danger" type="submit" {% if cancellation_error %}disabled{% endif %}>
+           <i class="bi bi-x-circle me-1"></i>
+           Cancelar reservación
+         </button>
+       </div>
+     </form>
++    </div>
+   </section>
+ {% endblock %}
+diff --git a/templates/scheduling/reservation_detail.html b/templates/scheduling/reservation_detail.html
+index 1cf5e37..f10dced 100644
+--- a/templates/scheduling/reservation_detail.html
++++ b/templates/scheduling/reservation_detail.html
+@@ -19,7 +19,7 @@
+             <i class="bi bi-diagram-3 me-1"></i>
+             Timeline
+           </a>
+-          {% if current_screen_can_edit %}
++          {% if current_screen_can_edit and reservation.status != "cancelada" and reservation.status != "finalizada" %}
+             <a class="btn btn-outline-primary" href="{% url 'reservation_confirm' reservation.pk %}">
+               <i class="bi bi-check2-circle me-1"></i>
+               Confirmar
+@@ -45,6 +45,10 @@
+             · {{ reservation.batch.get_batch_type_display }}
+           </dd>
+         {% endif %}
++        {% if reservation.cancellation_item %}
++          <dt class="col-sm-4 col-lg-3 text-secondary">Cancelación</dt>
++          <dd class="col-sm-8 col-lg-9"><a hx-boost="false" href="{% url 'reservation_cancellation_detail' reservation.cancellation_item.cancellation_case_id %}">Ver expediente</a></dd>
++        {% endif %}
+         <dt class="col-sm-4 col-lg-3 text-secondary">Médico arrendatario</dt>
+         <dd class="col-sm-8 col-lg-9">{{ reservation.tenant_doctor }}</dd>
+         <dt class="col-sm-4 col-lg-3 text-secondary">Fecha</dt>
+diff --git a/templates/scheduling/reservation_list.html b/templates/scheduling/reservation_list.html
+index 2fe9543..85ceda6 100644
+--- a/templates/scheduling/reservation_list.html
++++ b/templates/scheduling/reservation_list.html
+@@ -8,10 +8,16 @@
+         <p class="text-uppercase text-secondary small fw-semibold mb-2">Operación</p>
+         <h1 class="h4 mb-0">Reservaciones</h1>
+       </div>
+-      <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
+-        <i class="bi bi-calendar3 me-1"></i>
+-        Calendario
+-      </a>
++      <div class="d-flex gap-2">
++        <a class="btn btn-outline-secondary" hx-boost="false" href="{% url 'reservation_cancellations' %}">
++          <i class="bi bi-calendar-x me-1"></i>
++          Cancelaciones
++        </a>
++        <a class="btn btn-outline-secondary" href="{% url 'calendar_week' %}">
++          <i class="bi bi-calendar3 me-1"></i>
++          Calendario
++        </a>
++      </div>
+     </div>
+ 
+     <form method="get" class="row g-3 align-items-end mb-3">

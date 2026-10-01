@@ -88,6 +88,31 @@ urlpatterns = [
         name="reservation_request",
     ),
     path(
+        "reservaciones/cancelaciones/",
+        views.ReservationCancellationListView.as_view(),
+        name="reservation_cancellations",
+    ),
+    path(
+        "reservaciones/cancelaciones/<uuid:pk>/",
+        views.ReservationCancellationDetailView.as_view(),
+        name="reservation_cancellation_detail",
+    ),
+    path(
+        "reservaciones/cancelaciones/<uuid:pk>/devolucion/",
+        views.ReservationCancellationRefundView.as_view(),
+        name="reservation_cancellation_refund",
+    ),
+    path(
+        "reservaciones/cancelaciones/<uuid:pk>/saldo-favor/",
+        views.ReservationCancellationCreditView.as_view(),
+        name="reservation_cancellation_credit",
+    ),
+    path(
+        "reservaciones/grupos/<uuid:pk>/cancelar/",
+        views.ReservationBatchCancelView.as_view(),
+        name="reservation_batch_cancel",
+    ),
+    path(
         "reservaciones/grupos/<uuid:pk>/excepcion-vencimiento/",
         views.PaymentDeadlineExceptionCreateView.as_view(),
         name="payment_deadline_exception_create",

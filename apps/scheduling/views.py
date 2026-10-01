@@ -12,7 +12,12 @@ from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Count, Model, Q, QuerySet
 from django.forms import ModelForm
-from django.http import HttpRequest, HttpResponse
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBase,
+    HttpResponseForbidden,
+)
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils import timezone
@@ -29,7 +34,18 @@ from apps.core.permissions import (
     scope_queryset_for_user,
 )
 from apps.core.templatetags.clinic_time import format_time_for_clinic
-from apps.finance.models import RateRule, StatementStatus
+from apps.finance.models import (
+    CancellationCase,
+    CancellationCaseStatus,
+    RateRule,
+    StatementStatus,
+)
+from apps.finance.services.cancellation_service import (
+    calculate_cancellation_quote,
+    create_cancellation_case,
+    resolve_with_future_credit,
+    resolve_with_manual_refund,
+)
 from apps.finance.services.payment_service import (
     get_payment_summary_for_batch,
     get_payment_summary_for_reservation,
@@ -49,8 +65,10 @@ from apps.scheduling.forms import (
     AvailabilityRuleForm,
     AvailabilityTariffBlockForm,
     AvailabilityTariffFilterForm,
+    ManualRefundForm,
     OperationalFilterForm,
     PaymentDeadlineExceptionForm,
+    ReservationBatchCancelForm,
     ReservationCancelForm,
     ReservationFilterForm,
     ReservationPaymentPolicyForm,
@@ -63,6 +81,7 @@ from apps.scheduling.models import (
     Reservation,
     ReservationBatch,
     ReservationBatchStatus,
+    ReservationBatchType,
     ReservationDeadlinePolicy,
     ReservationPaymentPolicy,
     Weekday,
@@ -80,7 +99,6 @@ from apps.scheduling.services.deadline_service import (
     calculate_payment_deadline,
 )
 from apps.scheduling.services.reservation_service import (
-    cancel_reservation,
     confirm_reservation,
     create_reservation_batch,
     preview_reservation_batch,
@@ -1449,25 +1467,238 @@ class ReservationCancelView(LoginRequiredMixin, FormMixin, TemplateView):
     form_class = ReservationCancelForm
 
     def get_reservation(self) -> Reservation:
-        return Reservation.objects.get(pk=self.kwargs["pk"], is_deleted=False)
+        queryset = Reservation.objects.filter(is_deleted=False).select_related(
+            "batch",
+            "room",
+            "room__clinic",
+            "tenant_doctor",
+        )
+        return get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),
+            pk=self.kwargs["pk"],
+        )
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
         context["page_title"] = "Cancelar reservación"
-        context["reservation"] = self.get_reservation()
+        reservation = self.get_reservation()
+        context["reservation"] = reservation
+        try:
+            context["cancellation_quote"] = calculate_cancellation_quote(
+                reservations=[reservation]
+            )
+        except ValidationError as exc:
+            context["cancellation_error"] = "; ".join(exc.messages)
         return context
 
     def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
         form = self.get_form()
         if form.is_valid():
-            reservation = cancel_reservation(
-                reservation=self.get_reservation(),
+            try:
+                cancellation_case = create_cancellation_case(
+                    reservations=[self.get_reservation()],
+                    reason=form.cleaned_data["reason"],
+                    actor=cast(Model, request.user),
+                )
+            except ValidationError as exc:
+                form.add_error(None, exc)
+                return self.form_invalid(form)
+            messages.success(request, "Reservación cancelada y expediente generado.")
+            return redirect(
+                "reservation_cancellation_detail",
+                pk=cancellation_case.pk,
+            )
+        return self.form_invalid(form)
+
+
+class ReservationBatchCancelView(LoginRequiredMixin, FormMixin, TemplateView):
+    template_name = "scheduling/reservation_batch_cancel.html"
+    form_class = ReservationBatchCancelForm
+
+    def get_batch(self) -> ReservationBatch:
+        queryset = ReservationBatch.objects.filter(is_deleted=False).select_related(
+            "room",
+            "room__clinic",
+            "tenant_doctor",
+        )
+        return get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),
+            pk=self.kwargs["pk"],
+        )
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["batch"] = self.get_batch()
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        batch = self.get_batch()
+        context["page_title"] = "Cancelar fechas del grupo"
+        context["reservation_batch"] = batch
+        context["is_recurring"] = batch.batch_type == ReservationBatchType.RECURRING
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        if not form.is_valid():
+            return self.form_invalid(form)
+        try:
+            cancellation_case = create_cancellation_case(
+                reservations=list(form.cleaned_data["reservations"]),
                 reason=form.cleaned_data["reason"],
                 actor=cast(Model, request.user),
             )
-            messages.success(request, "Reservación cancelada.")
-            return redirect("reservation_detail", pk=reservation.pk)
-        return self.form_invalid(form)
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(request, "Cancelación registrada.")
+        return redirect("reservation_cancellation_detail", pk=cancellation_case.pk)
+
+
+class ReservationCancellationListView(LoginRequiredMixin, ListView):
+    template_name = "scheduling/reservation_cancellation_list.html"
+    context_object_name = "cancellation_cases"
+    paginate_by = 30
+
+    def get_queryset(self) -> QuerySet[CancellationCase]:
+        queryset = CancellationCase.objects.filter(is_deleted=False).select_related(
+            "batch",
+            "batch__room",
+            "tenant_doctor",
+            "requested_by",
+            "managed_by",
+        )
+        status = self.request.GET.get("status", "")
+        if status in CancellationCaseStatus.values:
+            queryset = queryset.filter(status=status)
+        return scope_queryset_for_user(queryset, self.request.user)
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Cancelaciones"
+        context["status_choices"] = CancellationCaseStatus.choices
+        context["selected_status"] = self.request.GET.get("status", "")
+        return context
+
+
+class ReservationCancellationDetailView(LoginRequiredMixin, DetailView):
+    template_name = "scheduling/reservation_cancellation_detail.html"
+    context_object_name = "cancellation_case"
+
+    def get_queryset(self) -> QuerySet[CancellationCase]:
+        queryset = CancellationCase.objects.filter(is_deleted=False).select_related(
+            "batch",
+            "batch__room",
+            "tenant_doctor",
+            "requested_by",
+            "managed_by",
+        ).prefetch_related("items", "items__reservation")
+        return scope_queryset_for_user(queryset, self.request.user)
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        cancellation_case = context["cancellation_case"]
+        context["page_title"] = "Expediente de cancelación"
+        context["can_resolve"] = _user_can_manage_cancellations(self.request.user)
+        context["can_issue_credit"] = (
+            cancellation_case.batch is not None
+            and cancellation_case.batch.batch_type == ReservationBatchType.RECURRING
+        )
+        return context
+
+
+class CancellationAdminMixin:
+    def dispatch(
+        self,
+        request: HttpRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> HttpResponseBase:
+        if not _user_can_manage_cancellations(request.user):
+            return HttpResponseForbidden(
+                "Sólo un administrador puede resolver cancelaciones."
+            )
+        return super().dispatch(request, *args, **kwargs)  # type: ignore[misc]
+
+    def get_cancellation_case(self) -> CancellationCase:
+        queryset = CancellationCase.objects.filter(is_deleted=False).select_related(
+            "batch",
+            "batch__room",
+            "tenant_doctor",
+            "tenant_doctor__user",
+        )
+        return get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),  # type: ignore[attr-defined]
+            pk=self.kwargs["pk"],  # type: ignore[attr-defined]
+        )
+
+
+class ReservationCancellationRefundView(
+    LoginRequiredMixin,
+    CancellationAdminMixin,
+    FormMixin,
+    TemplateView,
+):
+    template_name = "scheduling/reservation_cancellation_refund.html"
+    form_class = ManualRefundForm
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Registrar devolución"
+        context["cancellation_case"] = self.get_cancellation_case()
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        if not form.is_valid():
+            return self.form_invalid(form)
+        try:
+            cancellation_case = resolve_with_manual_refund(
+                cancellation_case=self.get_cancellation_case(),
+                reference=form.cleaned_data["reference"],
+                refund_date=form.cleaned_data["refund_date"],
+                receipt=form.cleaned_data["receipt"],
+                notes=form.cleaned_data["notes"],
+                actor=cast(Model, request.user),
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(request, "Devolución registrada y expediente cerrado.")
+        return redirect("reservation_cancellation_detail", pk=cancellation_case.pk)
+
+
+class ReservationCancellationCreditView(
+    LoginRequiredMixin,
+    CancellationAdminMixin,
+    TemplateView,
+):
+    template_name = "scheduling/reservation_cancellation_credit.html"
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Generar saldo a favor"
+        context["cancellation_case"] = self.get_cancellation_case()
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        try:
+            cancellation_case, _credit = resolve_with_future_credit(
+                cancellation_case=self.get_cancellation_case(),
+                actor=cast(Model, request.user),
+            )
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+            return redirect("reservation_cancellation_detail", pk=self.kwargs["pk"])
+        messages.success(request, "Saldo a favor generado y expediente cerrado.")
+        return redirect("reservation_cancellation_detail", pk=cancellation_case.pk)
+
+
+def _user_can_manage_cancellations(user: Any) -> bool:
+    return bool(
+        get_user_roles(user).intersection({UserRole.SUPERADMIN, UserRole.ADMIN})
+    )
 
 
 class ReservationConfirmView(LoginRequiredMixin, TemplateView):
