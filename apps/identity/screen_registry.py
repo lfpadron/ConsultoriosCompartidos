@@ -144,6 +144,8 @@ EXACT_ROUTE_SCREENS = {
 }
 
 ROUTE_PREFIX_SCREENS = (
+    ("account_statement_", "statements"),
+    ("account_payment_", "statements"),
     ("owner_subscription_", "owner_subscriptions"),
     ("tenant_subscription_", "tenant_subscriptions"),
     ("owner_commission_", "owner_terms"),
@@ -207,6 +209,11 @@ EDIT_ROUTE_NAMES = {
     "reservation_batch_cancel",
     "reservation_cancellation_refund",
     "reservation_cancellation_credit",
+    "account_statement_generate",
+    "account_payment_submit",
+    "account_payment_validate",
+    "account_payment_reject",
+    "account_statement_owner_payout_create",
     "reservation_confirm",
     "room_rate_discount_create",
     "room_rate_discount_toggle",

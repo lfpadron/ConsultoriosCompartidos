@@ -86,6 +86,7 @@ def generate_settlement_for_reservation(
         actor=actor,
         payload=_settlement_payload(settlement, actor=actor),
     )
+    _refresh_related_account_statements(settlement, actor=actor)
     return settlement
 
 
@@ -127,6 +128,7 @@ def mark_settlement_as_paid(
         actor=actor,
         payload=_settlement_payload(settlement, actor=actor),
     )
+    _refresh_related_account_statements(settlement, actor=actor)
     return settlement
 
 
@@ -152,6 +154,7 @@ def cancel_settlement(
         actor=actor,
         payload=_settlement_payload(settlement, actor=actor),
     )
+    _refresh_related_account_statements(settlement, actor=actor)
     return settlement
 
 
@@ -237,6 +240,30 @@ def _active_settlement_for_reservation(
 
 def _settlement_total(queryset: QuerySet[Settlement]) -> Decimal:
     return queryset.aggregate(total=Sum("owner_net"))["total"] or Decimal("0.00")
+
+
+def _refresh_related_account_statements(
+    settlement: Settlement,
+    *,
+    actor: Model | None,
+) -> None:
+    from apps.finance.models import AccountStatement
+    from apps.finance.services.account_statement_service import (
+        refresh_account_statement,
+    )
+
+    account_statements = AccountStatement.objects.filter(
+        owner=settlement.owner,
+        period_start__lte=settlement.reservation.date,
+        period_end__gte=settlement.reservation.date,
+        currency=settlement.currency,
+        is_deleted=False,
+    )
+    for account_statement in account_statements:
+        refresh_account_statement(
+            account_statement=account_statement,
+            actor=actor,
+        )
 
 
 def _settlement_payload(

@@ -1,0 +1,1513 @@
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index 93c7aaa..efb9737 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -279,6 +279,28 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
+         return queryset.filter(
+             credit__cancellation_case__batch__room__clinic__in=clinics
+         )
++    if model_label == "finance.AccountStatement":
++        return queryset.filter(
++            Q(owner__consulting_rooms__clinic__in=clinics)
++            | Q(tenant_doctor__reservations__room__clinic__in=clinics)
++            | Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
++        ).distinct()
++    if model_label in {
++        "finance.AccountStatementLine",
++        "finance.AccountPayment",
++        "finance.OwnerPayout",
++    }:
++        return queryset.filter(
++            Q(account_statement__owner__consulting_rooms__clinic__in=clinics)
++            | Q(
++                account_statement__tenant_doctor__reservations__room__clinic__in=(
++                    clinics
++                )
++            )
++            | Q(
++                account_statement__tenant_doctor__assigned_rooms__clinic__in=clinics
++            )
++        ).distinct()
+     if model_label == "finance.Settlement":
+         return queryset.filter(room__clinic__in=clinics)
+     if model_label == "vault.DocumentAsset":
+@@ -361,6 +383,14 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
+         return queryset.filter(cancellation_case__batch__room__owner=owner)
+     if model_label == "finance.TenantCreditApplication":
+         return queryset.filter(credit__cancellation_case__batch__room__owner=owner)
++    if model_label == "finance.AccountStatement":
++        return queryset.filter(owner=owner)
++    if model_label in {
++        "finance.AccountStatementLine",
++        "finance.AccountPayment",
++        "finance.OwnerPayout",
++    }:
++        return queryset.filter(account_statement__owner=owner)
+     if model_label == "vault.DocumentAsset":
+         return queryset.filter(
+             Q(owner=owner)
+@@ -432,6 +462,14 @@ def _scope_tenant_doctor_queryset(
+         return queryset.filter(reservation__tenant_doctor=tenant_doctor)
+     if model_label == "finance.TenantCreditApplication":
+         return queryset.filter(credit__tenant_doctor=tenant_doctor)
++    if model_label == "finance.AccountStatement":
++        return queryset.filter(tenant_doctor=tenant_doctor)
++    if model_label in {
++        "finance.AccountStatementLine",
++        "finance.AccountPayment",
++        "finance.OwnerPayout",
++    }:
++        return queryset.filter(account_statement__tenant_doctor=tenant_doctor)
+     if model_label == "vault.DocumentAsset":
+         return queryset.filter(
+             Q(tenant_doctor=tenant_doctor)
+@@ -511,6 +549,14 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
+         return queryset.filter(
+             credit__cancellation_case__batch__room__owner__in=owners
+         )
++    if model_label == "finance.AccountStatement":
++        return queryset.filter(owner__in=owners)
++    if model_label in {
++        "finance.AccountStatementLine",
++        "finance.AccountPayment",
++        "finance.OwnerPayout",
++    }:
++        return queryset.filter(account_statement__owner__in=owners)
+     if model_label == "finance.Settlement":
+         return queryset.filter(owner__in=owners)
+     if model_label == "vault.DocumentAsset":
+diff --git a/apps/finance/admin.py b/apps/finance/admin.py
+index 4b83e0a..13d95b6 100644
+--- a/apps/finance/admin.py
++++ b/apps/finance/admin.py
+@@ -3,8 +3,12 @@
+ from django.contrib import admin
+ 
+ from apps.finance.models import (
++    AccountPayment,
++    AccountStatement,
++    AccountStatementLine,
+     CancellationCase,
+     CancellationItem,
++    OwnerPayout,
+     Payment,
+     PaymentAllocation,
+     RateRule,
+@@ -17,6 +21,69 @@ from apps.finance.models import (
+ )
+ 
+ 
++@admin.register(AccountStatement)
++class AccountStatementAdmin(admin.ModelAdmin):
++    list_display = (
++        "party_type",
++        "owner",
++        "tenant_doctor",
++        "period_start",
++        "period_end",
++        "balance_due",
++        "payout_due",
++        "status",
++    )
++    list_filter = ("party_type", "status", "currency", "period_end")
++    search_fields = (
++        "owner__display_name",
++        "owner__user__email",
++        "tenant_doctor__display_name",
++        "tenant_doctor__user__email",
++    )
++
++
++@admin.register(AccountStatementLine)
++class AccountStatementLineAdmin(admin.ModelAdmin):
++    list_display = (
++        "account_statement",
++        "line_type",
++        "effective_date",
++        "amount",
++    )
++    list_filter = ("line_type", "effective_date")
++
++
++@admin.register(AccountPayment)
++class AccountPaymentAdmin(admin.ModelAdmin):
++    list_display = (
++        "account_statement",
++        "category",
++        "amount",
++        "currency",
++        "status",
++        "payment_date",
++    )
++    list_filter = ("category", "status", "currency", "payment_date")
++
++
++@admin.register(OwnerPayout)
++class OwnerPayoutAdmin(admin.ModelAdmin):
++    list_display = (
++        "account_statement",
++        "amount",
++        "deducted_fees",
++        "currency",
++        "payment_date",
++        "reference",
++    )
++    list_filter = ("currency", "payment_date")
++    search_fields = (
++        "account_statement__owner__display_name",
++        "account_statement__owner__user__email",
++        "reference",
++    )
++
++
+ @admin.register(RateRule)
+ class RateRuleAdmin(admin.ModelAdmin):
+     list_display = (
+diff --git a/apps/finance/forms.py b/apps/finance/forms.py
+index fd4b0ef..1ecbf2c 100644
+--- a/apps/finance/forms.py
++++ b/apps/finance/forms.py
+@@ -20,6 +20,12 @@ from apps.core.form_utils import (
+ )
+ from apps.core.permissions import scope_queryset_for_user
+ from apps.finance.models import (
++    AccountPartyType,
++    AccountPayment,
++    AccountPaymentCategory,
++    AccountStatement,
++    AccountStatementStatus,
++    OwnerPayout,
+     Payment,
+     PaymentMethod,
+     PaymentStatus,
+@@ -437,6 +443,249 @@ class PaymentRejectForm(forms.Form):
+         self.fields["reason"].widget.attrs["class"] = "form-control"
+ 
+ 
++class AccountStatementFilterForm(forms.Form):
++    party_type = forms.ChoiceField(
++        label="Tipo de titular",
++        choices=(("", "Todos"), *AccountPartyType.choices),
++        required=False,
++    )
++    owner = forms.ModelChoiceField(
++        label="Propietario",
++        queryset=OwnerProfile.objects.none(),
++        required=False,
++    )
++    tenant_doctor = forms.ModelChoiceField(
++        label="Médico arrendatario",
++        queryset=TenantDoctorProfile.objects.none(),
++        required=False,
++    )
++    status = forms.ChoiceField(
++        label="Estado",
++        choices=(("", "Todos"), *AccountStatementStatus.choices),
++        required=False,
++    )
++    date_from = forms.DateField(
++        label="Periodo desde",
++        required=False,
++        widget=monday_date_input(),
++    )
++    date_to = forms.DateField(
++        label="Periodo hasta",
++        required=False,
++        widget=monday_date_input(),
++    )
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        self.user = kwargs.pop("user", None)
++        super().__init__(*args, **kwargs)
++        owner_queryset = _owner_queryset()
++        tenant_queryset = TenantDoctorProfile.objects.filter(
++            is_deleted=False
++        ).select_related("user")
++        if self.user is not None:
++            owner_queryset = scope_queryset_for_user(owner_queryset, self.user)
++            tenant_queryset = scope_queryset_for_user(tenant_queryset, self.user)
++        set_model_queryset(self.fields["owner"], owner_queryset)
++        set_model_queryset(
++            self.fields["tenant_doctor"],
++            tenant_queryset.order_by("display_name", "user__email"),
++        )
++        style_form_fields(self.fields)
++
++
++class AccountStatementGenerationForm(forms.Form):
++    party_type = forms.ChoiceField(
++        label="Tipo de titular",
++        choices=AccountPartyType.choices,
++    )
++    owner = forms.ModelChoiceField(
++        label="Propietario",
++        queryset=OwnerProfile.objects.none(),
++        required=False,
++    )
++    tenant_doctor = forms.ModelChoiceField(
++        label="Médico arrendatario",
++        queryset=TenantDoctorProfile.objects.none(),
++        required=False,
++    )
++    period_start = forms.DateField(
++        label="Inicio del periodo",
++        widget=forms.DateInput(attrs={"type": "date"}),
++    )
++    period_end = forms.DateField(
++        label="Fin del periodo",
++        widget=forms.DateInput(attrs={"type": "date"}),
++    )
++    currency = forms.CharField(label="Moneda", max_length=3, initial="MXN")
++
++    def __init__(self, *args: Any, **kwargs: Any) -> None:
++        self.user = kwargs.pop("user", None)
++        super().__init__(*args, **kwargs)
++        owner_queryset = _owner_queryset()
++        tenant_queryset = TenantDoctorProfile.objects.filter(
++            is_deleted=False
++        ).select_related("user")
++        if self.user is not None:
++            owner_queryset = scope_queryset_for_user(owner_queryset, self.user)
++            tenant_queryset = scope_queryset_for_user(tenant_queryset, self.user)
++        set_model_queryset(self.fields["owner"], owner_queryset)
++        set_model_queryset(self.fields["tenant_doctor"], tenant_queryset)
++        style_form_fields(self.fields)
++
++    def clean(self) -> dict[str, Any]:
++        cleaned_data = super().clean() or {}
++        party_type = cleaned_data.get("party_type")
++        owner = cleaned_data.get("owner")
++        tenant_doctor = cleaned_data.get("tenant_doctor")
++        if party_type == AccountPartyType.OWNER:
++            if owner is None:
++                self.add_error("owner", "Selecciona al propietario.")
++            if tenant_doctor is not None:
++                self.add_error(
++                    "tenant_doctor",
++                    "No selecciones un arrendatario para este corte.",
++                )
++        elif party_type == AccountPartyType.TENANT:
++            if tenant_doctor is None:
++                self.add_error("tenant_doctor", "Selecciona al médico arrendatario.")
++            if owner is not None:
++                self.add_error(
++                    "owner",
++                    "No selecciones un propietario para este corte.",
++                )
++        period_start = cleaned_data.get("period_start")
++        period_end = cleaned_data.get("period_end")
++        if period_start and period_end and period_end < period_start:
++            self.add_error("period_end", "El fin no puede ser anterior al inicio.")
++        cleaned_data["currency"] = (cleaned_data.get("currency") or "MXN").upper()
++        return cleaned_data
++
++
++class AccountPaymentForm(BootstrapModelForm):
++    class Meta:
++        model = AccountPayment
++        fields = (
++            "category",
++            "amount",
++            "method",
++            "reference",
++            "payment_date",
++            "receipt",
++            "notes",
++        )
++        widgets = {
++            "payment_date": forms.DateInput(attrs={"type": "date"}),
++            "notes": forms.Textarea(attrs={"rows": 3}),
++        }
++
++    def __init__(
++        self,
++        *args: Any,
++        account_statement: AccountStatement,
++        **kwargs: Any,
++    ) -> None:
++        super().__init__(*args, **kwargs)
++        self.account_statement = account_statement
++        choices: tuple[tuple[Any, Any], ...]
++        if account_statement.party_type == AccountPartyType.OWNER:
++            choices = (
++                (
++                    AccountPaymentCategory.OWNER_SUBSCRIPTION,
++                    AccountPaymentCategory.OWNER_SUBSCRIPTION.label,
++                ),
++                (
++                    AccountPaymentCategory.OWNER_FEE,
++                    AccountPaymentCategory.OWNER_FEE.label,
++                ),
++            )
++        else:
++            choices = (
++                (
++                    AccountPaymentCategory.TENANT_SUBSCRIPTION,
++                    AccountPaymentCategory.TENANT_SUBSCRIPTION.label,
++                ),
++            )
++        category_field = self.fields["category"]
++        method_field = self.fields["method"]
++        if isinstance(category_field, forms.ChoiceField):
++            category_field.choices = choices
++        if isinstance(method_field, forms.ChoiceField):
++            method_field.choices = tuple(
++                choice
++                for choice in PaymentMethod.choices
++                if choice[0] != PaymentMethod.CREDIT
++            )
++        self.fields["receipt"].required = False
++        self.fields["receipt"].help_text = (
++            "Obligatorio para métodos distintos de efectivo."
++        )
++        self.fields["amount"].initial = account_statement.balance_due
++        self.fields["amount"].widget.attrs["max"] = str(
++            account_statement.balance_due
++        )
++        self.fields["amount"].help_text = (
++            f"Máximo pendiente: {account_statement.balance_due} "
++            f"{account_statement.currency}."
++        )
++
++    def clean(self) -> dict[str, Any]:
++        cleaned_data = super().clean() or {}
++        if (
++            cleaned_data.get("method") != PaymentMethod.CASH
++            and not cleaned_data.get("receipt")
++        ):
++            self.add_error("receipt", "El comprobante es obligatorio.")
++        return cleaned_data
++
++    def clean_amount(self) -> Decimal:
++        amount = self.cleaned_data["amount"]
++        if amount > self.account_statement.balance_due:
++            raise forms.ValidationError(
++                "El importe no puede exceder el saldo por pagar."
++            )
++        return amount
++
++
++class OwnerPayoutForm(BootstrapModelForm):
++    class Meta:
++        model = OwnerPayout
++        fields = (
++            "amount",
++            "reference",
++            "payment_date",
++            "receipt",
++            "notes",
++        )
++        widgets = {
++            "payment_date": forms.DateInput(attrs={"type": "date"}),
++            "notes": forms.Textarea(attrs={"rows": 3}),
++        }
++
++    def __init__(
++        self,
++        *args: Any,
++        account_statement: AccountStatement,
++        **kwargs: Any,
++    ) -> None:
++        super().__init__(*args, **kwargs)
++        self.account_statement = account_statement
++        self.fields["amount"].initial = account_statement.payout_due
++        self.fields["amount"].widget.attrs["max"] = str(account_statement.payout_due)
++        self.fields["amount"].help_text = (
++            f"Máximo pendiente: {account_statement.payout_due} "
++            f"{account_statement.currency}."
++        )
++        self.fields["receipt"].required = True
++
++    def clean_amount(self) -> Decimal:
++        amount = self.cleaned_data["amount"]
++        if amount > self.account_statement.payout_due:
++            raise forms.ValidationError(
++                "El importe no puede exceder el saldo por entregar."
++            )
++        return amount
++
++
+ class PaymentFilterForm(OperationalFinanceFilterForm):
+     q = forms.CharField(label="Buscar", required=False)
+     status = forms.ChoiceField(
+diff --git a/apps/finance/models.py b/apps/finance/models.py
+index 75cbda5..9ff54d1 100644
+--- a/apps/finance/models.py
++++ b/apps/finance/models.py
+@@ -994,6 +994,470 @@ class TenantCreditApplication(BaseModel):
+         super().save(*args, **kwargs)
+ 
+ 
++class AccountPartyType(models.TextChoices):
++    OWNER = "propietario", _("Propietario")
++    TENANT = "arrendatario", _("Médico arrendatario")
++
++
++class AccountStatementStatus(models.TextChoices):
++    ISSUED = "emitido", _("Emitido")
++    VOID = "anulado", _("Anulado")
++
++
++class AccountLineType(models.TextChoices):
++    RENTAL_INCOME = "ingreso_arrendamiento", _("Ingreso por arrendamiento")
++    PLATFORM_COMMISSION = "comision_plataforma", _("Comisión de plataforma")
++    OWNER_NET = "neto_propietario", _("Neto del propietario")
++    OWNER_SUBSCRIPTION = "suscripcion_propietario", _("Suscripción de propietario")
++    ROOM_FEE_DIRECT = "cuota_directa", _("Cuota de consultorio")
++    ROOM_FEE_DEDUCTED = "cuota_descontada", _("Cuota descontada del pago")
++    OWNER_PAYMENT = "pago_propietario", _("Pago realizado por el propietario")
++    OWNER_PAYOUT = "pago_al_propietario", _("Pago al propietario")
++    RESERVATION_CHARGE = "cargo_reservacion", _("Reservación")
++    RESERVATION_PAYMENT = "pago_reservacion", _("Pago de reservación")
++    TENANT_SUBSCRIPTION = "suscripcion_arrendatario", _(
++        "Suscripción de médico arrendatario"
++    )
++    TENANT_SUBSCRIPTION_PAYMENT = "pago_suscripcion_arrendatario", _(
++        "Pago de suscripción"
++    )
++
++
++class AccountPaymentCategory(models.TextChoices):
++    OWNER_SUBSCRIPTION = "suscripcion_propietario", _("Suscripción de propietario")
++    OWNER_FEE = "cuota_propietario", _("Cuota de consultorio")
++    TENANT_SUBSCRIPTION = "suscripcion_arrendatario", _(
++        "Suscripción de médico arrendatario"
++    )
++
++
++class AccountStatement(BaseModel):
++    party_type = models.CharField(
++        _("tipo de titular"),
++        max_length=16,
++        choices=AccountPartyType.choices,
++    )
++    owner = models.ForeignKey(
++        "catalog.OwnerProfile",
++        on_delete=models.PROTECT,
++        related_name="account_statements",
++        verbose_name=_("propietario"),
++        blank=True,
++        null=True,
++    )
++    tenant_doctor = models.ForeignKey(
++        "catalog.TenantDoctorProfile",
++        on_delete=models.PROTECT,
++        related_name="account_statements",
++        verbose_name=_("médico arrendatario"),
++        blank=True,
++        null=True,
++    )
++    period_start = models.DateField(_("inicio del periodo"))
++    period_end = models.DateField(_("fin del periodo"))
++    available_on = models.DateField(_("disponible desde"))
++    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
++    status = models.CharField(
++        _("estado"),
++        max_length=16,
++        choices=AccountStatementStatus.choices,
++        default=AccountStatementStatus.ISSUED,
++    )
++    payout_frequency = models.CharField(
++        _("frecuencia de pago"),
++        max_length=16,
++        blank=True,
++    )
++    rental_income = models.DecimalField(
++        _("ingresos por arrendamiento"), max_digits=12, decimal_places=2, default=0
++    )
++    reservation_charges = models.DecimalField(
++        _("cargos por reservación"), max_digits=12, decimal_places=2, default=0
++    )
++    commissions = models.DecimalField(
++        _("comisiones"), max_digits=12, decimal_places=2, default=0
++    )
++    owner_net = models.DecimalField(
++        _("neto del propietario"), max_digits=12, decimal_places=2, default=0
++    )
++    subscription_charges = models.DecimalField(
++        _("suscripciones"), max_digits=12, decimal_places=2, default=0
++    )
++    direct_fees = models.DecimalField(
++        _("cuotas de pago directo"), max_digits=12, decimal_places=2, default=0
++    )
++    deducted_fees = models.DecimalField(
++        _("cuotas descontadas"), max_digits=12, decimal_places=2, default=0
++    )
++    reservation_payments = models.DecimalField(
++        _("pagos de reservaciones"), max_digits=12, decimal_places=2, default=0
++    )
++    account_payments_total = models.DecimalField(
++        _("pagos de suscripciones y cuotas"),
++        max_digits=12,
++        decimal_places=2,
++        default=0,
++    )
++    payouts_made = models.DecimalField(
++        _("pagos al propietario"), max_digits=12, decimal_places=2, default=0
++    )
++    balance_due = models.DecimalField(
++        _("saldo por pagar"), max_digits=12, decimal_places=2, default=0
++    )
++    payout_due = models.DecimalField(
++        _("saldo por entregar"), max_digits=12, decimal_places=2, default=0
++    )
++    generated_at = models.DateTimeField(_("emitido en"), default=timezone.now)
++    refreshed_at = models.DateTimeField(_("actualizado en"), default=timezone.now)
++
++    class Meta:
++        verbose_name = _("estado de cuenta por periodo")
++        verbose_name_plural = _("estados de cuenta por periodo")
++        ordering = ("-period_end", "party_type")
++        constraints = [
++            models.CheckConstraint(
++                condition=(
++                    models.Q(
++                        party_type=AccountPartyType.OWNER,
++                        owner__isnull=False,
++                        tenant_doctor__isnull=True,
++                    )
++                    | models.Q(
++                        party_type=AccountPartyType.TENANT,
++                        owner__isnull=True,
++                        tenant_doctor__isnull=False,
++                    )
++                ),
++                name="finance_account_statement_exact_party",
++            ),
++            models.UniqueConstraint(
++                fields=("owner", "period_start", "period_end", "currency"),
++                condition=models.Q(owner__isnull=False, is_deleted=False),
++                name="finance_owner_statement_unique_period",
++            ),
++            models.UniqueConstraint(
++                fields=(
++                    "tenant_doctor",
++                    "period_start",
++                    "period_end",
++                    "currency",
++                ),
++                condition=models.Q(tenant_doctor__isnull=False, is_deleted=False),
++                name="finance_tenant_statement_unique_period",
++            ),
++        ]
++
++    def __str__(self) -> str:
++        holder = self.owner or self.tenant_doctor
++        return f"{holder}: {self.period_start:%d/%m/%Y} - {self.period_end:%d/%m/%Y}"
++
++    @property
++    def payout_frequency_label(self) -> str:
++        labels = {
++            "weekly": _("Semanal"),
++            "biweekly": _("Quincenal"),
++            "monthly": _("Mensual"),
++        }
++        return str(labels.get(self.payout_frequency, self.payout_frequency))
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if self.period_end < self.period_start:
++            errors["period_end"] = _(
++                "El fin del periodo no puede ser anterior al inicio."
++            )
++        if self.available_on < self.period_end:
++            errors["available_on"] = _(
++                "La fecha de disponibilidad no puede anteceder al cierre."
++            )
++        if self.party_type == AccountPartyType.OWNER:
++            if self.owner_id is None or self.tenant_doctor_id is not None:
++                errors["owner"] = _("Selecciona únicamente al propietario.")
++        elif self.party_type == AccountPartyType.TENANT:
++            if self.tenant_doctor_id is None or self.owner_id is not None:
++                errors["tenant_doctor"] = _(
++                    "Selecciona únicamente al médico arrendatario."
++                )
++        for field_name in (
++            "rental_income",
++            "reservation_charges",
++            "commissions",
++            "owner_net",
++            "subscription_charges",
++            "direct_fees",
++            "deducted_fees",
++            "reservation_payments",
++            "account_payments_total",
++            "payouts_made",
++            "balance_due",
++            "payout_due",
++        ):
++            if getattr(self, field_name) < Decimal("0.00"):
++                errors[field_name] = _("El importe no puede ser negativo.")
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
++class AccountStatementLine(BaseModel):
++    account_statement = models.ForeignKey(
++        AccountStatement,
++        on_delete=models.PROTECT,
++        related_name="lines",
++        verbose_name=_("estado de cuenta"),
++    )
++    line_type = models.CharField(
++        _("tipo de movimiento"),
++        max_length=40,
++        choices=AccountLineType.choices,
++    )
++    description = models.CharField(_("descripción"), max_length=255)
++    effective_date = models.DateField(_("fecha"))
++    coverage_start = models.DateField(_("inicio de cobertura"), blank=True, null=True)
++    coverage_end = models.DateField(_("fin de cobertura"), blank=True, null=True)
++    room = models.ForeignKey(
++        "catalog.ConsultingRoom",
++        on_delete=models.PROTECT,
++        related_name="account_statement_lines",
++        blank=True,
++        null=True,
++    )
++    reservation = models.ForeignKey(
++        "scheduling.Reservation",
++        on_delete=models.PROTECT,
++        related_name="account_statement_lines",
++        blank=True,
++        null=True,
++    )
++    settlement = models.ForeignKey(
++        "finance.Settlement",
++        on_delete=models.PROTECT,
++        related_name="account_statement_lines",
++        blank=True,
++        null=True,
++    )
++    amount = models.DecimalField(_("importe"), max_digits=12, decimal_places=2)
++    source_model = models.CharField(_("modelo origen"), max_length=100, blank=True)
++    source_id = models.CharField(_("identificador origen"), max_length=64, blank=True)
++    source_snapshot = models.JSONField(
++        _("snapshot del origen"),
++        default=dict,
++        blank=True,
++    )
++
++    class Meta:
++        verbose_name = _("movimiento de estado de cuenta")
++        verbose_name_plural = _("movimientos de estados de cuenta")
++        ordering = ("effective_date", "created_at")
++        constraints = [
++            models.CheckConstraint(
++                condition=models.Q(amount__gte=0),
++                name="finance_account_statement_line_nonnegative",
++            ),
++            models.UniqueConstraint(
++                fields=("account_statement", "line_type", "source_model", "source_id"),
++                name="finance_account_line_unique_source",
++            ),
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.get_line_type_display()}: {self.amount}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if self.amount < Decimal("0.00"):
++            errors["amount"] = _("El importe no puede ser negativo.")
++        if self.coverage_start and self.coverage_end:
++            if self.coverage_end < self.coverage_start:
++                errors["coverage_end"] = _(
++                    "El fin de cobertura no puede ser anterior al inicio."
++                )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
++class AccountPayment(BaseModel):
++    account_statement = models.ForeignKey(
++        AccountStatement,
++        on_delete=models.PROTECT,
++        related_name="account_payments",
++        verbose_name=_("estado de cuenta"),
++    )
++    category = models.CharField(
++        _("concepto"),
++        max_length=32,
++        choices=AccountPaymentCategory.choices,
++    )
++    amount = models.DecimalField(_("importe"), max_digits=12, decimal_places=2)
++    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
++    method = models.CharField(
++        _("método"),
++        max_length=24,
++        choices=PaymentMethod.choices,
++        default=PaymentMethod.TRANSFER,
++    )
++    reference = models.CharField(_("referencia"), max_length=160, blank=True)
++    payment_date = models.DateField(_("fecha de pago"), default=timezone.localdate)
++    receipt = models.FileField(
++        _("comprobante"),
++        upload_to="account-payment-receipts/",
++        blank=True,
++        null=True,
++    )
++    status = models.CharField(
++        _("estado"),
++        max_length=24,
++        choices=PaymentStatus.choices,
++        default=PaymentStatus.REGISTERED,
++    )
++    validated_by = models.ForeignKey(
++        settings.AUTH_USER_MODEL,
++        on_delete=models.SET_NULL,
++        related_name="validated_account_payments",
++        blank=True,
++        null=True,
++    )
++    validated_at = models.DateTimeField(_("validado en"), blank=True, null=True)
++    rejected_reason = models.TextField(_("motivo de rechazo"), blank=True)
++    notes = models.TextField(_("notas"), blank=True)
++
++    class Meta:
++        verbose_name = _("pago de suscripción o cuota")
++        verbose_name_plural = _("pagos de suscripciones o cuotas")
++        ordering = ("-payment_date", "-created_at")
++        constraints = [
++            models.CheckConstraint(
++                condition=models.Q(amount__gt=0),
++                name="finance_account_payment_positive",
++            )
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.get_category_display()} - {self.amount} {self.currency}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if self.amount <= Decimal("0.00"):
++            errors["amount"] = _("El importe debe ser mayor que cero.")
++        if self.account_statement_id:
++            statement = self.account_statement
++            if self.currency != statement.currency:
++                errors["currency"] = _("La moneda debe coincidir con el estado.")
++            owner_categories = {
++                AccountPaymentCategory.OWNER_SUBSCRIPTION,
++                AccountPaymentCategory.OWNER_FEE,
++            }
++            if (
++                statement.party_type == AccountPartyType.OWNER
++                and self.category not in owner_categories
++            ):
++                errors["category"] = _("El concepto no corresponde al propietario.")
++            if (
++                statement.party_type == AccountPartyType.TENANT
++                and self.category != AccountPaymentCategory.TENANT_SUBSCRIPTION
++            ):
++                errors["category"] = _(
++                    "El concepto no corresponde al médico arrendatario."
++                )
++        if self.method in {PaymentMethod.CREDIT}:
++            errors["method"] = _("El saldo a favor no aplica a suscripciones o cuotas.")
++        if self.method != PaymentMethod.CASH and not self.reference.strip():
++            errors["reference"] = _(
++                "La referencia es obligatoria salvo pagos en efectivo."
++            )
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
++class OwnerPayout(BaseModel):
++    account_statement = models.ForeignKey(
++        AccountStatement,
++        on_delete=models.PROTECT,
++        related_name="owner_payouts",
++        verbose_name=_("estado de cuenta del propietario"),
++    )
++    amount = models.DecimalField(_("importe pagado"), max_digits=12, decimal_places=2)
++    deducted_fees = models.DecimalField(
++        _("cuotas descontadas en el corte"),
++        max_digits=12,
++        decimal_places=2,
++        default=0,
++    )
++    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
++    reference = models.CharField(_("referencia"), max_length=160)
++    payment_date = models.DateField(_("fecha de pago"), default=timezone.localdate)
++    receipt = models.FileField(
++        _("comprobante de transferencia"),
++        upload_to="owner-payout-receipts/",
++    )
++    paid_by = models.ForeignKey(
++        settings.AUTH_USER_MODEL,
++        on_delete=models.SET_NULL,
++        related_name="registered_owner_payouts",
++        blank=True,
++        null=True,
++    )
++    notes = models.TextField(_("notas"), blank=True)
++
++    class Meta:
++        verbose_name = _("pago de corte al propietario")
++        verbose_name_plural = _("pagos de cortes a propietarios")
++        ordering = ("-payment_date", "-created_at")
++        constraints = [
++            models.CheckConstraint(
++                condition=models.Q(amount__gt=0),
++                name="finance_owner_payout_positive",
++            ),
++            models.CheckConstraint(
++                condition=models.Q(deducted_fees__gte=0),
++                name="finance_owner_payout_fees_nonnegative",
++            ),
++        ]
++
++    def __str__(self) -> str:
++        return f"{self.account_statement.owner} - {self.amount} {self.currency}"
++
++    def clean(self) -> None:
++        super().clean()
++        errors: dict[str, Any] = {}
++        if self.amount <= Decimal("0.00"):
++            errors["amount"] = _("El importe debe ser mayor que cero.")
++        if self.deducted_fees < Decimal("0.00"):
++            errors["deducted_fees"] = _("El descuento no puede ser negativo.")
++        if self.account_statement_id:
++            statement = self.account_statement
++            if statement.party_type != AccountPartyType.OWNER:
++                errors["account_statement"] = _(
++                    "El estado de cuenta debe pertenecer a un propietario."
++                )
++            if self.currency != statement.currency:
++                errors["currency"] = _("La moneda debe coincidir con el estado.")
++        if not self.reference.strip():
++            errors["reference"] = _("La referencia es obligatoria.")
++        if not self.receipt:
++            errors["receipt"] = _("El comprobante es obligatorio.")
++        if errors:
++            raise ValidationError(errors)
++
++    def save(self, *args: Any, **kwargs: Any) -> None:
++        self.full_clean()
++        super().save(*args, **kwargs)
++
++
+ class SettlementStatus(models.TextChoices):
+     PENDING = "pendiente", _("Pendiente")
+     CALCULATED = "calculada", _("Calculada")
+diff --git a/apps/finance/services/settlement_service.py b/apps/finance/services/settlement_service.py
+index c625daf..dd180f6 100644
+--- a/apps/finance/services/settlement_service.py
++++ b/apps/finance/services/settlement_service.py
+@@ -86,6 +86,7 @@ def generate_settlement_for_reservation(
+         actor=actor,
+         payload=_settlement_payload(settlement, actor=actor),
+     )
++    _refresh_related_account_statements(settlement, actor=actor)
+     return settlement
+ 
+ 
+@@ -127,6 +128,7 @@ def mark_settlement_as_paid(
+         actor=actor,
+         payload=_settlement_payload(settlement, actor=actor),
+     )
++    _refresh_related_account_statements(settlement, actor=actor)
+     return settlement
+ 
+ 
+@@ -152,6 +154,7 @@ def cancel_settlement(
+         actor=actor,
+         payload=_settlement_payload(settlement, actor=actor),
+     )
++    _refresh_related_account_statements(settlement, actor=actor)
+     return settlement
+ 
+ 
+@@ -239,6 +242,30 @@ def _settlement_total(queryset: QuerySet[Settlement]) -> Decimal:
+     return queryset.aggregate(total=Sum("owner_net"))["total"] or Decimal("0.00")
+ 
+ 
++def _refresh_related_account_statements(
++    settlement: Settlement,
++    *,
++    actor: Model | None,
++) -> None:
++    from apps.finance.models import AccountStatement
++    from apps.finance.services.account_statement_service import (
++        refresh_account_statement,
++    )
++
++    account_statements = AccountStatement.objects.filter(
++        owner=settlement.owner,
++        period_start__lte=settlement.reservation.date,
++        period_end__gte=settlement.reservation.date,
++        currency=settlement.currency,
++        is_deleted=False,
++    )
++    for account_statement in account_statements:
++        refresh_account_statement(
++            account_statement=account_statement,
++            actor=actor,
++        )
++
++
+ def _settlement_payload(
+     settlement: Settlement,
+     *,
+diff --git a/apps/finance/urls.py b/apps/finance/urls.py
+index 7c14195..ff3ef14 100644
+--- a/apps/finance/urls.py
++++ b/apps/finance/urls.py
+@@ -5,6 +5,41 @@ from django.urls import path
+ from apps.finance import views
+ 
+ urlpatterns = [
++    path(
++        "estados-de-cuenta/",
++        views.AccountStatementListView.as_view(),
++        name="statements",
++    ),
++    path(
++        "estados-de-cuenta/emitir/",
++        views.AccountStatementGenerateView.as_view(),
++        name="account_statement_generate",
++    ),
++    path(
++        "estados-de-cuenta/<uuid:pk>/",
++        views.AccountStatementDetailView.as_view(),
++        name="account_statement_detail",
++    ),
++    path(
++        "estados-de-cuenta/<uuid:statement_pk>/pagos/nuevo/",
++        views.AccountPaymentSubmitView.as_view(),
++        name="account_payment_submit",
++    ),
++    path(
++        "estados-de-cuenta/<uuid:statement_pk>/pago-propietario/",
++        views.OwnerPayoutCreateView.as_view(),
++        name="account_statement_owner_payout_create",
++    ),
++    path(
++        "pagos-estado-cuenta/<uuid:pk>/validar/",
++        views.AccountPaymentValidateView.as_view(),
++        name="account_payment_validate",
++    ),
++    path(
++        "pagos-estado-cuenta/<uuid:pk>/rechazar/",
++        views.AccountPaymentRejectView.as_view(),
++        name="account_payment_reject",
++    ),
+     path("tarifas/", views.RateRuleListView.as_view(), name="rates"),
+     path("tarifas/nueva/", views.RateRuleCreateView.as_view(), name="rate_create"),
+     path("tarifas/<uuid:pk>/", views.RateRuleDetailView.as_view(), name="rate_detail"),
+diff --git a/apps/finance/views.py b/apps/finance/views.py
+index aa50f71..fcbb9b2 100644
+--- a/apps/finance/views.py
++++ b/apps/finance/views.py
+@@ -25,7 +25,11 @@ from apps.core.form_utils import django_weekday_values
+ from apps.core.permissions import get_user_roles, scope_queryset_for_user
+ from apps.core.templatetags.clinic_time import format_time_for_clinic
+ from apps.finance.forms import (
++    AccountPaymentForm,
++    AccountStatementFilterForm,
++    AccountStatementGenerationForm,
+     BatchPaymentSubmissionForm,
++    OwnerPayoutForm,
+     PaymentFilterForm,
+     PaymentRegistrationForm,
+     PaymentRejectForm,
+@@ -38,12 +42,24 @@ from apps.finance.forms import (
+     TenantDoctorDiscountForm,
+ )
+ from apps.finance.models import (
++    AccountPartyType,
++    AccountPayment,
++    AccountStatement,
+     Payment,
+     RateRule,
+     RoomRateDiscount,
+     Settlement,
+     TenantDoctorDiscount,
+ )
++from apps.finance.services.account_statement_service import (
++    generate_owner_account_statement,
++    generate_tenant_account_statement,
++    refresh_account_statement,
++    register_account_payment,
++    register_owner_payout,
++    reject_account_payment,
++    validate_account_payment,
++)
+ from apps.finance.services.cancellation_service import available_credit_for_tenant
+ from apps.finance.services.payment_service import (
+     cancel_payment,
+@@ -924,6 +940,394 @@ class PaymentCancelView(
+         return redirect("payment_detail", pk=payment.pk)
+ 
+ 
++def _user_can_manage_account_statements(user: Any) -> bool:
++    return bool(
++        get_user_roles(user).intersection({UserRole.SUPERADMIN, UserRole.ADMIN})
++    )
++
++
++def _user_can_submit_account_payment(
++    user: Any,
++    account_statement: AccountStatement,
++) -> bool:
++    if _user_can_manage_account_statements(user):
++        return True
++    if account_statement.party_type == AccountPartyType.OWNER:
++        return (
++            account_statement.owner is not None
++            and account_statement.owner.user_id == getattr(user, "pk", None)
++        )
++    return (
++        account_statement.tenant_doctor is not None
++        and account_statement.tenant_doctor.user_id == getattr(user, "pk", None)
++    )
++
++
++class AccountStatementListView(LoginRequiredMixin, ListView):
++    template_name = "finance/account_statement_list.html"
++    context_object_name = "account_statements"
++    paginate_by = 30
++
++    def get_queryset(self) -> QuerySet[AccountStatement]:
++        queryset = AccountStatement.objects.filter(is_deleted=False).select_related(
++            "owner",
++            "owner__user",
++            "tenant_doctor",
++            "tenant_doctor__user",
++        )
++        self.filter_form = AccountStatementFilterForm(
++            self.request.GET or None,
++            user=self.request.user,
++        )
++        if self.filter_form.is_valid():
++            party_type = self.filter_form.cleaned_data.get("party_type")
++            owner = self.filter_form.cleaned_data.get("owner")
++            tenant_doctor = self.filter_form.cleaned_data.get("tenant_doctor")
++            status = self.filter_form.cleaned_data.get("status")
++            date_from = self.filter_form.cleaned_data.get("date_from")
++            date_to = self.filter_form.cleaned_data.get("date_to")
++            if party_type:
++                queryset = queryset.filter(party_type=party_type)
++            if owner:
++                queryset = queryset.filter(owner=owner)
++            if tenant_doctor:
++                queryset = queryset.filter(tenant_doctor=tenant_doctor)
++            if status:
++                queryset = queryset.filter(status=status)
++            if date_from:
++                queryset = queryset.filter(period_end__gte=date_from)
++            if date_to:
++                queryset = queryset.filter(period_start__lte=date_to)
++        return scope_queryset_for_user(queryset, self.request.user)
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Estados de cuenta"
++        context["filter_form"] = self.filter_form
++        context["can_generate"] = _user_can_manage_account_statements(
++            self.request.user
++        )
++        return context
++
++
++class AccountStatementDetailView(LoginRequiredMixin, DetailView):
++    template_name = "finance/account_statement_detail.html"
++    context_object_name = "account_statement"
++
++    def get_queryset(self) -> QuerySet[AccountStatement]:
++        queryset = AccountStatement.objects.filter(is_deleted=False).select_related(
++            "owner",
++            "owner__user",
++            "tenant_doctor",
++            "tenant_doctor__user",
++        )
++        return scope_queryset_for_user(queryset, self.request.user)
++
++    def get_object(self, queryset: QuerySet[Any] | None = None) -> AccountStatement:
++        account_statement = super().get_object(queryset)
++        return refresh_account_statement(account_statement=account_statement)
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        account_statement = context["account_statement"]
++        context["page_title"] = "Detalle de estado de cuenta"
++        context["lines"] = account_statement.lines.filter(
++            is_deleted=False
++        ).select_related("room", "reservation", "settlement")
++        context["account_payments"] = account_statement.account_payments.filter(
++            is_deleted=False
++        ).select_related("validated_by")
++        context["owner_payouts"] = account_statement.owner_payouts.filter(
++            is_deleted=False
++        ).select_related("paid_by")
++        context["can_submit_payment"] = _user_can_submit_account_payment(
++            self.request.user,
++            account_statement,
++        )
++        context["can_review_payments"] = _user_can_manage_account_statements(
++            self.request.user
++        )
++        context["can_register_owner_payout"] = (
++            _user_can_manage_account_statements(self.request.user)
++            and account_statement.party_type == AccountPartyType.OWNER
++            and account_statement.payout_due > 0
++        )
++        return context
++
++
++class AccountStatementGenerateView(LoginRequiredMixin, FormMixin, TemplateView):
++    template_name = "finance/account_statement_generate.html"
++    form_class = AccountStatementGenerationForm
++
++    def dispatch(
++        self,
++        request: HttpRequest,
++        *args: Any,
++        **kwargs: Any,
++    ) -> HttpResponseBase:
++        if not _user_can_manage_account_statements(request.user):
++            return HttpResponseForbidden(
++                "Sólo un administrador puede emitir estados de cuenta."
++            )
++        return super().dispatch(request, *args, **kwargs)
++
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["user"] = self.request.user
++        return kwargs
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Emitir estado de cuenta"
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        form = self.get_form()
++        if not form.is_valid():
++            return self.form_invalid(form)
++        try:
++            if form.cleaned_data["party_type"] == AccountPartyType.OWNER:
++                account_statement = generate_owner_account_statement(
++                    owner=form.cleaned_data["owner"],
++                    period_start=form.cleaned_data["period_start"],
++                    period_end=form.cleaned_data["period_end"],
++                    currency=form.cleaned_data["currency"],
++                    actor=cast(Model, request.user),
++                )
++            else:
++                account_statement = generate_tenant_account_statement(
++                    tenant_doctor=form.cleaned_data["tenant_doctor"],
++                    period_start=form.cleaned_data["period_start"],
++                    period_end=form.cleaned_data["period_end"],
++                    currency=form.cleaned_data["currency"],
++                    actor=cast(Model, request.user),
++                )
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        messages.success(request, "Estado de cuenta emitido.")
++        return redirect("account_statement_detail", pk=account_statement.pk)
++
++
++class AccountPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
++    template_name = "finance/account_payment_form.html"
++    form_class = AccountPaymentForm
++
++    def get_account_statement(self) -> AccountStatement:
++        queryset = AccountStatement.objects.filter(is_deleted=False).select_related(
++            "owner",
++            "owner__user",
++            "tenant_doctor",
++            "tenant_doctor__user",
++        )
++        return get_object_or_404(
++            scope_queryset_for_user(queryset, self.request.user),
++            pk=self.kwargs["statement_pk"],
++        )
++
++    def dispatch(
++        self,
++        request: HttpRequest,
++        *args: Any,
++        **kwargs: Any,
++    ) -> HttpResponseBase:
++        if not _user_can_submit_account_payment(
++            request.user,
++            self.get_account_statement(),
++        ):
++            return HttpResponseForbidden("No puedes registrar pagos para este estado.")
++        return super().dispatch(request, *args, **kwargs)
++
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["account_statement"] = self.get_account_statement()
++        return kwargs
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Registrar pago"
++        context["account_statement"] = self.get_account_statement()
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        form = self.get_form()
++        if not form.is_valid():
++            return self.form_invalid(form)
++        account_statement = self.get_account_statement()
++        try:
++            register_account_payment(
++                account_statement=account_statement,
++                category=form.cleaned_data["category"],
++                amount=form.cleaned_data["amount"],
++                method=form.cleaned_data["method"],
++                reference=form.cleaned_data["reference"],
++                payment_date=form.cleaned_data["payment_date"],
++                receipt=form.cleaned_data.get("receipt"),
++                notes=form.cleaned_data["notes"],
++                actor=cast(Model, request.user),
++            )
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        messages.success(request, "Pago enviado para validación.")
++        return redirect("account_statement_detail", pk=account_statement.pk)
++
++
++class AccountPaymentReviewMixin:
++    def dispatch(
++        self,
++        request: HttpRequest,
++        *args: Any,
++        **kwargs: Any,
++    ) -> HttpResponseBase:
++        if not _user_can_manage_account_statements(request.user):
++            return HttpResponseForbidden(
++                "Sólo un administrador puede revisar estos pagos."
++            )
++        return super().dispatch(request, *args, **kwargs)  # type: ignore[misc]
++
++    def get_account_payment(self) -> AccountPayment:
++        queryset = AccountPayment.objects.filter(is_deleted=False).select_related(
++            "account_statement",
++            "account_statement__owner",
++            "account_statement__tenant_doctor",
++        )
++        return get_object_or_404(
++            scope_queryset_for_user(queryset, self.request.user),  # type: ignore[attr-defined]
++            pk=self.kwargs["pk"],  # type: ignore[attr-defined]
++        )
++
++
++class AccountPaymentValidateView(
++    LoginRequiredMixin,
++    AccountPaymentReviewMixin,
++    TemplateView,
++):
++    template_name = "finance/account_payment_validate.html"
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Validar pago"
++        context["account_payment"] = self.get_account_payment()
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        payment = self.get_account_payment()
++        try:
++            validate_account_payment(
++                payment=payment,
++                actor=cast(Model, request.user),
++            )
++        except ValidationError as exc:
++            messages.error(request, "; ".join(exc.messages))
++        else:
++            messages.success(request, "Pago validado.")
++        return redirect(
++            "account_statement_detail",
++            pk=payment.account_statement_id,
++        )
++
++
++class AccountPaymentRejectView(
++    LoginRequiredMixin,
++    AccountPaymentReviewMixin,
++    FormMixin,
++    TemplateView,
++):
++    template_name = "finance/account_payment_reject.html"
++    form_class = PaymentRejectForm
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Rechazar pago"
++        context["account_payment"] = self.get_account_payment()
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        form = self.get_form()
++        payment = self.get_account_payment()
++        if not form.is_valid():
++            return self.form_invalid(form)
++        try:
++            reject_account_payment(
++                payment=payment,
++                reason=form.cleaned_data["reason"],
++                actor=cast(Model, request.user),
++            )
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        messages.success(request, "Pago rechazado.")
++        return redirect(
++            "account_statement_detail",
++            pk=payment.account_statement_id,
++        )
++
++
++class OwnerPayoutCreateView(LoginRequiredMixin, FormMixin, TemplateView):
++    template_name = "finance/owner_payout_form.html"
++    form_class = OwnerPayoutForm
++
++    def get_account_statement(self) -> AccountStatement:
++        queryset = AccountStatement.objects.filter(
++            party_type=AccountPartyType.OWNER,
++            is_deleted=False,
++        ).select_related("owner", "owner__user")
++        statement = get_object_or_404(
++            scope_queryset_for_user(queryset, self.request.user),
++            pk=self.kwargs["statement_pk"],
++        )
++        return refresh_account_statement(account_statement=statement)
++
++    def dispatch(
++        self,
++        request: HttpRequest,
++        *args: Any,
++        **kwargs: Any,
++    ) -> HttpResponseBase:
++        if not _user_can_manage_account_statements(request.user):
++            return HttpResponseForbidden(
++                "Sólo un administrador puede registrar pagos al propietario."
++            )
++        statement = self.get_account_statement()
++        if statement.payout_due <= 0:
++            messages.info(request, "El estado de cuenta no tiene saldo por entregar.")
++            return redirect("account_statement_detail", pk=statement.pk)
++        return super().dispatch(request, *args, **kwargs)
++
++    def get_form_kwargs(self) -> dict[str, Any]:
++        kwargs = super().get_form_kwargs()
++        kwargs["account_statement"] = self.get_account_statement()
++        return kwargs
++
++    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
++        context = super().get_context_data(**kwargs)
++        context["page_title"] = "Registrar pago al propietario"
++        context["account_statement"] = self.get_account_statement()
++        return context
++
++    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
++        form = self.get_form()
++        statement = self.get_account_statement()
++        if not form.is_valid():
++            return self.form_invalid(form)
++        try:
++            register_owner_payout(
++                account_statement=statement,
++                amount=form.cleaned_data["amount"],
++                reference=form.cleaned_data["reference"],
++                payment_date=form.cleaned_data["payment_date"],
++                receipt=form.cleaned_data["receipt"],
++                notes=form.cleaned_data["notes"],
++                actor=cast(Model, request.user),
++            )
++        except ValidationError as exc:
++            form.add_error(None, exc)
++            return self.form_invalid(form)
++        messages.success(request, "Pago al propietario registrado.")
++        return redirect("account_statement_detail", pk=statement.pk)
++
++
+ class SettlementListView(LoginRequiredMixin, ListView):
+     template_name = "finance/settlement_list.html"
+     context_object_name = "settlements"
+diff --git a/apps/identity/screen_registry.py b/apps/identity/screen_registry.py
+index c87d26d..b4b9891 100644
+--- a/apps/identity/screen_registry.py
++++ b/apps/identity/screen_registry.py
+@@ -144,6 +144,8 @@ EXACT_ROUTE_SCREENS = {
+ }
+ 
+ ROUTE_PREFIX_SCREENS = (
++    ("account_statement_", "statements"),
++    ("account_payment_", "statements"),
+     ("owner_subscription_", "owner_subscriptions"),
+     ("tenant_subscription_", "tenant_subscriptions"),
+     ("owner_commission_", "owner_terms"),
+@@ -207,6 +209,11 @@ EDIT_ROUTE_NAMES = {
+     "reservation_batch_cancel",
+     "reservation_cancellation_refund",
+     "reservation_cancellation_credit",
++    "account_statement_generate",
++    "account_payment_submit",
++    "account_payment_validate",
++    "account_payment_reject",
++    "account_statement_owner_payout_create",
+     "reservation_confirm",
+     "room_rate_discount_create",
+     "room_rate_discount_toggle",
+diff --git a/apps/presentation/urls.py b/apps/presentation/urls.py
+index e550527..5446845 100644
+--- a/apps/presentation/urls.py
++++ b/apps/presentation/urls.py
+@@ -16,12 +16,6 @@ urlpatterns = [
+     path("", include("apps.integration.urls")),
+     path("", include("apps.reports.urls")),
+     path("", include("apps.identity.urls")),
+-    path(
+-        "estados-de-cuenta/",
+-        views.construction_page,
+-        {"page_key": "statements"},
+-        name="statements",
+-    ),
+     path(
+         "administracion/",
+         views.construction_page,
+diff --git a/config/settings.py b/config/settings.py
+index 0eba433..d0b52bc 100644
+--- a/config/settings.py
++++ b/config/settings.py
+@@ -4,6 +4,7 @@ from pathlib import Path
+ from sys import argv
+ 
+ import environ
++from celery.schedules import crontab
+ from django.core.exceptions import ImproperlyConfigured
+ from django.core.management.utils import get_random_secret_key
+ 
+@@ -148,6 +149,10 @@ CELERY_BEAT_SCHEDULE = {
+         "task": "scheduling.expire_overdue_reservation_batches",
+         "schedule": 300.0,
+     },
++    "generate-due-account-statements": {
++        "task": "finance.generate_due_account_statements",
++        "schedule": crontab(hour=0, minute=10),
++    },
+ }
+ 
+ MINIO_STORAGE_ENABLED = env.bool("MINIO_STORAGE_ENABLED", default=False)

@@ -4,6 +4,7 @@ from pathlib import Path
 from sys import argv
 
 import environ
+from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.utils import get_random_secret_key
 
@@ -147,6 +148,10 @@ CELERY_BEAT_SCHEDULE = {
     "expire-overdue-reservation-batches": {
         "task": "scheduling.expire_overdue_reservation_batches",
         "schedule": 300.0,
+    },
+    "generate-due-account-statements": {
+        "task": "finance.generate_due_account_statements",
+        "schedule": crontab(hour=0, minute=10),
     },
 }
 

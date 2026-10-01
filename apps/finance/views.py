@@ -25,7 +25,11 @@ from apps.core.form_utils import django_weekday_values
 from apps.core.permissions import get_user_roles, scope_queryset_for_user
 from apps.core.templatetags.clinic_time import format_time_for_clinic
 from apps.finance.forms import (
+    AccountPaymentForm,
+    AccountStatementFilterForm,
+    AccountStatementGenerationForm,
     BatchPaymentSubmissionForm,
+    OwnerPayoutForm,
     PaymentFilterForm,
     PaymentRegistrationForm,
     PaymentRejectForm,
@@ -38,11 +42,23 @@ from apps.finance.forms import (
     TenantDoctorDiscountForm,
 )
 from apps.finance.models import (
+    AccountPartyType,
+    AccountPayment,
+    AccountStatement,
     Payment,
     RateRule,
     RoomRateDiscount,
     Settlement,
     TenantDoctorDiscount,
+)
+from apps.finance.services.account_statement_service import (
+    generate_owner_account_statement,
+    generate_tenant_account_statement,
+    refresh_account_statement,
+    register_account_payment,
+    register_owner_payout,
+    reject_account_payment,
+    validate_account_payment,
 )
 from apps.finance.services.cancellation_service import available_credit_for_tenant
 from apps.finance.services.payment_service import (
@@ -922,6 +938,394 @@ class PaymentCancelView(
 
         messages.success(request, "Pago cancelado.")
         return redirect("payment_detail", pk=payment.pk)
+
+
+def _user_can_manage_account_statements(user: Any) -> bool:
+    return bool(
+        get_user_roles(user).intersection({UserRole.SUPERADMIN, UserRole.ADMIN})
+    )
+
+
+def _user_can_submit_account_payment(
+    user: Any,
+    account_statement: AccountStatement,
+) -> bool:
+    if _user_can_manage_account_statements(user):
+        return True
+    if account_statement.party_type == AccountPartyType.OWNER:
+        return (
+            account_statement.owner is not None
+            and account_statement.owner.user_id == getattr(user, "pk", None)
+        )
+    return (
+        account_statement.tenant_doctor is not None
+        and account_statement.tenant_doctor.user_id == getattr(user, "pk", None)
+    )
+
+
+class AccountStatementListView(LoginRequiredMixin, ListView):
+    template_name = "finance/account_statement_list.html"
+    context_object_name = "account_statements"
+    paginate_by = 30
+
+    def get_queryset(self) -> QuerySet[AccountStatement]:
+        queryset = AccountStatement.objects.filter(is_deleted=False).select_related(
+            "owner",
+            "owner__user",
+            "tenant_doctor",
+            "tenant_doctor__user",
+        )
+        self.filter_form = AccountStatementFilterForm(
+            self.request.GET or None,
+            user=self.request.user,
+        )
+        if self.filter_form.is_valid():
+            party_type = self.filter_form.cleaned_data.get("party_type")
+            owner = self.filter_form.cleaned_data.get("owner")
+            tenant_doctor = self.filter_form.cleaned_data.get("tenant_doctor")
+            status = self.filter_form.cleaned_data.get("status")
+            date_from = self.filter_form.cleaned_data.get("date_from")
+            date_to = self.filter_form.cleaned_data.get("date_to")
+            if party_type:
+                queryset = queryset.filter(party_type=party_type)
+            if owner:
+                queryset = queryset.filter(owner=owner)
+            if tenant_doctor:
+                queryset = queryset.filter(tenant_doctor=tenant_doctor)
+            if status:
+                queryset = queryset.filter(status=status)
+            if date_from:
+                queryset = queryset.filter(period_end__gte=date_from)
+            if date_to:
+                queryset = queryset.filter(period_start__lte=date_to)
+        return scope_queryset_for_user(queryset, self.request.user)
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Estados de cuenta"
+        context["filter_form"] = self.filter_form
+        context["can_generate"] = _user_can_manage_account_statements(
+            self.request.user
+        )
+        return context
+
+
+class AccountStatementDetailView(LoginRequiredMixin, DetailView):
+    template_name = "finance/account_statement_detail.html"
+    context_object_name = "account_statement"
+
+    def get_queryset(self) -> QuerySet[AccountStatement]:
+        queryset = AccountStatement.objects.filter(is_deleted=False).select_related(
+            "owner",
+            "owner__user",
+            "tenant_doctor",
+            "tenant_doctor__user",
+        )
+        return scope_queryset_for_user(queryset, self.request.user)
+
+    def get_object(self, queryset: QuerySet[Any] | None = None) -> AccountStatement:
+        account_statement = super().get_object(queryset)
+        return refresh_account_statement(account_statement=account_statement)
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        account_statement = context["account_statement"]
+        context["page_title"] = "Detalle de estado de cuenta"
+        context["lines"] = account_statement.lines.filter(
+            is_deleted=False
+        ).select_related("room", "reservation", "settlement")
+        context["account_payments"] = account_statement.account_payments.filter(
+            is_deleted=False
+        ).select_related("validated_by")
+        context["owner_payouts"] = account_statement.owner_payouts.filter(
+            is_deleted=False
+        ).select_related("paid_by")
+        context["can_submit_payment"] = _user_can_submit_account_payment(
+            self.request.user,
+            account_statement,
+        )
+        context["can_review_payments"] = _user_can_manage_account_statements(
+            self.request.user
+        )
+        context["can_register_owner_payout"] = (
+            _user_can_manage_account_statements(self.request.user)
+            and account_statement.party_type == AccountPartyType.OWNER
+            and account_statement.payout_due > 0
+        )
+        return context
+
+
+class AccountStatementGenerateView(LoginRequiredMixin, FormMixin, TemplateView):
+    template_name = "finance/account_statement_generate.html"
+    form_class = AccountStatementGenerationForm
+
+    def dispatch(
+        self,
+        request: HttpRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> HttpResponseBase:
+        if not _user_can_manage_account_statements(request.user):
+            return HttpResponseForbidden(
+                "Sólo un administrador puede emitir estados de cuenta."
+            )
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Emitir estado de cuenta"
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        if not form.is_valid():
+            return self.form_invalid(form)
+        try:
+            if form.cleaned_data["party_type"] == AccountPartyType.OWNER:
+                account_statement = generate_owner_account_statement(
+                    owner=form.cleaned_data["owner"],
+                    period_start=form.cleaned_data["period_start"],
+                    period_end=form.cleaned_data["period_end"],
+                    currency=form.cleaned_data["currency"],
+                    actor=cast(Model, request.user),
+                )
+            else:
+                account_statement = generate_tenant_account_statement(
+                    tenant_doctor=form.cleaned_data["tenant_doctor"],
+                    period_start=form.cleaned_data["period_start"],
+                    period_end=form.cleaned_data["period_end"],
+                    currency=form.cleaned_data["currency"],
+                    actor=cast(Model, request.user),
+                )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(request, "Estado de cuenta emitido.")
+        return redirect("account_statement_detail", pk=account_statement.pk)
+
+
+class AccountPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
+    template_name = "finance/account_payment_form.html"
+    form_class = AccountPaymentForm
+
+    def get_account_statement(self) -> AccountStatement:
+        queryset = AccountStatement.objects.filter(is_deleted=False).select_related(
+            "owner",
+            "owner__user",
+            "tenant_doctor",
+            "tenant_doctor__user",
+        )
+        return get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),
+            pk=self.kwargs["statement_pk"],
+        )
+
+    def dispatch(
+        self,
+        request: HttpRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> HttpResponseBase:
+        if not _user_can_submit_account_payment(
+            request.user,
+            self.get_account_statement(),
+        ):
+            return HttpResponseForbidden("No puedes registrar pagos para este estado.")
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["account_statement"] = self.get_account_statement()
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Registrar pago"
+        context["account_statement"] = self.get_account_statement()
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        if not form.is_valid():
+            return self.form_invalid(form)
+        account_statement = self.get_account_statement()
+        try:
+            register_account_payment(
+                account_statement=account_statement,
+                category=form.cleaned_data["category"],
+                amount=form.cleaned_data["amount"],
+                method=form.cleaned_data["method"],
+                reference=form.cleaned_data["reference"],
+                payment_date=form.cleaned_data["payment_date"],
+                receipt=form.cleaned_data.get("receipt"),
+                notes=form.cleaned_data["notes"],
+                actor=cast(Model, request.user),
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(request, "Pago enviado para validación.")
+        return redirect("account_statement_detail", pk=account_statement.pk)
+
+
+class AccountPaymentReviewMixin:
+    def dispatch(
+        self,
+        request: HttpRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> HttpResponseBase:
+        if not _user_can_manage_account_statements(request.user):
+            return HttpResponseForbidden(
+                "Sólo un administrador puede revisar estos pagos."
+            )
+        return super().dispatch(request, *args, **kwargs)  # type: ignore[misc]
+
+    def get_account_payment(self) -> AccountPayment:
+        queryset = AccountPayment.objects.filter(is_deleted=False).select_related(
+            "account_statement",
+            "account_statement__owner",
+            "account_statement__tenant_doctor",
+        )
+        return get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),  # type: ignore[attr-defined]
+            pk=self.kwargs["pk"],  # type: ignore[attr-defined]
+        )
+
+
+class AccountPaymentValidateView(
+    LoginRequiredMixin,
+    AccountPaymentReviewMixin,
+    TemplateView,
+):
+    template_name = "finance/account_payment_validate.html"
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Validar pago"
+        context["account_payment"] = self.get_account_payment()
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        payment = self.get_account_payment()
+        try:
+            validate_account_payment(
+                payment=payment,
+                actor=cast(Model, request.user),
+            )
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+        else:
+            messages.success(request, "Pago validado.")
+        return redirect(
+            "account_statement_detail",
+            pk=payment.account_statement_id,
+        )
+
+
+class AccountPaymentRejectView(
+    LoginRequiredMixin,
+    AccountPaymentReviewMixin,
+    FormMixin,
+    TemplateView,
+):
+    template_name = "finance/account_payment_reject.html"
+    form_class = PaymentRejectForm
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Rechazar pago"
+        context["account_payment"] = self.get_account_payment()
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        payment = self.get_account_payment()
+        if not form.is_valid():
+            return self.form_invalid(form)
+        try:
+            reject_account_payment(
+                payment=payment,
+                reason=form.cleaned_data["reason"],
+                actor=cast(Model, request.user),
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(request, "Pago rechazado.")
+        return redirect(
+            "account_statement_detail",
+            pk=payment.account_statement_id,
+        )
+
+
+class OwnerPayoutCreateView(LoginRequiredMixin, FormMixin, TemplateView):
+    template_name = "finance/owner_payout_form.html"
+    form_class = OwnerPayoutForm
+
+    def get_account_statement(self) -> AccountStatement:
+        queryset = AccountStatement.objects.filter(
+            party_type=AccountPartyType.OWNER,
+            is_deleted=False,
+        ).select_related("owner", "owner__user")
+        statement = get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),
+            pk=self.kwargs["statement_pk"],
+        )
+        return refresh_account_statement(account_statement=statement)
+
+    def dispatch(
+        self,
+        request: HttpRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> HttpResponseBase:
+        if not _user_can_manage_account_statements(request.user):
+            return HttpResponseForbidden(
+                "Sólo un administrador puede registrar pagos al propietario."
+            )
+        statement = self.get_account_statement()
+        if statement.payout_due <= 0:
+            messages.info(request, "El estado de cuenta no tiene saldo por entregar.")
+            return redirect("account_statement_detail", pk=statement.pk)
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        kwargs["account_statement"] = self.get_account_statement()
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        context["page_title"] = "Registrar pago al propietario"
+        context["account_statement"] = self.get_account_statement()
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        statement = self.get_account_statement()
+        if not form.is_valid():
+            return self.form_invalid(form)
+        try:
+            register_owner_payout(
+                account_statement=statement,
+                amount=form.cleaned_data["amount"],
+                reference=form.cleaned_data["reference"],
+                payment_date=form.cleaned_data["payment_date"],
+                receipt=form.cleaned_data["receipt"],
+                notes=form.cleaned_data["notes"],
+                actor=cast(Model, request.user),
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(request, "Pago al propietario registrado.")
+        return redirect("account_statement_detail", pk=statement.pk)
 
 
 class SettlementListView(LoginRequiredMixin, ListView):

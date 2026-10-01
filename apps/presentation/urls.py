@@ -17,12 +17,6 @@ urlpatterns = [
     path("", include("apps.reports.urls")),
     path("", include("apps.identity.urls")),
     path(
-        "estados-de-cuenta/",
-        views.construction_page,
-        {"page_key": "statements"},
-        name="statements",
-    ),
-    path(
         "administracion/",
         views.construction_page,
         {"page_key": "administration"},

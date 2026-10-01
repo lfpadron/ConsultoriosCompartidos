@@ -5,6 +5,41 @@ from django.urls import path
 from apps.finance import views
 
 urlpatterns = [
+    path(
+        "estados-de-cuenta/",
+        views.AccountStatementListView.as_view(),
+        name="statements",
+    ),
+    path(
+        "estados-de-cuenta/emitir/",
+        views.AccountStatementGenerateView.as_view(),
+        name="account_statement_generate",
+    ),
+    path(
+        "estados-de-cuenta/<uuid:pk>/",
+        views.AccountStatementDetailView.as_view(),
+        name="account_statement_detail",
+    ),
+    path(
+        "estados-de-cuenta/<uuid:statement_pk>/pagos/nuevo/",
+        views.AccountPaymentSubmitView.as_view(),
+        name="account_payment_submit",
+    ),
+    path(
+        "estados-de-cuenta/<uuid:statement_pk>/pago-propietario/",
+        views.OwnerPayoutCreateView.as_view(),
+        name="account_statement_owner_payout_create",
+    ),
+    path(
+        "pagos-estado-cuenta/<uuid:pk>/validar/",
+        views.AccountPaymentValidateView.as_view(),
+        name="account_payment_validate",
+    ),
+    path(
+        "pagos-estado-cuenta/<uuid:pk>/rechazar/",
+        views.AccountPaymentRejectView.as_view(),
+        name="account_payment_reject",
+    ),
     path("tarifas/", views.RateRuleListView.as_view(), name="rates"),
     path("tarifas/nueva/", views.RateRuleCreateView.as_view(), name="rate_create"),
     path("tarifas/<uuid:pk>/", views.RateRuleDetailView.as_view(), name="rate_detail"),

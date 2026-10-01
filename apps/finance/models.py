@@ -994,6 +994,470 @@ class TenantCreditApplication(BaseModel):
         super().save(*args, **kwargs)
 
 
+class AccountPartyType(models.TextChoices):
+    OWNER = "propietario", _("Propietario")
+    TENANT = "arrendatario", _("Médico arrendatario")
+
+
+class AccountStatementStatus(models.TextChoices):
+    ISSUED = "emitido", _("Emitido")
+    VOID = "anulado", _("Anulado")
+
+
+class AccountLineType(models.TextChoices):
+    RENTAL_INCOME = "ingreso_arrendamiento", _("Ingreso por arrendamiento")
+    PLATFORM_COMMISSION = "comision_plataforma", _("Comisión de plataforma")
+    OWNER_NET = "neto_propietario", _("Neto del propietario")
+    OWNER_SUBSCRIPTION = "suscripcion_propietario", _("Suscripción de propietario")
+    ROOM_FEE_DIRECT = "cuota_directa", _("Cuota de consultorio")
+    ROOM_FEE_DEDUCTED = "cuota_descontada", _("Cuota descontada del pago")
+    OWNER_PAYMENT = "pago_propietario", _("Pago realizado por el propietario")
+    OWNER_PAYOUT = "pago_al_propietario", _("Pago al propietario")
+    RESERVATION_CHARGE = "cargo_reservacion", _("Reservación")
+    RESERVATION_PAYMENT = "pago_reservacion", _("Pago de reservación")
+    TENANT_SUBSCRIPTION = "suscripcion_arrendatario", _(
+        "Suscripción de médico arrendatario"
+    )
+    TENANT_SUBSCRIPTION_PAYMENT = "pago_suscripcion_arrendatario", _(
+        "Pago de suscripción"
+    )
+
+
+class AccountPaymentCategory(models.TextChoices):
+    OWNER_SUBSCRIPTION = "suscripcion_propietario", _("Suscripción de propietario")
+    OWNER_FEE = "cuota_propietario", _("Cuota de consultorio")
+    TENANT_SUBSCRIPTION = "suscripcion_arrendatario", _(
+        "Suscripción de médico arrendatario"
+    )
+
+
+class AccountStatement(BaseModel):
+    party_type = models.CharField(
+        _("tipo de titular"),
+        max_length=16,
+        choices=AccountPartyType.choices,
+    )
+    owner = models.ForeignKey(
+        "catalog.OwnerProfile",
+        on_delete=models.PROTECT,
+        related_name="account_statements",
+        verbose_name=_("propietario"),
+        blank=True,
+        null=True,
+    )
+    tenant_doctor = models.ForeignKey(
+        "catalog.TenantDoctorProfile",
+        on_delete=models.PROTECT,
+        related_name="account_statements",
+        verbose_name=_("médico arrendatario"),
+        blank=True,
+        null=True,
+    )
+    period_start = models.DateField(_("inicio del periodo"))
+    period_end = models.DateField(_("fin del periodo"))
+    available_on = models.DateField(_("disponible desde"))
+    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
+    status = models.CharField(
+        _("estado"),
+        max_length=16,
+        choices=AccountStatementStatus.choices,
+        default=AccountStatementStatus.ISSUED,
+    )
+    payout_frequency = models.CharField(
+        _("frecuencia de pago"),
+        max_length=16,
+        blank=True,
+    )
+    rental_income = models.DecimalField(
+        _("ingresos por arrendamiento"), max_digits=12, decimal_places=2, default=0
+    )
+    reservation_charges = models.DecimalField(
+        _("cargos por reservación"), max_digits=12, decimal_places=2, default=0
+    )
+    commissions = models.DecimalField(
+        _("comisiones"), max_digits=12, decimal_places=2, default=0
+    )
+    owner_net = models.DecimalField(
+        _("neto del propietario"), max_digits=12, decimal_places=2, default=0
+    )
+    subscription_charges = models.DecimalField(
+        _("suscripciones"), max_digits=12, decimal_places=2, default=0
+    )
+    direct_fees = models.DecimalField(
+        _("cuotas de pago directo"), max_digits=12, decimal_places=2, default=0
+    )
+    deducted_fees = models.DecimalField(
+        _("cuotas descontadas"), max_digits=12, decimal_places=2, default=0
+    )
+    reservation_payments = models.DecimalField(
+        _("pagos de reservaciones"), max_digits=12, decimal_places=2, default=0
+    )
+    account_payments_total = models.DecimalField(
+        _("pagos de suscripciones y cuotas"),
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+    )
+    payouts_made = models.DecimalField(
+        _("pagos al propietario"), max_digits=12, decimal_places=2, default=0
+    )
+    balance_due = models.DecimalField(
+        _("saldo por pagar"), max_digits=12, decimal_places=2, default=0
+    )
+    payout_due = models.DecimalField(
+        _("saldo por entregar"), max_digits=12, decimal_places=2, default=0
+    )
+    generated_at = models.DateTimeField(_("emitido en"), default=timezone.now)
+    refreshed_at = models.DateTimeField(_("actualizado en"), default=timezone.now)
+
+    class Meta:
+        verbose_name = _("estado de cuenta por periodo")
+        verbose_name_plural = _("estados de cuenta por periodo")
+        ordering = ("-period_end", "party_type")
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        party_type=AccountPartyType.OWNER,
+                        owner__isnull=False,
+                        tenant_doctor__isnull=True,
+                    )
+                    | models.Q(
+                        party_type=AccountPartyType.TENANT,
+                        owner__isnull=True,
+                        tenant_doctor__isnull=False,
+                    )
+                ),
+                name="finance_account_statement_exact_party",
+            ),
+            models.UniqueConstraint(
+                fields=("owner", "period_start", "period_end", "currency"),
+                condition=models.Q(owner__isnull=False, is_deleted=False),
+                name="finance_owner_statement_unique_period",
+            ),
+            models.UniqueConstraint(
+                fields=(
+                    "tenant_doctor",
+                    "period_start",
+                    "period_end",
+                    "currency",
+                ),
+                condition=models.Q(tenant_doctor__isnull=False, is_deleted=False),
+                name="finance_tenant_statement_unique_period",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        holder = self.owner or self.tenant_doctor
+        return f"{holder}: {self.period_start:%d/%m/%Y} - {self.period_end:%d/%m/%Y}"
+
+    @property
+    def payout_frequency_label(self) -> str:
+        labels = {
+            "weekly": _("Semanal"),
+            "biweekly": _("Quincenal"),
+            "monthly": _("Mensual"),
+        }
+        return str(labels.get(self.payout_frequency, self.payout_frequency))
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if self.period_end < self.period_start:
+            errors["period_end"] = _(
+                "El fin del periodo no puede ser anterior al inicio."
+            )
+        if self.available_on < self.period_end:
+            errors["available_on"] = _(
+                "La fecha de disponibilidad no puede anteceder al cierre."
+            )
+        if self.party_type == AccountPartyType.OWNER:
+            if self.owner_id is None or self.tenant_doctor_id is not None:
+                errors["owner"] = _("Selecciona únicamente al propietario.")
+        elif self.party_type == AccountPartyType.TENANT:
+            if self.tenant_doctor_id is None or self.owner_id is not None:
+                errors["tenant_doctor"] = _(
+                    "Selecciona únicamente al médico arrendatario."
+                )
+        for field_name in (
+            "rental_income",
+            "reservation_charges",
+            "commissions",
+            "owner_net",
+            "subscription_charges",
+            "direct_fees",
+            "deducted_fees",
+            "reservation_payments",
+            "account_payments_total",
+            "payouts_made",
+            "balance_due",
+            "payout_due",
+        ):
+            if getattr(self, field_name) < Decimal("0.00"):
+                errors[field_name] = _("El importe no puede ser negativo.")
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class AccountStatementLine(BaseModel):
+    account_statement = models.ForeignKey(
+        AccountStatement,
+        on_delete=models.PROTECT,
+        related_name="lines",
+        verbose_name=_("estado de cuenta"),
+    )
+    line_type = models.CharField(
+        _("tipo de movimiento"),
+        max_length=40,
+        choices=AccountLineType.choices,
+    )
+    description = models.CharField(_("descripción"), max_length=255)
+    effective_date = models.DateField(_("fecha"))
+    coverage_start = models.DateField(_("inicio de cobertura"), blank=True, null=True)
+    coverage_end = models.DateField(_("fin de cobertura"), blank=True, null=True)
+    room = models.ForeignKey(
+        "catalog.ConsultingRoom",
+        on_delete=models.PROTECT,
+        related_name="account_statement_lines",
+        blank=True,
+        null=True,
+    )
+    reservation = models.ForeignKey(
+        "scheduling.Reservation",
+        on_delete=models.PROTECT,
+        related_name="account_statement_lines",
+        blank=True,
+        null=True,
+    )
+    settlement = models.ForeignKey(
+        "finance.Settlement",
+        on_delete=models.PROTECT,
+        related_name="account_statement_lines",
+        blank=True,
+        null=True,
+    )
+    amount = models.DecimalField(_("importe"), max_digits=12, decimal_places=2)
+    source_model = models.CharField(_("modelo origen"), max_length=100, blank=True)
+    source_id = models.CharField(_("identificador origen"), max_length=64, blank=True)
+    source_snapshot = models.JSONField(
+        _("snapshot del origen"),
+        default=dict,
+        blank=True,
+    )
+
+    class Meta:
+        verbose_name = _("movimiento de estado de cuenta")
+        verbose_name_plural = _("movimientos de estados de cuenta")
+        ordering = ("effective_date", "created_at")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount__gte=0),
+                name="finance_account_statement_line_nonnegative",
+            ),
+            models.UniqueConstraint(
+                fields=("account_statement", "line_type", "source_model", "source_id"),
+                name="finance_account_line_unique_source",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_line_type_display()}: {self.amount}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if self.amount < Decimal("0.00"):
+            errors["amount"] = _("El importe no puede ser negativo.")
+        if self.coverage_start and self.coverage_end:
+            if self.coverage_end < self.coverage_start:
+                errors["coverage_end"] = _(
+                    "El fin de cobertura no puede ser anterior al inicio."
+                )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class AccountPayment(BaseModel):
+    account_statement = models.ForeignKey(
+        AccountStatement,
+        on_delete=models.PROTECT,
+        related_name="account_payments",
+        verbose_name=_("estado de cuenta"),
+    )
+    category = models.CharField(
+        _("concepto"),
+        max_length=32,
+        choices=AccountPaymentCategory.choices,
+    )
+    amount = models.DecimalField(_("importe"), max_digits=12, decimal_places=2)
+    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
+    method = models.CharField(
+        _("método"),
+        max_length=24,
+        choices=PaymentMethod.choices,
+        default=PaymentMethod.TRANSFER,
+    )
+    reference = models.CharField(_("referencia"), max_length=160, blank=True)
+    payment_date = models.DateField(_("fecha de pago"), default=timezone.localdate)
+    receipt = models.FileField(
+        _("comprobante"),
+        upload_to="account-payment-receipts/",
+        blank=True,
+        null=True,
+    )
+    status = models.CharField(
+        _("estado"),
+        max_length=24,
+        choices=PaymentStatus.choices,
+        default=PaymentStatus.REGISTERED,
+    )
+    validated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="validated_account_payments",
+        blank=True,
+        null=True,
+    )
+    validated_at = models.DateTimeField(_("validado en"), blank=True, null=True)
+    rejected_reason = models.TextField(_("motivo de rechazo"), blank=True)
+    notes = models.TextField(_("notas"), blank=True)
+
+    class Meta:
+        verbose_name = _("pago de suscripción o cuota")
+        verbose_name_plural = _("pagos de suscripciones o cuotas")
+        ordering = ("-payment_date", "-created_at")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount__gt=0),
+                name="finance_account_payment_positive",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_category_display()} - {self.amount} {self.currency}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if self.amount <= Decimal("0.00"):
+            errors["amount"] = _("El importe debe ser mayor que cero.")
+        if self.account_statement_id:
+            statement = self.account_statement
+            if self.currency != statement.currency:
+                errors["currency"] = _("La moneda debe coincidir con el estado.")
+            owner_categories = {
+                AccountPaymentCategory.OWNER_SUBSCRIPTION,
+                AccountPaymentCategory.OWNER_FEE,
+            }
+            if (
+                statement.party_type == AccountPartyType.OWNER
+                and self.category not in owner_categories
+            ):
+                errors["category"] = _("El concepto no corresponde al propietario.")
+            if (
+                statement.party_type == AccountPartyType.TENANT
+                and self.category != AccountPaymentCategory.TENANT_SUBSCRIPTION
+            ):
+                errors["category"] = _(
+                    "El concepto no corresponde al médico arrendatario."
+                )
+        if self.method in {PaymentMethod.CREDIT}:
+            errors["method"] = _("El saldo a favor no aplica a suscripciones o cuotas.")
+        if self.method != PaymentMethod.CASH and not self.reference.strip():
+            errors["reference"] = _(
+                "La referencia es obligatoria salvo pagos en efectivo."
+            )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class OwnerPayout(BaseModel):
+    account_statement = models.ForeignKey(
+        AccountStatement,
+        on_delete=models.PROTECT,
+        related_name="owner_payouts",
+        verbose_name=_("estado de cuenta del propietario"),
+    )
+    amount = models.DecimalField(_("importe pagado"), max_digits=12, decimal_places=2)
+    deducted_fees = models.DecimalField(
+        _("cuotas descontadas en el corte"),
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+    )
+    currency = models.CharField(_("moneda"), max_length=3, default=DEFAULT_CURRENCY)
+    reference = models.CharField(_("referencia"), max_length=160)
+    payment_date = models.DateField(_("fecha de pago"), default=timezone.localdate)
+    receipt = models.FileField(
+        _("comprobante de transferencia"),
+        upload_to="owner-payout-receipts/",
+    )
+    paid_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="registered_owner_payouts",
+        blank=True,
+        null=True,
+    )
+    notes = models.TextField(_("notas"), blank=True)
+
+    class Meta:
+        verbose_name = _("pago de corte al propietario")
+        verbose_name_plural = _("pagos de cortes a propietarios")
+        ordering = ("-payment_date", "-created_at")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount__gt=0),
+                name="finance_owner_payout_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(deducted_fees__gte=0),
+                name="finance_owner_payout_fees_nonnegative",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.account_statement.owner} - {self.amount} {self.currency}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if self.amount <= Decimal("0.00"):
+            errors["amount"] = _("El importe debe ser mayor que cero.")
+        if self.deducted_fees < Decimal("0.00"):
+            errors["deducted_fees"] = _("El descuento no puede ser negativo.")
+        if self.account_statement_id:
+            statement = self.account_statement
+            if statement.party_type != AccountPartyType.OWNER:
+                errors["account_statement"] = _(
+                    "El estado de cuenta debe pertenecer a un propietario."
+                )
+            if self.currency != statement.currency:
+                errors["currency"] = _("La moneda debe coincidir con el estado.")
+        if not self.reference.strip():
+            errors["reference"] = _("La referencia es obligatoria.")
+        if not self.receipt:
+            errors["receipt"] = _("El comprobante es obligatorio.")
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
 class SettlementStatus(models.TextChoices):
     PENDING = "pendiente", _("Pendiente")
     CALCULATED = "calculada", _("Calculada")

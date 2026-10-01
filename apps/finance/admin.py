@@ -3,8 +3,12 @@
 from django.contrib import admin
 
 from apps.finance.models import (
+    AccountPayment,
+    AccountStatement,
+    AccountStatementLine,
     CancellationCase,
     CancellationItem,
+    OwnerPayout,
     Payment,
     PaymentAllocation,
     RateRule,
@@ -15,6 +19,69 @@ from apps.finance.models import (
     TenantCreditApplication,
     TenantDoctorDiscount,
 )
+
+
+@admin.register(AccountStatement)
+class AccountStatementAdmin(admin.ModelAdmin):
+    list_display = (
+        "party_type",
+        "owner",
+        "tenant_doctor",
+        "period_start",
+        "period_end",
+        "balance_due",
+        "payout_due",
+        "status",
+    )
+    list_filter = ("party_type", "status", "currency", "period_end")
+    search_fields = (
+        "owner__display_name",
+        "owner__user__email",
+        "tenant_doctor__display_name",
+        "tenant_doctor__user__email",
+    )
+
+
+@admin.register(AccountStatementLine)
+class AccountStatementLineAdmin(admin.ModelAdmin):
+    list_display = (
+        "account_statement",
+        "line_type",
+        "effective_date",
+        "amount",
+    )
+    list_filter = ("line_type", "effective_date")
+
+
+@admin.register(AccountPayment)
+class AccountPaymentAdmin(admin.ModelAdmin):
+    list_display = (
+        "account_statement",
+        "category",
+        "amount",
+        "currency",
+        "status",
+        "payment_date",
+    )
+    list_filter = ("category", "status", "currency", "payment_date")
+
+
+@admin.register(OwnerPayout)
+class OwnerPayoutAdmin(admin.ModelAdmin):
+    list_display = (
+        "account_statement",
+        "amount",
+        "deducted_fees",
+        "currency",
+        "payment_date",
+        "reference",
+    )
+    list_filter = ("currency", "payment_date")
+    search_fields = (
+        "account_statement__owner__display_name",
+        "account_statement__owner__user__email",
+        "reference",
+    )
 
 
 @admin.register(RateRule)

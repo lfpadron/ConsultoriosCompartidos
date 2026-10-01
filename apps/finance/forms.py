@@ -20,6 +20,12 @@ from apps.core.form_utils import (
 )
 from apps.core.permissions import scope_queryset_for_user
 from apps.finance.models import (
+    AccountPartyType,
+    AccountPayment,
+    AccountPaymentCategory,
+    AccountStatement,
+    AccountStatementStatus,
+    OwnerPayout,
     Payment,
     PaymentMethod,
     PaymentStatus,
@@ -435,6 +441,249 @@ class PaymentRejectForm(forms.Form):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.fields["reason"].widget.attrs["class"] = "form-control"
+
+
+class AccountStatementFilterForm(forms.Form):
+    party_type = forms.ChoiceField(
+        label="Tipo de titular",
+        choices=(("", "Todos"), *AccountPartyType.choices),
+        required=False,
+    )
+    owner = forms.ModelChoiceField(
+        label="Propietario",
+        queryset=OwnerProfile.objects.none(),
+        required=False,
+    )
+    tenant_doctor = forms.ModelChoiceField(
+        label="Médico arrendatario",
+        queryset=TenantDoctorProfile.objects.none(),
+        required=False,
+    )
+    status = forms.ChoiceField(
+        label="Estado",
+        choices=(("", "Todos"), *AccountStatementStatus.choices),
+        required=False,
+    )
+    date_from = forms.DateField(
+        label="Periodo desde",
+        required=False,
+        widget=monday_date_input(),
+    )
+    date_to = forms.DateField(
+        label="Periodo hasta",
+        required=False,
+        widget=monday_date_input(),
+    )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.user = kwargs.pop("user", None)
+        super().__init__(*args, **kwargs)
+        owner_queryset = _owner_queryset()
+        tenant_queryset = TenantDoctorProfile.objects.filter(
+            is_deleted=False
+        ).select_related("user")
+        if self.user is not None:
+            owner_queryset = scope_queryset_for_user(owner_queryset, self.user)
+            tenant_queryset = scope_queryset_for_user(tenant_queryset, self.user)
+        set_model_queryset(self.fields["owner"], owner_queryset)
+        set_model_queryset(
+            self.fields["tenant_doctor"],
+            tenant_queryset.order_by("display_name", "user__email"),
+        )
+        style_form_fields(self.fields)
+
+
+class AccountStatementGenerationForm(forms.Form):
+    party_type = forms.ChoiceField(
+        label="Tipo de titular",
+        choices=AccountPartyType.choices,
+    )
+    owner = forms.ModelChoiceField(
+        label="Propietario",
+        queryset=OwnerProfile.objects.none(),
+        required=False,
+    )
+    tenant_doctor = forms.ModelChoiceField(
+        label="Médico arrendatario",
+        queryset=TenantDoctorProfile.objects.none(),
+        required=False,
+    )
+    period_start = forms.DateField(
+        label="Inicio del periodo",
+        widget=forms.DateInput(attrs={"type": "date"}),
+    )
+    period_end = forms.DateField(
+        label="Fin del periodo",
+        widget=forms.DateInput(attrs={"type": "date"}),
+    )
+    currency = forms.CharField(label="Moneda", max_length=3, initial="MXN")
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.user = kwargs.pop("user", None)
+        super().__init__(*args, **kwargs)
+        owner_queryset = _owner_queryset()
+        tenant_queryset = TenantDoctorProfile.objects.filter(
+            is_deleted=False
+        ).select_related("user")
+        if self.user is not None:
+            owner_queryset = scope_queryset_for_user(owner_queryset, self.user)
+            tenant_queryset = scope_queryset_for_user(tenant_queryset, self.user)
+        set_model_queryset(self.fields["owner"], owner_queryset)
+        set_model_queryset(self.fields["tenant_doctor"], tenant_queryset)
+        style_form_fields(self.fields)
+
+    def clean(self) -> dict[str, Any]:
+        cleaned_data = super().clean() or {}
+        party_type = cleaned_data.get("party_type")
+        owner = cleaned_data.get("owner")
+        tenant_doctor = cleaned_data.get("tenant_doctor")
+        if party_type == AccountPartyType.OWNER:
+            if owner is None:
+                self.add_error("owner", "Selecciona al propietario.")
+            if tenant_doctor is not None:
+                self.add_error(
+                    "tenant_doctor",
+                    "No selecciones un arrendatario para este corte.",
+                )
+        elif party_type == AccountPartyType.TENANT:
+            if tenant_doctor is None:
+                self.add_error("tenant_doctor", "Selecciona al médico arrendatario.")
+            if owner is not None:
+                self.add_error(
+                    "owner",
+                    "No selecciones un propietario para este corte.",
+                )
+        period_start = cleaned_data.get("period_start")
+        period_end = cleaned_data.get("period_end")
+        if period_start and period_end and period_end < period_start:
+            self.add_error("period_end", "El fin no puede ser anterior al inicio.")
+        cleaned_data["currency"] = (cleaned_data.get("currency") or "MXN").upper()
+        return cleaned_data
+
+
+class AccountPaymentForm(BootstrapModelForm):
+    class Meta:
+        model = AccountPayment
+        fields = (
+            "category",
+            "amount",
+            "method",
+            "reference",
+            "payment_date",
+            "receipt",
+            "notes",
+        )
+        widgets = {
+            "payment_date": forms.DateInput(attrs={"type": "date"}),
+            "notes": forms.Textarea(attrs={"rows": 3}),
+        }
+
+    def __init__(
+        self,
+        *args: Any,
+        account_statement: AccountStatement,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.account_statement = account_statement
+        choices: tuple[tuple[Any, Any], ...]
+        if account_statement.party_type == AccountPartyType.OWNER:
+            choices = (
+                (
+                    AccountPaymentCategory.OWNER_SUBSCRIPTION,
+                    AccountPaymentCategory.OWNER_SUBSCRIPTION.label,
+                ),
+                (
+                    AccountPaymentCategory.OWNER_FEE,
+                    AccountPaymentCategory.OWNER_FEE.label,
+                ),
+            )
+        else:
+            choices = (
+                (
+                    AccountPaymentCategory.TENANT_SUBSCRIPTION,
+                    AccountPaymentCategory.TENANT_SUBSCRIPTION.label,
+                ),
+            )
+        category_field = self.fields["category"]
+        method_field = self.fields["method"]
+        if isinstance(category_field, forms.ChoiceField):
+            category_field.choices = choices
+        if isinstance(method_field, forms.ChoiceField):
+            method_field.choices = tuple(
+                choice
+                for choice in PaymentMethod.choices
+                if choice[0] != PaymentMethod.CREDIT
+            )
+        self.fields["receipt"].required = False
+        self.fields["receipt"].help_text = (
+            "Obligatorio para métodos distintos de efectivo."
+        )
+        self.fields["amount"].initial = account_statement.balance_due
+        self.fields["amount"].widget.attrs["max"] = str(
+            account_statement.balance_due
+        )
+        self.fields["amount"].help_text = (
+            f"Máximo pendiente: {account_statement.balance_due} "
+            f"{account_statement.currency}."
+        )
+
+    def clean(self) -> dict[str, Any]:
+        cleaned_data = super().clean() or {}
+        if (
+            cleaned_data.get("method") != PaymentMethod.CASH
+            and not cleaned_data.get("receipt")
+        ):
+            self.add_error("receipt", "El comprobante es obligatorio.")
+        return cleaned_data
+
+    def clean_amount(self) -> Decimal:
+        amount = self.cleaned_data["amount"]
+        if amount > self.account_statement.balance_due:
+            raise forms.ValidationError(
+                "El importe no puede exceder el saldo por pagar."
+            )
+        return amount
+
+
+class OwnerPayoutForm(BootstrapModelForm):
+    class Meta:
+        model = OwnerPayout
+        fields = (
+            "amount",
+            "reference",
+            "payment_date",
+            "receipt",
+            "notes",
+        )
+        widgets = {
+            "payment_date": forms.DateInput(attrs={"type": "date"}),
+            "notes": forms.Textarea(attrs={"rows": 3}),
+        }
+
+    def __init__(
+        self,
+        *args: Any,
+        account_statement: AccountStatement,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.account_statement = account_statement
+        self.fields["amount"].initial = account_statement.payout_due
+        self.fields["amount"].widget.attrs["max"] = str(account_statement.payout_due)
+        self.fields["amount"].help_text = (
+            f"Máximo pendiente: {account_statement.payout_due} "
+            f"{account_statement.currency}."
+        )
+        self.fields["receipt"].required = True
+
+    def clean_amount(self) -> Decimal:
+        amount = self.cleaned_data["amount"]
+        if amount > self.account_statement.payout_due:
+            raise forms.ValidationError(
+                "El importe no puede exceder el saldo por entregar."
+            )
+        return amount
 
 
 class PaymentFilterForm(OperationalFinanceFilterForm):

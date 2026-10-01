@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section id="statement-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#statement-content" hx-select="#statement-content" hx-swap="outerHTML" hx-push-url="true">
+    <div class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+        <div><p class="text-uppercase text-secondary small fw-semibold mb-2">Finanzas</p><h1 class="h4 mb-0">{{ page_title }}</h1></div>
+        {% if can_generate %}<a class="btn btn-primary" hx-boost="false" href="{% url 'account_statement_generate' %}"><i class="bi bi-plus-lg me-1"></i>Emitir corte</a>{% endif %}
+      </div>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <form method="get" class="row g-3 align-items-end">
+        {% for field in filter_form %}
+          <div class="col-md-4 col-xl-2"><label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>{{ field }}</div>
+        {% endfor %}
+        <div class="col-auto d-grid"><button class="btn btn-outline-secondary" type="submit"><i class="bi bi-funnel me-1"></i>Filtrar</button></div>
+        <div class="col-auto d-grid"><a class="btn btn-outline-secondary" href="{% url 'statements' %}"><i class="bi bi-x-lg me-1"></i>Limpiar</a></div>
+      </form>
+    </div>
+
+    <div class="status-panel p-3 p-lg-4">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead><tr><th>Titular</th><th>Periodo</th><th>Tipo</th><th class="text-end">Saldo por pagar</th><th class="text-end">Saldo por entregar</th><th>Estado</th><th class="text-end">Acciones</th></tr></thead>
+          <tbody>
+            {% for statement in account_statements %}
+              <tr>
+                <td>{{ statement.owner|default:statement.tenant_doctor }}</td>
+                <td>{{ statement.period_start|date:"d/m/Y" }} - {{ statement.period_end|date:"d/m/Y" }}</td>
+                <td>{{ statement.get_party_type_display }}</td>
+                <td class="text-end">{{ statement.balance_due }} {{ statement.currency }}</td>
+                <td class="text-end">{{ statement.payout_due }} {{ statement.currency }}</td>
+                <td><span class="badge text-bg-secondary">{{ statement.get_status_display }}</span></td>
+                <td class="text-end"><a class="btn btn-sm btn-outline-secondary" hx-boost="false" href="{% url 'account_statement_detail' statement.pk %}" title="Ver estado"><i class="bi bi-eye"></i></a></td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="7" class="text-center text-secondary py-4">No hay estados de cuenta para los filtros seleccionados.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% include "partials/pagination.html" %}
+    </div>
+  </section>
+{% endblock %}
