@@ -7,7 +7,11 @@ from django.urls import reverse
 from django.views.decorators.http import require_GET
 
 from apps.finance.models import PaymentStatus
+from apps.presentation.forms import AdministrationFilterForm
 from apps.presentation.navigation import PAGE_TITLES
+from apps.presentation.services.administration_service import (
+    get_administration_overview,
+)
 from apps.presentation.services.dashboard_service import (
     get_dashboard_alerts,
     get_dashboard_metrics,
@@ -26,6 +30,28 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         "quick_links": _quick_links(),
     }
     return render(request, "presentation/dashboard.html", context)
+
+
+@login_required
+@require_GET
+def administration(request: HttpRequest) -> HttpResponse:
+    filter_form = AdministrationFilterForm(
+        request.GET or None,
+        user=request.user,
+    )
+    filters = filter_form.cleaned_data if filter_form.is_valid() else {}
+    return render(
+        request,
+        "presentation/administration.html",
+        {
+            "page_title": "Administración",
+            "filter_form": filter_form,
+            "overview": get_administration_overview(
+                filters=filters,
+                user=request.user,
+            ),
+        },
+    )
 
 
 @require_GET

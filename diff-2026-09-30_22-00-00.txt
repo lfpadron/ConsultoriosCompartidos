@@ -1,0 +1,257 @@
+diff --git a/apps/core/permissions.py b/apps/core/permissions.py
+index efb9737..adc7eb7 100644
+--- a/apps/core/permissions.py
++++ b/apps/core/permissions.py
+@@ -305,8 +305,7 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
+         return queryset.filter(room__clinic__in=clinics)
+     if model_label == "vault.DocumentAsset":
+         return queryset.filter(
+-            Q(clinic__in=clinics)
+-            | Q(room__clinic__in=clinics)
++            Q(room__clinic__in=clinics)
+             | Q(owner__consulting_rooms__clinic__in=clinics)
+             | Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
+             | Q(reservation__room__clinic__in=clinics)
+diff --git a/apps/identity/screen_registry.py b/apps/identity/screen_registry.py
+index b4b9891..5d83d84 100644
+--- a/apps/identity/screen_registry.py
++++ b/apps/identity/screen_registry.py
+@@ -289,6 +289,12 @@ def default_access_for_role(role: str, screen_key: str) -> str:
+         UserRole.OWNER,
+     }:
+         return ScreenAccessLevel.NONE
++    if screen_key == "administration":
++        if role in {UserRole.SUPERADMIN, UserRole.ADMIN}:
++            return ScreenAccessLevel.EDIT
++        if role == UserRole.AUDITOR:
++            return ScreenAccessLevel.READ
++        return ScreenAccessLevel.NONE
+     if screen_key in {
+         "owner_subscriptions",
+         "tenant_subscriptions",
+diff --git a/apps/presentation/urls.py b/apps/presentation/urls.py
+index 5446845..e120907 100644
+--- a/apps/presentation/urls.py
++++ b/apps/presentation/urls.py
+@@ -18,8 +18,7 @@ urlpatterns = [
+     path("", include("apps.identity.urls")),
+     path(
+         "administracion/",
+-        views.construction_page,
+-        {"page_key": "administration"},
++        views.administration,
+         name="administration",
+     ),
+ ]
+diff --git a/apps/presentation/views.py b/apps/presentation/views.py
+index 2f7a9e6..4a11681 100644
+--- a/apps/presentation/views.py
++++ b/apps/presentation/views.py
+@@ -7,7 +7,11 @@ from django.urls import reverse
+ from django.views.decorators.http import require_GET
+ 
+ from apps.finance.models import PaymentStatus
++from apps.presentation.forms import AdministrationFilterForm
+ from apps.presentation.navigation import PAGE_TITLES
++from apps.presentation.services.administration_service import (
++    get_administration_overview,
++)
+ from apps.presentation.services.dashboard_service import (
+     get_dashboard_alerts,
+     get_dashboard_metrics,
+@@ -28,6 +32,28 @@ def dashboard(request: HttpRequest) -> HttpResponse:
+     return render(request, "presentation/dashboard.html", context)
+ 
+ 
++@login_required
++@require_GET
++def administration(request: HttpRequest) -> HttpResponse:
++    filter_form = AdministrationFilterForm(
++        request.GET or None,
++        user=request.user,
++    )
++    filters = filter_form.cleaned_data if filter_form.is_valid() else {}
++    return render(
++        request,
++        "presentation/administration.html",
++        {
++            "page_title": "Administración",
++            "filter_form": filter_form,
++            "overview": get_administration_overview(
++                filters=filters,
++                user=request.user,
++            ),
++        },
++    )
++
++
+ @require_GET
+ @login_required
+ def construction_page(request: HttpRequest, page_key: str) -> HttpResponse:
+diff --git a/static/css/app.css b/static/css/app.css
+index b42c7ed..e910131 100644
+--- a/static/css/app.css
++++ b/static/css/app.css
+@@ -189,6 +189,130 @@ body {
+   background: #fff;
+ }
+ 
++.administration-summary-grid {
++  display: grid;
++  grid-template-columns: repeat(6, minmax(0, 1fr));
++  overflow: hidden;
++}
++
++.administration-summary-item {
++  display: flex;
++  min-width: 0;
++  flex-direction: column;
++  gap: 0.15rem;
++  padding: 0.9rem 1rem;
++  border-right: 1px solid #dde3ea;
++}
++
++.administration-summary-item:last-child {
++  border-right: 0;
++}
++
++.administration-summary-item strong {
++  font-size: 1.35rem;
++  line-height: 1.2;
++}
++
++.administration-balance-list > div {
++  display: flex;
++  align-items: baseline;
++  justify-content: space-between;
++  gap: 1rem;
++  padding: 0.6rem 0;
++  border-bottom: 1px solid #e8edf2;
++}
++
++.administration-balance-list > div:last-child {
++  border-bottom: 0;
++}
++
++.administration-balance-list dt {
++  color: #5d6a7c;
++  font-size: 0.85rem;
++  font-weight: 500;
++}
++
++.administration-balance-list dd {
++  margin: 0;
++  font-weight: 700;
++  text-align: right;
++  white-space: nowrap;
++}
++
++.text-bg-orange {
++  color: #492000 !important;
++  background-color: #fd9843 !important;
++}
++
++.administration-priority-marker {
++  display: inline-flex;
++  width: 2rem;
++  min-width: 2rem;
++  height: 2rem;
++  align-items: center;
++  justify-content: center;
++  border-radius: 50%;
++  background: #6c757d;
++  color: #fff;
++  font-weight: 800;
++}
++
++.administration-row-previous-day > * {
++  background-color: #fff8d8 !important;
++}
++
++.administration-row-previous-day .administration-priority-marker {
++  background: #b58105;
++}
++
++.administration-row-hours > * {
++  background-color: #fff0e3 !important;
++}
++
++.administration-row-hours .administration-priority-marker {
++  background: #d65c00;
++}
++
++.administration-row-cancelled > * {
++  background-color: #fde8e8 !important;
++}
++
++.administration-row-cancelled .administration-priority-marker {
++  background: #b42318;
++}
++
++@media (max-width: 1199.98px) {
++  .administration-summary-grid {
++    grid-template-columns: repeat(3, minmax(0, 1fr));
++  }
++
++  .administration-summary-item:nth-child(3) {
++    border-right: 0;
++  }
++
++  .administration-summary-item:nth-child(-n + 3) {
++    border-bottom: 1px solid #dde3ea;
++  }
++}
++
++@media (max-width: 575.98px) {
++  .administration-summary-grid {
++    grid-template-columns: repeat(2, minmax(0, 1fr));
++  }
++
++  .administration-summary-item:nth-child(3) {
++    border-right: 1px solid #dde3ea;
++  }
++
++  .administration-summary-item:nth-child(even) {
++    border-right: 0;
++  }
++
++  .administration-summary-item:nth-child(-n + 4) {
++    border-bottom: 1px solid #dde3ea;
++  }
++}
++
+ .footer-compact {
+   padding-top: 0.25rem;
+   padding-bottom: 0.25rem;
+diff --git a/tests/test_views.py b/tests/test_views.py
+index ccc7ddb..42ddf36 100644
+--- a/tests/test_views.py
++++ b/tests/test_views.py
+@@ -2,6 +2,7 @@ from typing import Any
+ 
+ import pytest
+ 
++from apps.identity.models import UserRole
+ from tests.test_reservations import create_user
+ 
+ 
+@@ -22,15 +23,17 @@ def test_dashboard_responds(client: Any) -> None:
+ 
+ 
+ @pytest.mark.django_db
+-def test_construction_page_requires_login_and_responds(client: Any) -> None:
++def test_administration_requires_login_and_responds(client: Any) -> None:
+     response = client.get("/administracion/")
+     assert response.status_code == 302
+ 
+     user = create_user("construction-view@example.com")
++    user.role = UserRole.ADMIN
++    user.save(update_fields=["role"])
+     client.force_login(user)
+     response = client.get("/administracion/")
+     assert response.status_code == 200
+-    assert "En construcción" in response.content.decode()
++    assert "Centro de administración" in response.content.decode()
+ 
+ 
+ def test_login_page_responds(client: Any) -> None:

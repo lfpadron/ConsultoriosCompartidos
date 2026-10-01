@@ -189,6 +189,130 @@ body {
   background: #fff;
 }
 
+.administration-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  overflow: hidden;
+}
+
+.administration-summary-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.9rem 1rem;
+  border-right: 1px solid #dde3ea;
+}
+
+.administration-summary-item:last-child {
+  border-right: 0;
+}
+
+.administration-summary-item strong {
+  font-size: 1.35rem;
+  line-height: 1.2;
+}
+
+.administration-balance-list > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid #e8edf2;
+}
+
+.administration-balance-list > div:last-child {
+  border-bottom: 0;
+}
+
+.administration-balance-list dt {
+  color: #5d6a7c;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.administration-balance-list dd {
+  margin: 0;
+  font-weight: 700;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.text-bg-orange {
+  color: #492000 !important;
+  background-color: #fd9843 !important;
+}
+
+.administration-priority-marker {
+  display: inline-flex;
+  width: 2rem;
+  min-width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #6c757d;
+  color: #fff;
+  font-weight: 800;
+}
+
+.administration-row-previous-day > * {
+  background-color: #fff8d8 !important;
+}
+
+.administration-row-previous-day .administration-priority-marker {
+  background: #b58105;
+}
+
+.administration-row-hours > * {
+  background-color: #fff0e3 !important;
+}
+
+.administration-row-hours .administration-priority-marker {
+  background: #d65c00;
+}
+
+.administration-row-cancelled > * {
+  background-color: #fde8e8 !important;
+}
+
+.administration-row-cancelled .administration-priority-marker {
+  background: #b42318;
+}
+
+@media (max-width: 1199.98px) {
+  .administration-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .administration-summary-item:nth-child(3) {
+    border-right: 0;
+  }
+
+  .administration-summary-item:nth-child(-n + 3) {
+    border-bottom: 1px solid #dde3ea;
+  }
+}
+
+@media (max-width: 575.98px) {
+  .administration-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .administration-summary-item:nth-child(3) {
+    border-right: 1px solid #dde3ea;
+  }
+
+  .administration-summary-item:nth-child(even) {
+    border-right: 0;
+  }
+
+  .administration-summary-item:nth-child(-n + 4) {
+    border-bottom: 1px solid #dde3ea;
+  }
+}
+
 .footer-compact {
   padding-top: 0.25rem;
   padding-bottom: 0.25rem;

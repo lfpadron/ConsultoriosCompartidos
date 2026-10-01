@@ -289,6 +289,12 @@ def default_access_for_role(role: str, screen_key: str) -> str:
         UserRole.OWNER,
     }:
         return ScreenAccessLevel.NONE
+    if screen_key == "administration":
+        if role in {UserRole.SUPERADMIN, UserRole.ADMIN}:
+            return ScreenAccessLevel.EDIT
+        if role == UserRole.AUDITOR:
+            return ScreenAccessLevel.READ
+        return ScreenAccessLevel.NONE
     if screen_key in {
         "owner_subscriptions",
         "tenant_subscriptions",

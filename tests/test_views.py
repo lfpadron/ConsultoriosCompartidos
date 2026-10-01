@@ -2,6 +2,7 @@ from typing import Any
 
 import pytest
 
+from apps.identity.models import UserRole
 from tests.test_reservations import create_user
 
 
@@ -22,15 +23,17 @@ def test_dashboard_responds(client: Any) -> None:
 
 
 @pytest.mark.django_db
-def test_construction_page_requires_login_and_responds(client: Any) -> None:
+def test_administration_requires_login_and_responds(client: Any) -> None:
     response = client.get("/administracion/")
     assert response.status_code == 302
 
     user = create_user("construction-view@example.com")
+    user.role = UserRole.ADMIN
+    user.save(update_fields=["role"])
     client.force_login(user)
     response = client.get("/administracion/")
     assert response.status_code == 200
-    assert "En construcción" in response.content.decode()
+    assert "Centro de administración" in response.content.decode()
 
 
 def test_login_page_responds(client: Any) -> None:

@@ -18,8 +18,7 @@ urlpatterns = [
     path("", include("apps.identity.urls")),
     path(
         "administracion/",
-        views.construction_page,
-        {"page_key": "administration"},
+        views.administration,
         name="administration",
     ),
 ]

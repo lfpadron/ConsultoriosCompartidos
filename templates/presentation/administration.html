@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% load clinic_time %}
+
+{% block content %}
+  <div id="administration-content" class="d-flex flex-column gap-3" hx-boost="true" hx-target="#administration-content" hx-select="#administration-content" hx-swap="outerHTML" hx-push-url="true">
+    <section class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+      <div>
+        <p class="text-uppercase text-secondary small fw-semibold mb-2">Operación del negocio</p>
+        <h1 class="h3 mb-0">Centro de administración</h1>
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        <a class="btn btn-outline-secondary" hx-boost="false" href="{% url 'statements' %}"><i class="bi bi-receipt me-1"></i>Estados de cuenta</a>
+        <a class="btn btn-outline-secondary" hx-boost="false" href="{% url 'report_income' %}"><i class="bi bi-bar-chart me-1"></i>Ingresos</a>
+      </div>
+    </section>
+
+    <section class="status-panel p-3 p-lg-4">
+      <form method="get" class="row g-3 align-items-end">
+        <div class="col-md-6 col-xl-3"><label class="form-label" for="{{ filter_form.clinic.id_for_label }}">{{ filter_form.clinic.label }}</label>{{ filter_form.clinic }}</div>
+        <div class="col-md-6 col-xl-3"><label class="form-label" for="{{ filter_form.room.id_for_label }}">{{ filter_form.room.label }}</label>{{ filter_form.room }}</div>
+        <div class="col-md-6 col-xl-3"><label class="form-label" for="{{ filter_form.owner.id_for_label }}">{{ filter_form.owner.label }}</label>{{ filter_form.owner }}</div>
+        <div class="col-md-6 col-xl-3"><label class="form-label" for="{{ filter_form.tenant_doctor.id_for_label }}">{{ filter_form.tenant_doctor.label }}</label>{{ filter_form.tenant_doctor }}</div>
+        <div class="col-md-4 col-xl-2"><label class="form-label" for="{{ filter_form.date_from.id_for_label }}">{{ filter_form.date_from.label }}</label>{{ filter_form.date_from }}</div>
+        <div class="col-md-4 col-xl-2"><label class="form-label" for="{{ filter_form.date_to.id_for_label }}">{{ filter_form.date_to.label }}</label>{{ filter_form.date_to }}</div>
+        <div class="col-md-4 col-xl-3"><label class="form-label" for="{{ filter_form.status.id_for_label }}">{{ filter_form.status.label }}</label>{{ filter_form.status }}</div>
+        <div class="col-auto d-grid"><button class="btn btn-primary" type="submit"><i class="bi bi-funnel me-1"></i>Filtrar</button></div>
+        <div class="col-auto d-grid"><a class="btn btn-outline-secondary" href="{% url 'administration' %}"><i class="bi bi-x-lg me-1"></i>Limpiar</a></div>
+      </form>
+    </section>
+
+    <section class="status-panel administration-summary-grid" aria-label="Resumen de pendientes">
+      <div class="administration-summary-item"><span class="text-secondary small">Pendientes totales</span><strong>{{ overview.pending.total }}</strong></div>
+      <div class="administration-summary-item"><span class="text-secondary small">Sin comprobante</span><strong>{{ overview.pending.payment_proofs }}</strong></div>
+      <div class="administration-summary-item"><span class="text-secondary small">Pagos por validar</span><strong>{{ overview.pending.reservation_payments|add:overview.pending.account_payments }}</strong></div>
+      <div class="administration-summary-item"><span class="text-secondary small">Cancelaciones</span><strong>{{ overview.pending.cancellations }}</strong></div>
+      <div class="administration-summary-item"><span class="text-secondary small">Cortes por pagar</span><strong>{{ overview.pending.owner_payouts }}</strong></div>
+      <div class="administration-summary-item"><span class="text-secondary small">Documentos</span><strong>{{ overview.pending.documents }}</strong></div>
+    </section>
+
+    <div class="row g-3">
+      <div class="col-xl-8">
+        <section class="status-panel p-3 p-lg-4 h-100">
+          <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
+            <div class="d-flex align-items-center gap-2"><i class="bi bi-inbox text-secondary"></i><h2 class="h5 mb-0">Acciones pendientes</h2></div>
+            <span class="badge text-bg-secondary">{{ overview.pending.total }}</span>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead><tr><th>Prioridad</th><th>Pendiente</th><th>Fecha límite</th><th class="text-end">Importe</th><th class="text-end">Acción</th></tr></thead>
+              <tbody>
+                {% for action in overview.actions %}
+                  <tr>
+                    <td>{% if action.marker %}<span class="badge {% if action.variant == 'orange' %}text-bg-orange{% else %}text-bg-{{ action.variant }}{% endif %}">{{ action.marker }}</span>{% else %}<i class="bi {{ action.icon }} text-secondary" aria-hidden="true"></i><span class="visually-hidden">{{ action.action_type }}</span>{% endif %}</td>
+                    <td><div class="fw-semibold">{{ action.title }}</div><div class="small text-secondary">{{ action.description }}</div></td>
+                    <td>{% if action.due_at %}{{ action.due_at|date:"d/m/Y H:i" }}{% else %}<span class="text-secondary">-</span>{% endif %}</td>
+                    <td class="text-end">{% if action.amount %}{{ action.amount }} {{ action.currency }}{% else %}<span class="text-secondary">-</span>{% endif %}</td>
+                    <td class="text-end"><a class="btn btn-sm btn-outline-secondary" hx-boost="false" href="{{ action.url }}" title="Atender"><i class="bi bi-arrow-right"></i></a></td>
+                  </tr>
+                {% empty %}
+                  <tr><td colspan="5" class="text-center text-secondary py-4">No hay acciones pendientes para los filtros seleccionados.</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div class="col-xl-4">
+        <section class="status-panel p-3 p-lg-4 h-100">
+          <div class="d-flex align-items-center gap-2 mb-3"><i class="bi bi-cash-stack text-secondary"></i><h2 class="h5 mb-0">Balance del periodo</h2></div>
+          <dl class="administration-balance-list mb-0">
+            <div><dt>Total reservaciones</dt><dd>{{ overview.finance.expected_reservation_total }} {{ overview.finance.currency }}</dd></div>
+            <div><dt>Pagos validados</dt><dd>{{ overview.finance.validated_reservation_payments }} {{ overview.finance.currency }}</dd></div>
+            <div><dt>Saldo de reservaciones</dt><dd>{{ overview.finance.pending_reservation_balance }} {{ overview.finance.currency }}</dd></div>
+            <div><dt>Comisiones</dt><dd>{{ overview.finance.calculated_commissions }} {{ overview.finance.currency }}</dd></div>
+            <div><dt>Neto propietarios</dt><dd>{{ overview.finance.owner_net }} {{ overview.finance.currency }}</dd></div>
+            <div><dt>Saldos de estados de cuenta</dt><dd>{{ overview.finance.account_balance_due }} {{ overview.finance.currency }}</dd></div>
+            <div><dt>Por entregar a propietarios</dt><dd>{{ overview.finance.owner_payout_due }} {{ overview.finance.currency }}</dd></div>
+            <div><dt>Devoluciones pendientes</dt><dd>{{ overview.finance.cancellation_refunds_due }} {{ overview.finance.currency }}</dd></div>
+          </dl>
+        </section>
+      </div>
+    </div>
+
+    <section class="status-panel p-3 p-lg-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+        <div class="d-flex align-items-center gap-2"><i class="bi bi-calendar-check text-secondary"></i><h2 class="h5 mb-0">Reservaciones</h2><span class="badge text-bg-secondary">{{ overview.total_reservations }}</span></div>
+        <div class="d-flex flex-wrap gap-2 small">
+          <span class="badge text-bg-warning">!</span><span class="text-secondary">Día anterior</span>
+          <span class="badge text-bg-orange">!!</span><span class="text-secondary">Regla de horas</span>
+          <span class="badge text-bg-danger">X</span><span class="text-secondary">Cancelada</span>
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead><tr><th>Alerta</th><th>Grupo</th><th>Clínica / consultorio</th><th>Arrendatario</th><th>Fecha y horario</th><th>Comprobante</th><th>Estado</th><th class="text-end">Acción</th></tr></thead>
+          <tbody>
+            {% for item in overview.reservations %}
+              <tr class="{{ item.row_class }}">
+                <td>{% if item.marker %}<span class="administration-priority-marker">{{ item.marker }}</span><span class="visually-hidden">{{ item.priority_label }}</span>{% else %}<span class="text-secondary">-</span>{% endif %}</td>
+                <td>{% if item.reservation.batch %}{{ item.reservation.batch.reference }}{% else %}-{% endif %}</td>
+                <td><div>{{ item.reservation.room.clinic }}</div><div class="small text-secondary">{{ item.reservation.room.name }}</div></td>
+                <td>{{ item.reservation.tenant_doctor }}</td>
+                <td><div>{{ item.reservation.date|date:"d/m/Y" }}</div><div class="small text-secondary">{{ item.reservation.start_time|clinic_time:item.reservation.room }} - {{ item.reservation.end_time|clinic_time:item.reservation.room }}</div>{% if item.deadline_at %}<div class="small">Límite: {{ item.deadline_at|date:"d/m/Y H:i" }}</div>{% endif %}</td>
+                <td>{{ item.payment_label }}</td>
+                <td>{{ item.reservation.get_status_display }}</td>
+                <td class="text-end"><a class="btn btn-sm btn-outline-secondary" hx-boost="false" href="{{ item.detail_url }}" title="Ver reservación"><i class="bi bi-eye"></i></a></td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="8" class="text-center text-secondary py-4">No hay reservaciones para los filtros seleccionados.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+{% endblock %}

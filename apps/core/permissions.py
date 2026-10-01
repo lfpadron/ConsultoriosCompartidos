@@ -305,8 +305,7 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
         return queryset.filter(room__clinic__in=clinics)
     if model_label == "vault.DocumentAsset":
         return queryset.filter(
-            Q(clinic__in=clinics)
-            | Q(room__clinic__in=clinics)
+            Q(room__clinic__in=clinics)
             | Q(owner__consulting_rooms__clinic__in=clinics)
             | Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
             | Q(reservation__room__clinic__in=clinics)
