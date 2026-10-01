@@ -363,15 +363,27 @@ class PaymentStatus(models.TextChoices):
 
 
 class Payment(BaseModel):
+    batch = models.ForeignKey(
+        "scheduling.ReservationBatch",
+        on_delete=models.PROTECT,
+        related_name="payment_submissions",
+        verbose_name=_("grupo de reservaciones"),
+        blank=True,
+        null=True,
+    )
     reservation = models.ForeignKey(
         "scheduling.Reservation",
         on_delete=models.PROTECT,
         related_name="payments",
+        blank=True,
+        null=True,
     )
     statement = models.ForeignKey(
         Statement,
         on_delete=models.PROTECT,
         related_name="payments",
+        blank=True,
+        null=True,
     )
     tenant_doctor = models.ForeignKey(
         "catalog.TenantDoctorProfile",
@@ -415,9 +427,22 @@ class Payment(BaseModel):
         verbose_name = _("pago")
         verbose_name_plural = _("pagos")
         ordering = ("-payment_date", "-created_at")
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(batch__isnull=False)
+                    | models.Q(
+                        reservation__isnull=False,
+                        statement__isnull=False,
+                    )
+                ),
+                name="finance_payment_requires_subject",
+            )
+        ]
 
     def __str__(self) -> str:
-        return f"{self.reservation} - {self.amount} {self.currency}"
+        subject = self.batch or self.reservation
+        return f"{subject} - {self.amount} {self.currency}"
 
     def clean(self) -> None:
         super().clean()
@@ -432,27 +457,45 @@ class Payment(BaseModel):
                 "La referencia es obligatoria salvo pagos en efectivo."
             )
 
+        if self.batch_id:
+            batch = self.batch
+            assert batch is not None
+            if batch.status in {"cancelled", "expired"}:
+                errors["batch"] = _(
+                    "No se permiten pagos para grupos cancelados o vencidos."
+                )
+            if (
+                self.tenant_doctor_id
+                and self.tenant_doctor_id != batch.tenant_doctor_id
+            ):
+                errors["tenant_doctor"] = _(
+                    "El médico arrendatario no corresponde al grupo."
+                )
+            if self.currency and batch.currency != self.currency:
+                errors["currency"] = _("La moneda debe coincidir con el grupo.")
+
         if self.reservation_id:
-            if self.reservation.status == ReservationStatus.CANCELLED:
+            reservation = self.reservation
+            assert reservation is not None
+            if reservation.status == ReservationStatus.CANCELLED:
                 errors["reservation"] = _(
                     "No se permiten pagos para reservaciones canceladas."
                 )
             if self.tenant_doctor_id and self.tenant_doctor_id != (
-                self.reservation.tenant_doctor_id
+                reservation.tenant_doctor_id
             ):
                 errors["tenant_doctor"] = _(
                     "El médico arrendatario no corresponde a la reservación."
                 )
 
         if self.statement_id:
-            if (
-                self.reservation_id
-                and self.statement.reservation_id != self.reservation_id
-            ):
+            statement = self.statement
+            assert statement is not None
+            if self.reservation_id and statement.reservation_id != self.reservation_id:
                 errors["statement"] = _(
                     "El estado de cuenta no corresponde a la reservación."
                 )
-            if self.currency and self.statement.currency != self.currency:
+            if self.currency and statement.currency != self.currency:
                 errors["currency"] = _(
                     "La moneda debe coincidir con el estado de cuenta."
                 )
@@ -472,6 +515,8 @@ class Payment(BaseModel):
             errors["rejected_reason"] = _("El motivo de rechazo es obligatorio.")
 
         if self.status == PaymentStatus.VALIDATED and self.statement_id:
+            statement = self.statement
+            assert statement is not None
             validated_total = Payment.objects.filter(
                 statement_id=self.statement_id,
                 status=PaymentStatus.VALIDATED,
@@ -479,7 +524,7 @@ class Payment(BaseModel):
             ).exclude(pk=self.pk).aggregate(total=Sum("amount"))["total"] or Decimal(
                 "0.00"
             )
-            if validated_total + self.amount > self.statement.total_doctor:
+            if validated_total + self.amount > statement.total_doctor:
                 errors["amount"] = _(
                     "La suma de pagos validados no puede exceder el total médico."
                 )
@@ -497,6 +542,68 @@ class Payment(BaseModel):
         return (
             Payment.objects.filter(pk=self.pk).values_list("status", flat=True).first()
         )
+
+
+class PaymentAllocation(BaseModel):
+    payment = models.ForeignKey(
+        Payment,
+        on_delete=models.PROTECT,
+        related_name="allocations",
+        verbose_name=_("pago"),
+    )
+    reservation = models.ForeignKey(
+        "scheduling.Reservation",
+        on_delete=models.PROTECT,
+        related_name="payment_allocations",
+        verbose_name=_("reservación"),
+    )
+    statement = models.ForeignKey(
+        Statement,
+        on_delete=models.PROTECT,
+        related_name="payment_allocations",
+        verbose_name=_("estado de cuenta"),
+    )
+    amount = models.DecimalField(_("importe asignado"), max_digits=12, decimal_places=2)
+
+    class Meta:
+        verbose_name = _("asignación de pago")
+        verbose_name_plural = _("asignaciones de pago")
+        ordering = ("reservation__date", "reservation__start_time", "created_at")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("payment", "reservation"),
+                name="finance_payment_allocation_unique_reservation",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(amount__gt=0),
+                name="finance_payment_allocation_amount_positive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.payment} -> {self.reservation}: {self.amount}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, Any] = {}
+        if self.amount <= Decimal("0.00"):
+            errors["amount"] = _("El importe asignado debe ser mayor que cero.")
+        if self.statement_id and self.reservation_id:
+            if self.statement.reservation_id != self.reservation_id:
+                errors["statement"] = _(
+                    "El estado de cuenta no corresponde a la reservación."
+                )
+        if self.payment_id and self.payment.batch_id and self.reservation_id:
+            if self.reservation.batch_id != self.payment.batch_id:
+                errors["reservation"] = _(
+                    "La reservación no pertenece al grupo del pago."
+                )
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class SettlementStatus(models.TextChoices):

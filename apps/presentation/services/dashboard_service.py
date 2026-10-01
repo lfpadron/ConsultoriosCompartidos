@@ -26,6 +26,7 @@ from apps.catalog.models import (
 )
 from apps.finance.models import (
     Payment,
+    PaymentAllocation,
     PaymentStatus,
     Settlement,
     SettlementStatus,
@@ -457,15 +458,29 @@ def _finance_metrics() -> dict[str, int | Decimal]:
             ReservationStatus.CONFIRMED,
         ),
     )
-    active_validated_payments = Payment.objects.filter(
+    allocated_validated_total = _decimal_sum(
+        PaymentAllocation.objects.filter(
+            payment__status=PaymentStatus.VALIDATED,
+            payment__is_deleted=False,
+            reservation__status__in=ACTIVE_RESERVATION_STATUSES,
+            reservation__is_deleted=False,
+            is_deleted=False,
+        ),
+        "amount",
+    )
+    legacy_validated_payments = Payment.objects.filter(
         status=PaymentStatus.VALIDATED,
         reservation__status__in=ACTIVE_RESERVATION_STATUSES,
         is_deleted=False,
         reservation__is_deleted=False,
+        allocations__isnull=True,
     )
 
     expected_reservation_total = _decimal_sum(active_statements, "total_doctor")
-    validated_payment_total = _decimal_sum(active_validated_payments, "amount")
+    validated_payment_total = allocated_validated_total + _decimal_sum(
+        legacy_validated_payments,
+        "amount",
+    )
     calculated_commissions = _decimal_sum(
         active_statements,
         "platform_commission",

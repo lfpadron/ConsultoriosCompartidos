@@ -96,19 +96,13 @@ SCREEN_DEFINITIONS = (
     ScreenDefinition("payments", "Pagos", "payments", "bi-credit-card"),
     ScreenDefinition("settlements", "Liquidaciones", "settlements", "bi-bank"),
     ScreenDefinition("documents", "Documentos", "documents", "bi-file-earmark-pdf"),
-    ScreenDefinition(
-        "access_credentials", "Accesos", "access_credentials", "bi-key"
-    ),
+    ScreenDefinition("access_credentials", "Accesos", "access_credentials", "bi-key"),
     ScreenDefinition("timeline", "Timeline", "timeline", "bi-diagram-3"),
     ScreenDefinition("reports", "Reportes", "reports", "bi-bar-chart"),
     ScreenDefinition("users", "Usuarios", "users", "bi-people"),
     ScreenDefinition("profile", "Perfil", "profile", "bi-person-circle"),
-    ScreenDefinition(
-        "permissions", "Permisos", "permissions", "bi-shield-lock"
-    ),
-    ScreenDefinition(
-        "administration", "Administración", "administration", "bi-gear"
-    ),
+    ScreenDefinition("permissions", "Permisos", "permissions", "bi-shield-lock"),
+    ScreenDefinition("administration", "Administración", "administration", "bi-gear"),
 )
 
 SCREEN_KEYS = {definition.key for definition in SCREEN_DEFINITIONS}
@@ -233,6 +227,7 @@ EDIT_ROUTE_NAMES = {
     "reservation_payment_policy_toggle",
     "payment_deadline_exception_create",
     "payment_register",
+    "payment_batch_submit",
     "payment_validate",
     "payment_reject",
     "payment_cancel",

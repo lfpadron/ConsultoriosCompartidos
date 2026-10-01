@@ -50,6 +50,11 @@ urlpatterns = [
     ),
     path("pagos/", views.PaymentListView.as_view(), name="payments"),
     path(
+        "reservaciones/grupos/<uuid:batch_pk>/comprobante/",
+        views.BatchPaymentSubmitView.as_view(),
+        name="payment_batch_submit",
+    ),
+    path(
         "reservaciones/<uuid:reservation_pk>/pagos/nuevo/",
         views.PaymentRegisterView.as_view(),
         name="payment_register",

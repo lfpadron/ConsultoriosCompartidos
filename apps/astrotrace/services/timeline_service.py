@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from django.db.models import Model
+from django.db.models import Model, Q
 
 from apps.astrotrace.models import TraceEvent
 from apps.catalog.models import ConsultingRoom, OwnerProfile, TenantDoctorProfile
-from apps.finance.models import Payment, RateRule, Settlement
+from apps.finance.models import Payment, PaymentAllocation, RateRule, Settlement
 from apps.scheduling.models import AvailabilityRule, Reservation
 from apps.vault.models import DocumentAsset
 
@@ -126,7 +126,17 @@ def get_timeline_for_reservation(reservation: Reservation) -> list[TimelineItem]
     )
     identifiers.update(
         ("finance.Payment", str(item.pk))
-        for item in reservation.payments.filter(is_deleted=False)
+        for item in Payment.objects.filter(
+            Q(reservation=reservation) | Q(allocations__reservation=reservation),
+            is_deleted=False,
+        ).distinct()
+    )
+    identifiers.update(
+        ("finance.PaymentAllocation", str(item.pk))
+        for item in PaymentAllocation.objects.filter(
+            reservation=reservation,
+            is_deleted=False,
+        )
     )
     identifiers.update(
         ("finance.Settlement", str(item.pk))
@@ -142,9 +152,10 @@ def get_timeline_for_reservation(reservation: Reservation) -> list[TimelineItem]
     identifiers.update(
         ("vault.DocumentAsset", str(item.pk))
         for item in DocumentAsset.objects.filter(
-            payment__reservation=reservation,
+            Q(payment__reservation=reservation)
+            | Q(payment__allocations__reservation=reservation),
             is_deleted=False,
-        )
+        ).distinct()
     )
     identifiers.update(
         ("vault.DocumentAsset", str(item.pk))

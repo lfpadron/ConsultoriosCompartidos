@@ -96,6 +96,7 @@ class DocumentListView(LoginRequiredMixin, ListView):
                 Q(room__clinic=clinic)
                 | Q(reservation__room__clinic=clinic)
                 | Q(payment__reservation__room__clinic=clinic)
+                | Q(payment__batch__room__clinic=clinic)
                 | Q(settlement__room__clinic=clinic)
             )
         if owner:
@@ -104,6 +105,7 @@ class DocumentListView(LoginRequiredMixin, ListView):
                 | Q(room__owner=owner)
                 | Q(reservation__room__owner=owner)
                 | Q(payment__reservation__room__owner=owner)
+                | Q(payment__batch__room__owner=owner)
                 | Q(settlement__owner=owner)
             )
         if room:
@@ -111,6 +113,7 @@ class DocumentListView(LoginRequiredMixin, ListView):
                 Q(room=room)
                 | Q(reservation__room=room)
                 | Q(payment__reservation__room=room)
+                | Q(payment__batch__room=room)
                 | Q(settlement__room=room)
             )
         if tenant_doctor:

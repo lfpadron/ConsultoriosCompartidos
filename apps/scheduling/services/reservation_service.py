@@ -315,7 +315,7 @@ def create_reservation_batch(
         payload=_batch_payload(batch),
     )
     if batch.batch_type == ReservationBatchType.SINGLE:
-        _send_reservation_confirmation_email(reservations[0])
+        _send_reservation_registered_email(reservations[0])
     else:
         _send_reservation_batch_registered_email(batch, reservations)
     return batch
@@ -701,7 +701,7 @@ def _send_reservation_batch_registered_email(
     )
 
 
-def _send_reservation_confirmation_email(reservation: Reservation) -> None:
+def _send_reservation_registered_email(reservation: Reservation) -> None:
     owner = reservation.room.owner
     recipients = [
         reservation.tenant_doctor.user.email,
@@ -718,7 +718,7 @@ def _send_reservation_confirmation_email(reservation: Reservation) -> None:
         f"{reservation.start_time:%H:%M} hasta las {reservation.end_time:%H:%M}"
     )
     send_mail(
-        subject=f"Consultorio {room_label}, reservación confirmada",
+        subject=f"Consultorio {room_label}, reservación registrada",
         message=message,
         from_email=settings.DEFAULT_FROM_EMAIL,
         recipient_list=recipient_list,

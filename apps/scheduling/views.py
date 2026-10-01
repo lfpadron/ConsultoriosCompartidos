@@ -23,10 +23,17 @@ from django.views.generic.edit import FormMixin, FormView
 from apps.astrotrace.services import record_event
 from apps.catalog.models import ConsultingRoom
 from apps.core.form_utils import django_weekday_values
-from apps.core.permissions import can_edit_screen, scope_queryset_for_user
+from apps.core.permissions import (
+    can_edit_screen,
+    get_user_roles,
+    scope_queryset_for_user,
+)
 from apps.core.templatetags.clinic_time import format_time_for_clinic
 from apps.finance.models import RateRule, StatementStatus
-from apps.finance.services.payment_service import get_payment_summary_for_reservation
+from apps.finance.services.payment_service import (
+    get_payment_summary_for_batch,
+    get_payment_summary_for_reservation,
+)
 from apps.finance.services.pricing_engine import (
     PricingConfigurationError,
     calculate_block_price,
@@ -35,6 +42,7 @@ from apps.finance.services.settlement_service import (
     get_settlement_summary_for_reservation,
 )
 from apps.finance.services.statement_engine import StatementGenerationError
+from apps.identity.models import UserRole
 from apps.integration.services.access_simulator import get_access_status_for_reservation
 from apps.scheduling.forms import (
     AvailabilityExceptionForm,
@@ -1213,6 +1221,28 @@ class ReservationBatchDetailView(LoginRequiredMixin, DetailView):
             "room",
             "tenant_doctor",
         ).order_by("date", "start_time")
+        payment_summary = get_payment_summary_for_batch(reservation_batch)
+        context["payment_summary"] = payment_summary
+        context["batch_payments"] = payment_summary.payments
+        roles = get_user_roles(self.request.user)
+        can_submit_as_user = (
+            reservation_batch.tenant_doctor.user_id == self.request.user.pk
+            or bool(roles.intersection({UserRole.SUPERADMIN, UserRole.ADMIN}))
+        )
+        context["can_submit_payment_proof"] = (
+            can_submit_as_user
+            and reservation_batch.payment_proof_submitted_at is None
+            and reservation_batch.status
+            in {
+                ReservationBatchStatus.REQUESTED,
+                ReservationBatchStatus.PARTIALLY_CANCELLED,
+            }
+            and (
+                reservation_batch.payment_deadline_at is None
+                or reservation_batch.payment_deadline_at >= timezone.now()
+            )
+            and payment_summary.total_to_pay > 0
+        )
         context["can_manage_payment_deadline"] = can_edit_screen(
             self.request.user,
             "payment_deadlines",

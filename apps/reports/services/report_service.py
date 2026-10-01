@@ -16,6 +16,7 @@ from apps.astrotrace.services.timeline_service import (
 from apps.catalog.models import ConsultingRoom
 from apps.finance.models import (
     Payment,
+    PaymentAllocation,
     PaymentStatus,
     Settlement,
     Statement,
@@ -196,14 +197,7 @@ def get_income_by_room_report(filters: dict[str, Any] | None = None) -> ReportRe
         room_reservations = reservations.filter(room=room)
         statements = _current_statements().filter(reservation__in=room_reservations)
         subtotal = _decimal_sum(statements, "subtotal")
-        validated_payments = _decimal_sum(
-            Payment.objects.filter(
-                reservation__in=room_reservations,
-                status=PaymentStatus.VALIDATED,
-                is_deleted=False,
-            ),
-            "amount",
-        )
+        validated_payments = _validated_payment_total(room_reservations)
         balance = max(subtotal - validated_payments, Decimal("0.00"))
         commissions = _decimal_sum(statements, "platform_commission")
         owner_net = _decimal_sum(statements, "owner_net")
@@ -248,8 +242,12 @@ def get_payments_report(filters: dict[str, Any] | None = None) -> ReportResult:
         reservations = reservations.filter(tenant_doctor=tenant_doctor)
     if status:
         reservations = reservations.filter(
-            payments__status=status,
-            payments__is_deleted=False,
+            Q(payments__status=status, payments__is_deleted=False)
+            | Q(
+                payment_allocations__payment__status=status,
+                payment_allocations__payment__is_deleted=False,
+                payment_allocations__is_deleted=False,
+            )
         ).distinct()
 
     rows: list[dict[str, Any]] = []
@@ -261,14 +259,7 @@ def get_payments_report(filters: dict[str, Any] | None = None) -> ReportResult:
     for reservation in reservations:
         statement = _current_statement_for_reservation(reservation)
         total = statement.total_doctor if statement is not None else Decimal("0.00")
-        paid = _decimal_sum(
-            Payment.objects.filter(
-                reservation=reservation,
-                status=PaymentStatus.VALIDATED,
-                is_deleted=False,
-            ),
-            "amount",
-        )
+        paid = _validated_payment_total(Reservation.objects.filter(pk=reservation.pk))
         balance = max(total - paid, Decimal("0.00"))
         totals["total_estado_cuenta"] += total
         totals["pagado_validado"] += paid
@@ -576,7 +567,10 @@ def _current_statement_for_reservation(reservation: Reservation) -> Statement | 
 
 def _payment_status_summary(reservation: Reservation) -> str:
     statuses = list(
-        Payment.objects.filter(reservation=reservation, is_deleted=False)
+        Payment.objects.filter(
+            Q(reservation=reservation) | Q(allocations__reservation=reservation),
+            is_deleted=False,
+        )
         .order_by("status")
         .values_list("status", flat=True)
         .distinct()
@@ -585,6 +579,22 @@ def _payment_status_summary(reservation: Reservation) -> str:
         return "Sin pagos"
     labels = dict(PaymentStatus.choices)
     return ", ".join(str(labels.get(status, status)) for status in statuses)
+
+
+def _validated_payment_total(reservations: QuerySet[Reservation]) -> Decimal:
+    allocated = PaymentAllocation.objects.filter(
+        reservation__in=reservations,
+        payment__status=PaymentStatus.VALIDATED,
+        payment__is_deleted=False,
+        is_deleted=False,
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+    legacy = Payment.objects.filter(
+        reservation__in=reservations,
+        status=PaymentStatus.VALIDATED,
+        is_deleted=False,
+        allocations__isnull=True,
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+    return allocated + legacy
 
 
 def _availability_date_range(filters: dict[str, Any]) -> tuple[date, date]:

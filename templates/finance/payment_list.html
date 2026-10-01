@@ -64,7 +64,7 @@
         <table class="table table-hover align-middle mb-0">
           <thead>
             <tr>
-              <th scope="col">Reservación</th>
+              <th scope="col">Reservación o grupo</th>
               <th scope="col">Médico</th>
               <th scope="col">Fecha pago</th>
               <th scope="col">Importe</th>
@@ -76,7 +76,14 @@
           <tbody>
             {% for payment in payments %}
               <tr>
-                <td>{{ payment.reservation }}</td>
+                <td>
+                  {% if payment.batch and not payment.reservation %}
+                    <a hx-boost="false" href="{% url 'reservation_batch_detail' payment.batch.pk %}">{{ payment.batch.reference }}</a>
+                    <div class="small text-secondary">{{ payment.batch.room }}</div>
+                  {% else %}
+                    {{ payment.reservation }}
+                  {% endif %}
+                </td>
                 <td>{{ payment.tenant_doctor }}</td>
                 <td>{{ payment.payment_date|date:"d/m/Y" }}</td>
                 <td>{{ payment.amount }} {{ payment.currency }}</td>

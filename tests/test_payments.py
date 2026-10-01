@@ -13,6 +13,7 @@ from apps.finance.services.payment_service import (
     reject_payment,
     validate_payment,
 )
+from apps.identity.models import UserRole
 from apps.scheduling.models import ReservationStatus
 from apps.scheduling.services.reservation_service import cancel_reservation
 from tests.test_reservations import create_user, create_valid_reservation
@@ -239,6 +240,8 @@ def test_payment_list_responds_200(client: Any) -> None:
 def test_register_payment_from_ui(client: Any) -> None:
     user = create_user("registrar-pago-ui@example.com")
     reservation = create_valid_reservation(room_name="Consultorio UI Registrar Pago")
+    reservation.batch = None
+    reservation.save(update_fields=["batch", "updated_at"])
     client.force_login(user)
 
     response = client.post(
@@ -260,6 +263,8 @@ def test_register_payment_from_ui(client: Any) -> None:
 @pytest.mark.django_db
 def test_validate_payment_from_ui(client: Any) -> None:
     user = create_user("validar-pago-ui@example.com")
+    user.role = UserRole.ADMIN
+    user.save(update_fields=["role"])
     reservation = create_valid_reservation(room_name="Consultorio UI Validar Pago")
     payment = create_registered_payment(reservation, amount=Decimal("375.00"))
     client.force_login(user)

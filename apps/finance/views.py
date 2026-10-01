@@ -9,17 +9,23 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import ValidationError
 from django.db.models import Model, Q, QuerySet
 from django.forms import ModelForm
-from django.http import HttpRequest, HttpResponse
-from django.shortcuts import redirect
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBase,
+    HttpResponseForbidden,
+)
+from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views.generic import DetailView, ListView, TemplateView
 from django.views.generic.edit import FormMixin
 
 from apps.astrotrace.services import record_event
 from apps.core.form_utils import django_weekday_values
-from apps.core.permissions import scope_queryset_for_user
+from apps.core.permissions import get_user_roles, scope_queryset_for_user
 from apps.core.templatetags.clinic_time import format_time_for_clinic
 from apps.finance.forms import (
+    BatchPaymentSubmissionForm,
     PaymentFilterForm,
     PaymentRegistrationForm,
     PaymentRejectForm,
@@ -40,9 +46,11 @@ from apps.finance.models import (
 )
 from apps.finance.services.payment_service import (
     cancel_payment,
+    get_payment_summary_for_batch,
     get_payment_summary_for_reservation,
     register_payment,
     reject_payment,
+    submit_batch_payment,
     validate_payment,
 )
 from apps.finance.services.settlement_service import (
@@ -51,11 +59,24 @@ from apps.finance.services.settlement_service import (
     get_settlement_summary_for_owner,
     mark_settlement_as_paid,
 )
-from apps.scheduling.models import Reservation, Weekday
+from apps.identity.models import UserRole
+from apps.scheduling.models import Reservation, ReservationBatch, Weekday
 from apps.vault.services.document_service import (
     get_document_field_for_object,
     get_documents_for_object,
 )
+
+
+def _user_can_review_payments(user: Any) -> bool:
+    return bool(
+        get_user_roles(user).intersection({UserRole.SUPERADMIN, UserRole.ADMIN})
+    )
+
+
+def _user_can_submit_batch_payment(user: Any, batch: ReservationBatch) -> bool:
+    if _user_can_review_payments(user):
+        return True
+    return batch.tenant_doctor.user_id == getattr(user, "pk", None)
 
 
 def resolve_value(instance: RateRule, field_path: str) -> str:
@@ -510,6 +531,10 @@ class PaymentListView(LoginRequiredMixin, ListView):
 
     def get_queryset(self) -> QuerySet[Payment]:
         queryset = Payment.objects.filter(is_deleted=False).select_related(
+            "batch",
+            "batch__room",
+            "batch__room__clinic",
+            "batch__room__owner",
             "reservation",
             "reservation__room",
             "reservation__room__clinic",
@@ -536,6 +561,9 @@ class PaymentListView(LoginRequiredMixin, ListView):
             queryset = queryset.filter(
                 Q(reference__icontains=search_query)
                 | Q(notes__icontains=search_query)
+                | Q(batch__reference__icontains=search_query)
+                | Q(batch__room__name__icontains=search_query)
+                | Q(batch__room__clinic__name__icontains=search_query)
                 | Q(reservation__room__name__icontains=search_query)
                 | Q(reservation__room__clinic__name__icontains=search_query)
                 | Q(tenant_doctor__display_name__icontains=search_query)
@@ -544,11 +572,15 @@ class PaymentListView(LoginRequiredMixin, ListView):
         if status:
             queryset = queryset.filter(status=status)
         if clinic:
-            queryset = queryset.filter(reservation__room__clinic=clinic)
+            queryset = queryset.filter(
+                Q(batch__room__clinic=clinic) | Q(reservation__room__clinic=clinic)
+            )
         if owner:
-            queryset = queryset.filter(reservation__room__owner=owner)
+            queryset = queryset.filter(
+                Q(batch__room__owner=owner) | Q(reservation__room__owner=owner)
+            )
         if room:
-            queryset = queryset.filter(reservation__room=room)
+            queryset = queryset.filter(Q(batch__room=room) | Q(reservation__room=room))
         if tenant_doctor:
             queryset = queryset.filter(tenant_doctor=tenant_doctor)
         queryset = queryset.filter(
@@ -556,9 +588,14 @@ class PaymentListView(LoginRequiredMixin, ListView):
         )
         if weekdays:
             queryset = queryset.filter(
-                reservation__date__week_day__in=django_weekday_values(weekdays)
+                Q(reservation__date__week_day__in=django_weekday_values(weekdays))
+                | Q(
+                    allocations__reservation__date__week_day__in=(
+                        django_weekday_values(weekdays)
+                    )
+                )
             )
-        return scope_queryset_for_user(queryset, self.request.user)
+        return scope_queryset_for_user(queryset, self.request.user).distinct()
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
@@ -572,14 +609,26 @@ class PaymentDetailView(LoginRequiredMixin, DetailView):
     context_object_name = "payment"
 
     def get_queryset(self) -> QuerySet[Payment]:
-        queryset = Payment.objects.filter(is_deleted=False).select_related(
-            "reservation",
-            "reservation__room",
-            "reservation__room__clinic",
-            "statement",
-            "tenant_doctor",
-            "tenant_doctor__user",
-            "validated_by",
+        queryset = (
+            Payment.objects.filter(is_deleted=False)
+            .select_related(
+                "batch",
+                "batch__room",
+                "batch__room__clinic",
+                "batch__room__owner",
+                "reservation",
+                "reservation__room",
+                "reservation__room__clinic",
+                "statement",
+                "tenant_doctor",
+                "tenant_doctor__user",
+                "validated_by",
+            )
+            .prefetch_related(
+                "allocations",
+                "allocations__reservation",
+                "allocations__statement",
+            )
         )
         return scope_queryset_for_user(queryset, self.request.user)
 
@@ -587,9 +636,21 @@ class PaymentDetailView(LoginRequiredMixin, DetailView):
         context = super().get_context_data(**kwargs)
         payment = context["payment"]
         context["page_title"] = "Detalle de pago"
-        context["payment_summary"] = get_payment_summary_for_reservation(
-            payment.reservation
+        context["is_group_payment"] = (
+            payment.batch is not None and payment.reservation is None
         )
+        if context["is_group_payment"]:
+            context["payment_summary"] = get_payment_summary_for_batch(payment.batch)
+            context["allocations"] = payment.allocations.filter(
+                is_deleted=False
+            ).select_related("reservation", "statement")
+            context["payment_room"] = payment.batch.room
+        elif payment.reservation is not None:
+            context["payment_summary"] = get_payment_summary_for_reservation(
+                payment.reservation
+            )
+            context["payment_room"] = payment.reservation.room
+        context["can_review_payment"] = _user_can_review_payments(self.request.user)
         context["related_documents"] = get_documents_for_object(payment)
         context["document_upload_field"] = get_document_field_for_object(payment)
         return context
@@ -599,13 +660,32 @@ class PaymentRegisterView(LoginRequiredMixin, FormMixin, TemplateView):
     template_name = "finance/payment_form.html"
     form_class = PaymentRegistrationForm
 
+    def dispatch(
+        self,
+        request: HttpRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> HttpResponseBase:
+        reservation = self.get_reservation()
+        if reservation.batch_id:
+            messages.info(
+                request,
+                "Esta reservación utiliza un comprobante agrupado.",
+            )
+            return redirect("payment_batch_submit", batch_pk=reservation.batch_id)
+        return super().dispatch(request, *args, **kwargs)
+
     def get_reservation(self) -> Reservation:
-        return Reservation.objects.select_related(
+        queryset = Reservation.objects.select_related(
             "room",
             "room__clinic",
             "tenant_doctor",
             "tenant_doctor__user",
-        ).get(pk=self.kwargs["reservation_pk"], is_deleted=False)
+        ).filter(is_deleted=False)
+        return get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),
+            pk=self.kwargs["reservation_pk"],
+        )
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
@@ -643,14 +723,114 @@ class PaymentRegisterView(LoginRequiredMixin, FormMixin, TemplateView):
         return redirect("payment_detail", pk=payment.pk)
 
 
-class PaymentValidateView(LoginRequiredMixin, TemplateView):
-    template_name = "finance/payment_validate.html"
+class BatchPaymentSubmitView(LoginRequiredMixin, FormMixin, TemplateView):
+    template_name = "finance/batch_payment_form.html"
+    form_class = BatchPaymentSubmissionForm
+
+    def get_batch(self) -> ReservationBatch:
+        queryset = ReservationBatch.objects.filter(is_deleted=False).select_related(
+            "room",
+            "room__clinic",
+            "room__owner",
+            "tenant_doctor",
+            "tenant_doctor__user",
+        )
+        return get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),
+            pk=self.kwargs["batch_pk"],
+        )
+
+    def dispatch(
+        self,
+        request: HttpRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> HttpResponseBase:
+        batch = self.get_batch()
+        if not _user_can_submit_batch_payment(request.user, batch):
+            return HttpResponseForbidden(
+                "Sólo el médico arrendatario del grupo puede enviar el comprobante."
+            )
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self) -> dict[str, Any]:
+        kwargs = super().get_form_kwargs()
+        batch = self.get_batch()
+        summary = get_payment_summary_for_batch(batch)
+        kwargs["required_total"] = summary.total_to_pay
+        kwargs["currency"] = summary.currency
+        return kwargs
+
+    def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
+        context = super().get_context_data(**kwargs)
+        batch = self.get_batch()
+        context["page_title"] = "Enviar comprobante de pago"
+        context["reservation_batch"] = batch
+        context["payment_summary"] = get_payment_summary_for_batch(batch)
+        return context
+
+    def post(self, request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        form = self.get_form()
+        if form.is_valid():
+            return self.form_valid(form)
+        return self.form_invalid(form)
+
+    def form_valid(self, form: BatchPaymentSubmissionForm) -> HttpResponse:
+        batch = self.get_batch()
+        try:
+            payment = submit_batch_payment(
+                batch=batch,
+                amount=form.cleaned_data["amount"],
+                currency=form.cleaned_data["currency"],
+                method=form.cleaned_data["method"],
+                reference=form.cleaned_data["reference"],
+                payment_date=form.cleaned_data["payment_date"],
+                receipt=form.cleaned_data["receipt"],
+                notes=form.cleaned_data["notes"],
+                actor=cast(Model, self.request.user),
+            )
+        except ValidationError as exc:
+            form.add_error(None, exc)
+            return self.form_invalid(form)
+        messages.success(
+            self.request,
+            "Comprobante enviado. La reservación queda pendiente de validación.",
+        )
+        return redirect("payment_detail", pk=payment.pk)
+
+
+class PaymentReviewMixin:
+    def dispatch(
+        self,
+        request: HttpRequest,
+        *args: Any,
+        **kwargs: Any,
+    ) -> HttpResponseBase:
+        if not _user_can_review_payments(request.user):
+            return HttpResponseForbidden(
+                "Sólo un administrador puede validar o rechazar comprobantes."
+            )
+        return super().dispatch(request, *args, **kwargs)  # type: ignore[misc]
 
     def get_payment(self) -> Payment:
-        return Payment.objects.select_related("reservation", "statement").get(
-            pk=self.kwargs["pk"],
-            is_deleted=False,
+        queryset = Payment.objects.filter(is_deleted=False).select_related(
+            "batch",
+            "batch__room",
+            "reservation",
+            "statement",
         )
+        return get_object_or_404(
+            scope_queryset_for_user(queryset, self.request.user),  # type: ignore[attr-defined]
+            pk=self.kwargs["pk"],  # type: ignore[attr-defined]
+        )
+
+
+class PaymentValidateView(
+    LoginRequiredMixin,
+    PaymentReviewMixin,
+    TemplateView,
+):
+    template_name = "finance/payment_validate.html"
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
@@ -670,15 +850,14 @@ class PaymentValidateView(LoginRequiredMixin, TemplateView):
         return redirect("payment_detail", pk=payment.pk)
 
 
-class PaymentRejectView(LoginRequiredMixin, FormMixin, TemplateView):
+class PaymentRejectView(
+    LoginRequiredMixin,
+    PaymentReviewMixin,
+    FormMixin,
+    TemplateView,
+):
     template_name = "finance/payment_reject.html"
     form_class = PaymentRejectForm
-
-    def get_payment(self) -> Payment:
-        return Payment.objects.select_related("reservation", "statement").get(
-            pk=self.kwargs["pk"],
-            is_deleted=False,
-        )
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)
@@ -705,14 +884,12 @@ class PaymentRejectView(LoginRequiredMixin, FormMixin, TemplateView):
         return self.form_invalid(form)
 
 
-class PaymentCancelView(LoginRequiredMixin, TemplateView):
+class PaymentCancelView(
+    LoginRequiredMixin,
+    PaymentReviewMixin,
+    TemplateView,
+):
     template_name = "finance/payment_cancel.html"
-
-    def get_payment(self) -> Payment:
-        return Payment.objects.select_related("reservation", "statement").get(
-            pk=self.kwargs["pk"],
-            is_deleted=False,
-        )
 
     def get_context_data(self, **kwargs: Any) -> dict[str, Any]:
         context = super().get_context_data(**kwargs)

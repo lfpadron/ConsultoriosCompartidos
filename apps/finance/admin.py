@@ -4,6 +4,7 @@ from django.contrib import admin
 
 from apps.finance.models import (
     Payment,
+    PaymentAllocation,
     RateRule,
     RoomRateDiscount,
     Settlement,
@@ -79,6 +80,7 @@ class StatementAdmin(admin.ModelAdmin):
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
     list_display = (
+        "batch",
         "reservation",
         "statement",
         "tenant_doctor",
@@ -96,11 +98,24 @@ class PaymentAdmin(admin.ModelAdmin):
         "payment_date",
     )
     search_fields = (
+        "batch__reference",
+        "batch__room__name",
         "reservation__room__name",
         "statement__calculation_hash",
         "tenant_doctor__display_name",
         "tenant_doctor__user__email",
         "reference",
+    )
+
+
+@admin.register(PaymentAllocation)
+class PaymentAllocationAdmin(admin.ModelAdmin):
+    list_display = ("payment", "reservation", "statement", "amount")
+    list_filter = ("payment__status", "reservation__room__clinic")
+    search_fields = (
+        "payment__batch__reference",
+        "payment__reference",
+        "reservation__room__name",
     )
 
 

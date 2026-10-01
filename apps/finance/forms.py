@@ -345,6 +345,41 @@ class PaymentRegistrationForm(BootstrapModelForm):
         }
 
 
+class BatchPaymentSubmissionForm(PaymentRegistrationForm):
+    def __init__(
+        self,
+        *args: Any,
+        required_total: Decimal,
+        currency: str,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.required_total = required_total
+        amount_field = self.fields["amount"]
+        amount_field.initial = required_total
+        amount_field.widget.attrs["min"] = f"{required_total:.2f}"
+        self.fields["currency"].initial = currency
+        self.fields["currency"].widget.attrs["readonly"] = True
+        self.fields["receipt"].required = True
+        self.fields["receipt"].help_text = (
+            "Adjunta un comprobante que cubra el total del grupo."
+        )
+
+    def clean_amount(self) -> Decimal:
+        amount = self.cleaned_data["amount"]
+        if amount < self.required_total:
+            raise forms.ValidationError(
+                f"El comprobante debe cubrir al menos {self.required_total:.2f}."
+            )
+        return amount
+
+    def clean_currency(self) -> str:
+        currency = self.cleaned_data["currency"]
+        if currency != self.fields["currency"].initial:
+            raise forms.ValidationError("La moneda debe coincidir con el grupo.")
+        return currency
+
+
 class PaymentRejectForm(forms.Form):
     reason = forms.CharField(
         label="Motivo de rechazo",

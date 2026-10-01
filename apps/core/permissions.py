@@ -263,6 +263,11 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
     if model_label == "finance.Statement":
         return queryset.filter(reservation__room__clinic__in=clinics)
     if model_label == "finance.Payment":
+        return queryset.filter(
+            Q(reservation__room__clinic__in=clinics)
+            | Q(batch__room__clinic__in=clinics)
+        ).distinct()
+    if model_label == "finance.PaymentAllocation":
         return queryset.filter(reservation__room__clinic__in=clinics)
     if model_label == "finance.Settlement":
         return queryset.filter(room__clinic__in=clinics)
@@ -274,6 +279,7 @@ def _scope_business_admin_queryset(queryset: QuerySet[Any], user: Any) -> QueryS
             | Q(tenant_doctor__assigned_rooms__clinic__in=clinics)
             | Q(reservation__room__clinic__in=clinics)
             | Q(payment__reservation__room__clinic__in=clinics)
+            | Q(payment__batch__room__clinic__in=clinics)
             | Q(settlement__room__clinic__in=clinics)
         ).distinct()
     if model_label == "integration.AccessCredential":
@@ -331,12 +337,19 @@ def _scope_owner_queryset(queryset: QuerySet[Any], owner: Any) -> QuerySet[Any]:
         return queryset.filter(batch__room__owner=owner)
     if model_label == "finance.Settlement":
         return queryset.filter(owner=owner)
+    if model_label == "finance.Payment":
+        return queryset.filter(
+            Q(reservation__room__owner=owner) | Q(batch__room__owner=owner)
+        ).distinct()
+    if model_label == "finance.PaymentAllocation":
+        return queryset.filter(reservation__room__owner=owner)
     if model_label == "vault.DocumentAsset":
         return queryset.filter(
             Q(owner=owner)
             | Q(room__owner=owner)
             | Q(reservation__room__owner=owner)
             | Q(payment__reservation__room__owner=owner)
+            | Q(payment__batch__room__owner=owner)
             | Q(settlement__owner=owner)
         )
     return queryset
@@ -393,6 +406,8 @@ def _scope_tenant_doctor_queryset(
         return queryset.filter(batch__tenant_doctor=tenant_doctor)
     if model_label == "finance.Payment":
         return queryset.filter(tenant_doctor=tenant_doctor)
+    if model_label == "finance.PaymentAllocation":
+        return queryset.filter(reservation__tenant_doctor=tenant_doctor)
     if model_label == "vault.DocumentAsset":
         return queryset.filter(
             Q(tenant_doctor=tenant_doctor)
@@ -457,6 +472,10 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
     if model_label == "scheduling.PaymentDeadlineException":
         return queryset.filter(batch__room__owner__in=owners)
     if model_label == "finance.Payment":
+        return queryset.filter(
+            Q(reservation__room__owner__in=owners) | Q(batch__room__owner__in=owners)
+        ).distinct()
+    if model_label == "finance.PaymentAllocation":
         return queryset.filter(reservation__room__owner__in=owners)
     if model_label == "finance.Settlement":
         return queryset.filter(owner__in=owners)
@@ -466,6 +485,7 @@ def _scope_assistant_queryset(queryset: QuerySet[Any], user: Any) -> QuerySet[An
             | Q(room__owner__in=owners)
             | Q(reservation__room__owner__in=owners)
             | Q(payment__reservation__room__owner__in=owners)
+            | Q(payment__batch__room__owner__in=owners)
             | Q(settlement__owner__in=owners)
         ).distinct()
     if model_label == "integration.AccessCredential":

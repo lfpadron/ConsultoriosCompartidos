@@ -1046,7 +1046,7 @@ def test_create_reservation_applies_best_discount_to_statement_and_reservation()
 
 
 @pytest.mark.django_db
-def test_create_reservation_from_ui_sends_confirmation_email(
+def test_create_reservation_from_ui_sends_registration_email(
     client: Any,
     settings: Any,
 ) -> None:
@@ -1074,7 +1074,7 @@ def test_create_reservation_from_ui_sends_confirmation_email(
     assert response.status_code == 302
     assert len(mail.outbox) == 1
     message = mail.outbox[0]
-    assert message.subject == "Consultorio 101, reservación confirmada"
+    assert message.subject == "Consultorio 101, reservación registrada"
     assert set(message.to) == {doctor.user.email, room.owner.user.email}
     assert "Estimado Dr." in message.body
     assert "29/06/2026" in message.body
